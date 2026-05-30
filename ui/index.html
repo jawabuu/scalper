@@ -291,6 +291,121 @@
 
   .err { color: var(--red); font-size: 11px; margin-top: 6px; }
 
+  /* ── Login screen ── */
+  .login-screen {
+    display: none;
+    position: fixed; inset: 0;
+    background: var(--bg);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .login-screen.visible { display: flex; }
+
+  .login-card {
+    background: var(--bg2);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 48px 56px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    min-width: 320px;
+  }
+
+  .login-logo {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .login-sub {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+    margin-top: -12px;
+  }
+
+  .btn-github {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 12px 24px;
+    border-radius: 5px;
+    border: 1px solid var(--border2);
+    background: var(--bg3);
+    color: var(--text);
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s;
+    width: 100%;
+    justify-content: center;
+  }
+  .btn-github:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,212,170,0.06);
+  }
+  .btn-github svg { flex-shrink: 0; }
+
+  .login-error {
+    font-size: 11px;
+    color: var(--red);
+    letter-spacing: 0.05em;
+    display: none;
+  }
+  .login-error.visible { display: block; }
+
+  /* ── User avatar in header ── */
+  .user-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .user-avatar {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 1px solid var(--border2);
+  }
+
+  .user-name {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+  }
+
+  .btn-logout {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 5px 12px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .btn-logout:hover {
+    border-color: var(--red);
+    color: var(--red);
+    background: rgba(255,77,106,0.06);
+  }
+
   /* ── Per-position close button ── */
   .btn-row-close {
     font-family: var(--mono);
@@ -335,6 +450,21 @@
 </style>
 </head>
 <body>
+<!-- Login screen — shown when not authenticated -->
+<div class="login-screen" id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">⬡ Scalper</div>
+    <div class="login-sub">Trading Dashboard</div>
+    <a class="btn-github" href="/auth/login">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+      </svg>
+      Login with GitHub
+    </a>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
 <div class="shell" id="app">
   <header>
     <div class="pulse" id="pulse"></div>
@@ -342,6 +472,11 @@
     <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
     <div class="header-sep"></div>
     <span class="refresh-hint" id="refresh-hint">—</span>
+    <div class="user-info" id="user-info" style="display:none">
+      <img class="user-avatar" id="user-avatar" src="" alt=""/>
+      <span class="user-name" id="user-name"></span>
+      <button class="btn-logout" onclick="doLogout()">Logout</button>
+    </div>
   </header>
 
   <main>
@@ -419,6 +554,57 @@
 
 <script>
 const API = window.SCALPER_API_URL || '';
+let _authed = false;
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  try {
+    const r = await fetch(API + '/auth/me', { credentials: 'include' });
+    const data = await r.json();
+    if (data.authenticated) {
+      _authed = true;
+      document.getElementById('login-screen').classList.remove('visible');
+      document.getElementById('app').style.visibility = 'visible';
+      // Show user info in header
+      const info = document.getElementById('user-info');
+      info.style.display = 'flex';
+      document.getElementById('user-avatar').src = data.avatar_url || '';
+      document.getElementById('user-name').textContent = data.username || '';
+      return true;
+    }
+  } catch(e) {}
+  _authed = false;
+  document.getElementById('login-screen').classList.add('visible');
+  document.getElementById('app').style.visibility = 'hidden';
+
+  // Show error from query param if present
+  const err = new URLSearchParams(window.location.search).get('error');
+  const errEl = document.getElementById('login-error');
+  if (err) {
+    const msgs = {
+      unauthorized: 'Your GitHub account is not authorized.',
+      invalid_state: 'Login session expired. Please try again.',
+      state_expired: 'Login session expired. Please try again.',
+      no_token: 'GitHub authorization failed. Please try again.',
+      github_error: 'Could not reach GitHub. Please try again.',
+    };
+    errEl.textContent = msgs[err] || `Error: ${err}`;
+    errEl.classList.add('visible');
+    // Clean up URL
+    window.history.replaceState({}, '', '/');
+  } else {
+    errEl.classList.remove('visible');
+  }
+  return false;
+}
+
+async function doLogout() {
+  await fetch(API + '/auth/logout', { method: 'POST', credentials: 'include' });
+  _authed = false;
+  document.getElementById('user-info').style.display = 'none';
+  document.getElementById('login-screen').classList.add('visible');
+  document.getElementById('app').style.visibility = 'hidden';
+}
 
 let killed = false;
 
@@ -463,7 +649,14 @@ function setKillUI(isKilled) {
 }
 
 async function api(path, method='GET') {
-  const r = await fetch(API + path, { method });
+  const r = await fetch(API + path, { method, credentials: 'include' });
+  if (r.status === 401) {
+    // Session expired — show login screen
+    _authed = false;
+    document.getElementById('login-screen').classList.add('visible');
+    document.getElementById('app').style.visibility = 'hidden';
+    throw new Error('401');
+  }
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
 }
@@ -647,8 +840,27 @@ async function doCloseAll() {
   } catch(e) { setEl('ctrl-msg', `Error: ${e.message}`); }
 }
 
-refresh();
-setInterval(refresh, 10000);
+// Initial auth check then start polling
+(async () => {
+  const ok = await checkAuth();
+  if (ok) {
+    refresh();
+    setInterval(async () => {
+      if (!_authed) return;
+      refresh();
+    }, 10000);
+  } else {
+    // Re-check auth every 2s until logged in
+    const authPoll = setInterval(async () => {
+      const ok = await checkAuth();
+      if (ok) {
+        clearInterval(authPoll);
+        refresh();
+        setInterval(async () => { if (_authed) refresh(); }, 10000);
+      }
+    }, 2000);
+  }
+})();
 </script>
 </body>
 </html>

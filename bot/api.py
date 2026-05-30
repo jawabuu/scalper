@@ -2,17 +2,40 @@
 REST API for the scalping bot dashboard.
 Runs in a background thread alongside the engine.
 All reads are non-blocking; kill switch write is thread-safe via Python GIL + bool assignment.
+
+All /api/* routes require GitHub OAuth authentication.
+Auth routes (/auth/*) are public.
 """
 
 import time
+import logging
 import threading
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from .auth import (
+    get_current_user,
+    login_route,
+    callback_route,
+    me_route,
+    logout_route,
+)
+
+log = logging.getLogger("api")
 
 # Engine is injected at startup — see main.py
 _engine = None
+
+
+def _require_auth(request: Request) -> dict:
+    """FastAPI dependency — returns user dict or raises 401."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
 
 def create_app(engine) -> FastAPI:
@@ -26,42 +49,57 @@ def create_app(engine) -> FastAPI:
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
 
+    # ── Auth routes (public) ─────────────────────────────────────────────────
+
+    @app.get("/auth/login")
+    def login(request: Request):
+        return login_route(request)
+
+    @app.get("/auth/callback")
+    async def callback(request: Request):
+        return await callback_route(request)
+
+    @app.get("/auth/me")
+    def me(request: Request):
+        return me_route(request)
+
+    @app.post("/auth/logout")
+    def logout(request: Request):
+        return logout_route(request)
+
+    # ── Bot API routes (require auth) ────────────────────────────────────────
+
     @app.get("/api/status")
-    def status():
+    def status(user: dict = Depends(_require_auth)):
         """Bot health, mode, and current cycle info."""
-        # Fetch live balance directly — don't serve the stale engine cache
-        # which only refreshes each cycle. This keeps the UI consistent
-        # immediately after a trade executes.
         try:
             raw = _engine.exchange.fetch_balance()
             balance_usdt = float(raw.get("USDT", {}).get("free") or _engine.last_balance)
-            _engine.last_balance = balance_usdt  # keep cache in sync
+            _engine.last_balance = balance_usdt
         except Exception:
             balance_usdt = _engine.last_balance
 
         return {
-            "running":       True,
-            "testnet":       _engine.cfg.testnet,
-            "kill_switch":   _engine.kill_switch,
-            "timeframe":     _engine.cfg.timeframe,
-            "last_cycle_ts": _engine.last_cycle_ts,
+            "running":          True,
+            "testnet":          _engine.cfg.testnet,
+            "kill_switch":      _engine.kill_switch,
+            "timeframe":        _engine.cfg.timeframe,
+            "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
-                                 if _engine.last_cycle_ts else None,
-            "balance_usdt":  balance_usdt,
-            "server_time":   datetime.now(timezone.utc).isoformat(),
+                                if _engine.last_cycle_ts else None,
+            "balance_usdt":     balance_usdt,
+            "server_time":      datetime.now(timezone.utc).isoformat(),
         }
 
     @app.get("/api/positions")
-    def positions():
+    def positions(user: dict = Depends(_require_auth)):
         """All currently open positions with live unrealised P&L."""
-        # Use store's thread-safe snapshot — avoids RuntimeError if engine
-        # adds/removes a position while we're iterating.
         snapshot = _engine.positions.snapshot()
         result = []
         for sym, pos in snapshot.items():
-            # Best-effort live price from last OHLCV — no extra API call
             try:
                 ticker = _engine.exchange.fetch_ticker(sym)
                 current_price = ticker["last"] or pos.entry_price
@@ -85,7 +123,7 @@ def create_app(engine) -> FastAPI:
         return result
 
     @app.get("/api/trades")
-    def trades(limit: int = 100):
+    def trades(limit: int = 100, user: dict = Depends(_require_auth)):
         """Closed trade history, most recent first."""
         all_trades = _engine.trade_log.all()
         recent = list(reversed(all_trades))[:limit]
@@ -105,40 +143,37 @@ def create_app(engine) -> FastAPI:
         ]
 
     @app.get("/api/summary")
-    def summary():
+    def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
 
     @app.post("/api/kill")
-    def kill():
+    def kill(user: dict = Depends(_require_auth)):
         """Engage kill switch — stops new entries and closes all open positions."""
         _engine.kill_switch = True
-        log_msg = "Kill switch ENGAGED via API"
-        import logging
-        logging.getLogger("api").warning(log_msg)
+        log.warning(f"Kill switch ENGAGED by {user['username']}")
         return {"ok": True, "message": "Kill switch engaged. Open positions will be closed on next cycle."}
 
     @app.post("/api/resume")
-    def resume():
+    def resume(user: dict = Depends(_require_auth)):
         """Disengage kill switch — bot resumes normal operation."""
         _engine.kill_switch = False
-        import logging
-        logging.getLogger("api").info("Kill switch DISENGAGED via API")
+        log.info(f"Kill switch DISENGAGED by {user['username']}")
         return {"ok": True, "message": "Bot resumed."}
 
     @app.post("/api/close-all")
-    def close_all():
+    def close_all(user: dict = Depends(_require_auth)):
         """Immediately close all open positions (does not pause the bot)."""
         count = len(_engine.positions)
         if count == 0:
             return {"ok": True, "message": "No open positions to close.", "closed": 0}
+        log.warning(f"Close-all triggered by {user['username']}")
         _engine.close_all_positions(reason="manual")
         return {"ok": True, "message": f"Closed {count} position(s).", "closed": count}
 
     @app.post("/api/close/{symbol:path}")
-    def close_one(symbol: str):
+    def close_one(symbol: str, user: dict = Depends(_require_auth)):
         """Close a single position by symbol (e.g. BTC/USDT)."""
-        import logging
         if symbol not in _engine.positions:
             raise HTTPException(status_code=404, detail=f"{symbol} not in open positions")
         pos = _engine.positions[symbol]
@@ -148,7 +183,7 @@ def create_app(engine) -> FastAPI:
         except Exception:
             price = pos.entry_price
         _engine._close_position(symbol, price, reason="manual")
-        logging.getLogger("api").info(f"Manually closed {symbol} @ {price}")
+        log.info(f"Manually closed {symbol} @ {price} by {user['username']}")
         return {"ok": True, "message": f"Closed {symbol}.", "symbol": symbol}
 
     return app
@@ -165,6 +200,5 @@ def run_api(engine, host: str = "0.0.0.0", port: int = 8000):
     thread = threading.Thread(target=server.run, daemon=True, name="api-server")
     thread.start()
 
-    import logging
-    logging.getLogger("api").info(f"Dashboard API listening on {host}:{port}")
+    log.info(f"Dashboard API listening on {host}:{port}")
     return thread
