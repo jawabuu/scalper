@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Scalper Dashboard</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0a0c0f;
+    --bg2:       #0f1317;
+    --bg3:       #151a20;
+    --border:    #1e2730;
+    --border2:   #253040;
+    --text:      #c8d4e0;
+    --muted:     #4a6070;
+    --accent:    #00d4aa;
+    --accent2:   #0099ff;
+    --danger:    #ff4d6a;
+    --warn:      #ffb344;
+    --green:     #00d4aa;
+    --red:       #ff4d6a;
+    --mono:      'IBM Plex Mono', monospace;
+    --sans:      'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  .shell {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    min-height: 100vh;
+  }
+
+  header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    gap: 16px;
+  }
+
+  .logo {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .header-sep { flex: 1; }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    padding: 3px 8px;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+
+  .badge-testnet { background: rgba(255,179,68,0.15); color: var(--warn); border: 1px solid rgba(255,179,68,0.3); }
+  .badge-live    { background: rgba(255,77,106,0.15);  color: var(--red);  border: 1px solid rgba(255,77,106,0.3); }
+  .badge-ok      { background: rgba(0,212,170,0.1);   color: var(--green); border: 1px solid rgba(0,212,170,0.25); }
+  .badge-kill    { background: rgba(255,77,106,0.2);  color: var(--red);  border: 1px solid rgba(255,77,106,0.4); }
+
+  .pulse {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  .pulse.dead { background: var(--red); animation: none; }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto auto 1fr;
+    gap: 1px;
+    background: var(--border);
+    overflow: auto;
+  }
+
+  /* ── Panels ── */
+  .panel {
+    background: var(--bg);
+    padding: 20px 24px;
+  }
+
+  .panel-label {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  /* ── Stat cards row ── */
+  .stats-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .stat {
+    background: var(--bg);
+    padding: 16px 20px;
+  }
+
+  .stat-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .stat-value {
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--text);
+    font-family: var(--mono);
+  }
+
+  .stat-value.pos { color: var(--green); }
+  .stat-value.neg { color: var(--red); }
+  .stat-value.neu { color: var(--accent2); }
+
+  .stat-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ── Kill switch panel ── */
+  .kill-panel {
+    grid-column: 3;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 10px 16px;
+    border-radius: 4px;
+    border: 1px solid;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: 100%;
+  }
+
+  .btn-kill {
+    background: rgba(255,77,106,0.08);
+    border-color: rgba(255,77,106,0.4);
+    color: var(--red);
+  }
+  .btn-kill:hover { background: rgba(255,77,106,0.18); border-color: var(--red); }
+
+  .btn-resume {
+    background: rgba(0,212,170,0.08);
+    border-color: rgba(0,212,170,0.3);
+    color: var(--accent);
+  }
+  .btn-resume:hover { background: rgba(0,212,170,0.16); border-color: var(--accent); }
+
+  .btn-close {
+    background: rgba(255,179,68,0.08);
+    border-color: rgba(255,179,68,0.3);
+    color: var(--warn);
+  }
+  .btn-close:hover { background: rgba(255,179,68,0.16); border-color: var(--warn); }
+
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .confirm-row {
+    display: flex; gap: 8px;
+  }
+  .confirm-row .btn { font-size: 10px; padding: 8px 12px; }
+
+  /* ── Positions table ── */
+  .positions-panel {
+    grid-column: 1 / 3;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th {
+    text-align: left;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 6px 10px 8px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 400;
+  }
+
+  td {
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg2); }
+
+  .sym { font-weight: 600; color: #e8f0f8; letter-spacing: 0.05em; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+
+  .stop-bar-wrap {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .stop-bar {
+    width: 60px; height: 4px;
+    background: var(--border2); border-radius: 2px; overflow: hidden;
+  }
+  .stop-bar-fill {
+    height: 100%; background: var(--accent); border-radius: 2px;
+    transition: width 0.5s;
+  }
+
+  /* ── Trade history ── */
+  .history-panel {
+    grid-column: 1 / -1;
+    max-height: 340px;
+    overflow-y: auto;
+  }
+
+  .history-panel::-webkit-scrollbar { width: 4px; }
+  .history-panel::-webkit-scrollbar-track { background: var(--bg); }
+  .history-panel::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  .reason-pill {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+  }
+  .r-tp    { background: rgba(0,212,170,0.12);  color: var(--green); }
+  .r-ts    { background: rgba(255,179,68,0.12); color: var(--warn);  }
+  .r-kill  { background: rgba(255,77,106,0.12); color: var(--red);   }
+  .r-other { background: rgba(74,96,112,0.2);   color: var(--muted); }
+
+  /* ── Empty states ── */
+  .empty {
+    padding: 32px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+  }
+
+  /* ── Refresh indicator ── */
+  .refresh-hint {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+  }
+
+  .err { color: var(--red); font-size: 11px; margin-top: 6px; }
+
+  /* ── Per-position close button ── */
+  .btn-row-close {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 3px;
+    border: 1px solid rgba(255,77,106,0.35);
+    background: rgba(255,77,106,0.06);
+    color: var(--red);
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-row-close:hover { background: rgba(255,77,106,0.18); border-color: var(--red); }
+
+  .btn-row-confirm {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 3px;
+    border: 1px solid;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-row-confirm.yes {
+    background: rgba(255,77,106,0.12);
+    border-color: rgba(255,77,106,0.5);
+    color: var(--red);
+  }
+  .btn-row-confirm.yes:hover { background: rgba(255,77,106,0.25); }
+  .btn-row-confirm.no {
+    background: rgba(74,96,112,0.15);
+    border-color: rgba(74,96,112,0.4);
+    color: var(--muted);
+  }
+  .btn-row-confirm.no:hover { background: rgba(74,96,112,0.3); }
+</style>
+</head>
+<body>
+<div class="shell" id="app">
+  <header>
+    <div class="pulse" id="pulse"></div>
+    <span class="logo">⬡ Scalper</span>
+    <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
+    <div class="header-sep"></div>
+    <span class="refresh-hint" id="refresh-hint">—</span>
+  </header>
+
+  <main>
+    <!-- Stat strip -->
+    <div class="stats-row" id="stats-row">
+      <div class="stat"><div class="stat-label">Portfolio</div><div class="stat-value neu" id="s-portfolio">—</div><div class="stat-sub" id="s-portfolio-sub"></div></div>
+      <div class="stat"><div class="stat-label">Available USDT</div><div class="stat-value neu" id="s-balance">—</div></div>
+      <div class="stat"><div class="stat-label">Open positions</div><div class="stat-value" id="s-open">—</div></div>
+      <div class="stat"><div class="stat-label">Total trades</div><div class="stat-value" id="s-total">—</div></div>
+      <div class="stat"><div class="stat-label">Win rate</div><div class="stat-value" id="s-winrate">—</div></div>
+      <div class="stat"><div class="stat-label">Total P&L</div><div class="stat-value" id="s-pnl">—</div><div class="stat-sub" id="s-pnl-usdt"></div></div>
+      <div class="stat"><div class="stat-label">Avg trade</div><div class="stat-value" id="s-avg">—</div></div>
+    </div>
+
+    <!-- Positions -->
+    <div class="panel positions-panel">
+      <div class="panel-label">Open positions</div>
+      <div id="positions-wrap">
+        <div class="empty">No open positions</div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="panel kill-panel">
+      <div class="panel-label">Controls</div>
+
+      <div id="ctrl-normal">
+        <button class="btn btn-kill" id="btn-kill" onclick="promptKill()">⏹ Engage kill switch</button>
+        <button class="btn btn-close" id="btn-closeall" style="margin-top:8px" onclick="promptCloseAll()">✕ Close all positions</button>
+      </div>
+
+      <div id="ctrl-confirm-kill" style="display:none">
+        <div style="font-size:11px;color:var(--warn);margin-bottom:8px;">Confirm: stop bot & close all?</div>
+        <div class="confirm-row">
+          <button class="btn btn-kill" onclick="doKill()">Confirm</button>
+          <button class="btn btn-resume" onclick="cancelConfirm()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="ctrl-confirm-close" style="display:none">
+        <div style="font-size:11px;color:var(--warn);margin-bottom:8px;">Confirm: close all open positions?</div>
+        <div class="confirm-row">
+          <button class="btn btn-close" onclick="doCloseAll()">Confirm</button>
+          <button class="btn btn-resume" onclick="cancelConfirm()">Cancel</button>
+        </div>
+      </div>
+
+      <div id="ctrl-killed" style="display:none">
+        <div class="badge badge-kill" style="display:inline-block;margin-bottom:12px;">Kill switch active</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6;">
+          Bot is paused. Open positions will be closed on next cycle.
+        </div>
+        <button class="btn btn-resume" onclick="doResume()">▶ Resume bot</button>
+      </div>
+
+      <div id="ctrl-msg" class="err"></div>
+
+      <div style="margin-top:auto;padding-top:16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.8;">
+        <div id="cfg-tf">—</div>
+        <div id="cfg-stop">—</div>
+        <div id="cfg-tp">—</div>
+        <div id="cfg-last">—</div>
+      </div>
+    </div>
+
+    <!-- Trade history -->
+    <div class="panel history-panel">
+      <div class="panel-label">Trade history</div>
+      <div id="history-wrap">
+        <div class="empty">No closed trades yet</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = window.SCALPER_API_URL || '';
+
+let killed = false;
+
+function fmt(n, dec=2) {
+  if (n == null) return '—';
+  return Number(n).toLocaleString('en-US', {minimumFractionDigits:dec, maximumFractionDigits:dec});
+}
+
+function pnlClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
+
+function reasonPill(r) {
+  const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual' };
+  const cls = map[r] || 'r-other';
+  const label = r.replace(/_/g,' ');
+  return `<span class="reason-pill ${cls}">${label}</span>`;
+}
+
+function timeAgo(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s/60)}m ago`;
+  return `${Math.floor(s/3600)}h ago`;
+}
+
+function setEl(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+function setKillUI(isKilled) {
+  killed = isKilled;
+  document.getElementById('ctrl-normal').style.display   = isKilled ? 'none' : '';
+  document.getElementById('ctrl-killed').style.display   = isKilled ? '' : 'none';
+  document.getElementById('ctrl-confirm-kill').style.display  = 'none';
+  document.getElementById('ctrl-confirm-close').style.display = 'none';
+
+  const badge = document.getElementById('mode-badge');
+  if (isKilled) {
+    badge.className = 'badge badge-kill';
+    badge.textContent = 'KILL SWITCH';
+  }
+}
+
+async function api(path, method='GET') {
+  const r = await fetch(API + path, { method });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [status, positions, summary, trades] = await Promise.all([
+      api('/api/status'),
+      api('/api/positions'),
+      api('/api/summary'),
+      api('/api/trades?limit=50'),
+    ]);
+
+    // Header
+    const pulse = document.getElementById('pulse');
+    pulse.className = 'pulse';
+    const modeBadge = document.getElementById('mode-badge');
+    if (!status.kill_switch) {
+      modeBadge.className = status.testnet ? 'badge badge-testnet' : 'badge badge-live';
+      modeBadge.textContent = status.testnet ? 'TESTNET' : 'LIVE';
+    }
+    setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
+
+    setKillUI(status.kill_switch);
+
+    // Config strip
+    setEl('cfg-tf', `timeframe: ${status.timeframe || '—'}`);
+    setEl('cfg-last', status.last_cycle_ago_s != null
+      ? `last cycle: ${status.last_cycle_ago_s}s ago` : 'last cycle: —');
+
+    // Stats
+    const pnl = summary.total_pnl_pct ?? 0;
+    const avg = summary.avg_pnl_pct ?? 0;
+    const positionsValue = positions.reduce((sum, p) => sum + (p.current_price * p.qty), 0);
+    const portfolio = status.balance_usdt + positionsValue;
+    const portfolioEl = document.getElementById('s-portfolio');
+    portfolioEl.textContent = `$${fmt(portfolio, 2)}`;
+    setEl('s-portfolio-sub', positions.length ? `$${fmt(status.balance_usdt,2)} + $${fmt(positionsValue,2)}` : 'no open positions');
+    setEl('s-balance', `$${fmt(status.balance_usdt, 2)}`);
+    setEl('s-open', positions.length);
+    setEl('s-total', summary.total_trades ?? '0');
+    setEl('s-winrate', summary.total_trades ? `${summary.win_rate}%` : '—');
+
+    const pnlEl = document.getElementById('s-pnl');
+    pnlEl.textContent = summary.total_trades ? `${pnl >= 0 ? '+' : ''}${fmt(pnl, 3)}%` : '—';
+    pnlEl.className = `stat-value ${pnlClass(pnl)}`;
+    setEl('s-pnl-usdt', summary.total_pnl_usdt ? `$${fmt(summary.total_pnl_usdt, 2)}` : '');
+
+    const avgEl = document.getElementById('s-avg');
+    avgEl.textContent = summary.total_trades ? `${avg >= 0 ? '+' : ''}${fmt(avg, 3)}%` : '—';
+    avgEl.className = `stat-value ${pnlClass(avg)}`;
+
+    // Positions
+    if (positions.length === 0) {
+      setEl('positions-wrap', '<div class="empty">No open positions</div>');
+    } else {
+      const rows = positions.map(p => {
+        const pnlPct = p.pnl_pct;
+        const cls = pnlClass(pnlPct);
+        // Stop distance as % of price range entry→stop (how close to stop)
+        const stopDist = ((p.current_price - p.trailing_stop) / p.current_price * 100);
+        const stopPct = Math.min(100, Math.max(0, (1 - stopDist / 2) * 100)); // visual fill
+        const safeId = p.symbol.replace('/','_');
+        return `<tr id="row-${safeId}">
+          <td class="sym">${p.symbol.replace('/USDT','')}</td>
+          <td class="num">${fmt(p.entry_price, 4)}</td>
+          <td class="num">${fmt(p.current_price, 4)}</td>
+          <td class="num ${cls}">${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct, 3)}%</td>
+          <td class="num ${cls}">$${fmt(p.pnl_usdt, 2)}</td>
+          <td>
+            <div class="stop-bar-wrap">
+              <span style="font-size:11px">${fmt(p.trailing_stop, 4)}</span>
+              <div class="stop-bar"><div class="stop-bar-fill" style="width:${stopPct}%"></div></div>
+            </div>
+          </td>
+          <td class="num">$${fmt(p.current_price * p.qty, 2)}</td>
+          <td class="num" style="color:var(--muted)">${p.candles_held}c</td>
+          <td style="color:var(--muted);font-size:11px">${timeAgo(p.opened_at)}</td>
+          <td>
+            <div id="ctrl-${safeId}-idle">
+              <button class="btn-row-close" onclick="promptCloseOne('${p.symbol}')">Close</button>
+            </div>
+            <div id="ctrl-${safeId}-confirm" style="display:none;display:none;gap:4px;align-items:center">
+              <button class="btn-row-confirm yes" onclick="doCloseOne('${p.symbol}')">Confirm</button>
+              <button class="btn-row-confirm no"  onclick="cancelCloseOne('${p.symbol}')">Cancel</button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+      setEl('positions-wrap', `<table>
+        <thead><tr>
+          <th>Pair</th><th class="num">Entry</th><th class="num">Now</th>
+          <th class="num">P&L %</th><th class="num">P&L $</th>
+          <th>Trailing stop</th><th class="num">Value</th><th class="num">Age</th><th>Opened</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+
+    // History
+    if (trades.length === 0) {
+      setEl('history-wrap', '<div class="empty">No closed trades yet</div>');
+    } else {
+      const rows = trades.map(t => {
+        const cls = pnlClass(t.pnl_pct);
+        return `<tr>
+          <td class="sym">${t.symbol.replace('/USDT','')}</td>
+          <td class="num">${fmt(t.entry_price, 4)}</td>
+          <td class="num">${fmt(t.exit_price, 4)}</td>
+          <td class="num">${fmt(t.qty, 4)}</td>
+          <td class="num ${cls}">${t.pnl_pct >= 0 ? '+' : ''}${fmt(t.pnl_pct, 3)}%</td>
+          <td class="num ${cls}">$${fmt(t.pnl_usdt, 2)}</td>
+          <td class="num">$${fmt(t.exit_price * t.qty, 2)}</td>
+          <td>${reasonPill(t.reason)}</td>
+          <td style="color:var(--muted);font-size:11px">${timeAgo(t.closed_at)}</td>
+        </tr>`;
+      }).join('');
+      setEl('history-wrap', `<table>
+        <thead><tr>
+          <th>Pair</th><th class="num">Entry</th><th class="num">Exit</th>
+          <th class="num">Qty</th><th class="num">P&L %</th><th class="num">P&L $</th>
+          <th class="num">Sale value</th><th>Reason</th><th>Closed</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`);
+    }
+
+  } catch(e) {
+    document.getElementById('pulse').className = 'pulse dead';
+    setEl('refresh-hint', `error: ${e.message}`);
+  }
+}
+
+// Per-position close
+function promptCloseOne(symbol) {
+  const id = symbol.replace('/','_');
+  document.getElementById('ctrl-'+id+'-idle').style.display = 'none';
+  const conf = document.getElementById('ctrl-'+id+'-confirm');
+  conf.style.display = 'flex';
+}
+
+function cancelCloseOne(symbol) {
+  const id = symbol.replace('/','_');
+  document.getElementById('ctrl-'+id+'-idle').style.display = '';
+  document.getElementById('ctrl-'+id+'-confirm').style.display = 'none';
+}
+
+async function doCloseOne(symbol) {
+  const id = symbol.replace('/','_');
+  try {
+    const enc = encodeURIComponent(symbol);
+    const r = await api('/api/close/'+enc, 'POST');
+    // Row will disappear on next refresh
+    const row = document.getElementById('row-'+id);
+    if (row) row.style.opacity = '0.4';
+    setTimeout(refresh, 1500);
+  } catch(e) {
+    cancelCloseOne(symbol);
+    alert('Close failed: ' + e.message);
+  }
+}
+
+// Controls
+function promptKill()     { document.getElementById('ctrl-normal').style.display='none'; document.getElementById('ctrl-confirm-kill').style.display=''; }
+function promptCloseAll() { document.getElementById('ctrl-normal').style.display='none'; document.getElementById('ctrl-confirm-close').style.display=''; }
+function cancelConfirm()  { document.getElementById('ctrl-normal').style.display=''; document.getElementById('ctrl-confirm-kill').style.display='none'; document.getElementById('ctrl-confirm-close').style.display='none'; }
+
+async function doKill() {
+  try { await api('/api/kill', 'POST'); setKillUI(true); } catch(e) { setEl('ctrl-msg', `Error: ${e.message}`); }
+}
+async function doResume() {
+  try { await api('/api/resume', 'POST'); setKillUI(false); await refresh(); } catch(e) { setEl('ctrl-msg', `Error: ${e.message}`); }
+}
+async function doCloseAll() {
+  try {
+    const r = await api('/api/close-all', 'POST');
+    cancelConfirm();
+    setEl('ctrl-msg', `<span style="color:var(--accent)">${r.message}</span>`);
+    setTimeout(() => setEl('ctrl-msg',''), 4000);
+    await refresh();
+  } catch(e) { setEl('ctrl-msg', `Error: ${e.message}`); }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

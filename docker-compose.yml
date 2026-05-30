@@ -1,0 +1,45 @@
+version: "3.9"
+
+services:
+  scalper:
+    # Local: builds from source. VPS: pulls pre-built image from GHCR.
+    # IMAGE_TAG is set by GitHub Actions; unset locally so the build target is used.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/${GITHUB_REPOSITORY:-yourorg/scalping-bot}:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    image: ghcr.io/${GITHUB_REPOSITORY:-yourorg/scalping-bot-ui}:${IMAGE_TAG:-local}
+    depends_on:
+      - bot
+    ports:
+      - "${UI_PORT:-8080}:80"
+    restart: unless-stopped
+
+  # Watchtower auto-pulls new images deployed by GitHub Actions.
+  # Gated behind the "production" profile — not started locally unless explicitly requested.
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    profiles: ["production"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=60
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_INCLUDE_STOPPED=false
+    command: bot ui
