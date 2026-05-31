@@ -6,3 +6,4 @@ fastapi>=0.111
 uvicorn>=0.29
 itsdangerous>=2.1
 httpx>=0.27
+requests[socks]>=2.31

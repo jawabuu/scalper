@@ -50,12 +50,26 @@ class ScalpingEngine:
     # ------------------------------------------------------------------
 
     def _init_exchange(self) -> ccxt.binance:
-        exchange = ccxt.binance({
+        params: dict = {
             "apiKey": self.cfg.api_key,
             "secret": self.cfg.api_secret,
             "options": {"defaultType": "spot"},
             "enableRateLimit": True,
-        })
+        }
+
+        if self.cfg.socks_proxy:
+            # Route all ccxt traffic through the SOCKS5 proxy.
+            # socks5h:// ensures DNS also resolves through the proxy (no leaks).
+            # Requires requests[socks] (PySocks) — included in requirements.txt.
+            params["proxies"] = {
+                "http":  self.cfg.socks_proxy,
+                "https": self.cfg.socks_proxy,
+            }
+            log.info(f"🔀 Proxy active: {self.cfg.socks_proxy}")
+        else:
+            log.info("🔀 No proxy configured — connecting directly")
+
+        exchange = ccxt.binance(params)
 
         if self.cfg.testnet:
             exchange.set_sandbox_mode(True)

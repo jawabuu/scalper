@@ -81,6 +81,13 @@ class BotConfig:
     # Prevents the bot immediately re-buying something you just closed.
     manual_close_cooldown_candles: int = field(default_factory=lambda: _env_int("MANUAL_CLOSE_COOLDOWN_CANDLES", 3))
 
+    # ── Proxy ───────────────────────────────────────────────────────────
+    # SOCKS5 proxy for ccxt — use socks5h:// so DNS resolves through proxy too.
+    # Locally: ssh -D 1080 -N user@vps → set SOCKS_PROXY=socks5h://localhost:1080
+    # Production: gluetun sidecar → set SOCKS_PROXY=socks5h://gluetun:1080
+    # Leave empty to connect directly (testnet, unrestricted regions).
+    socks_proxy: str = field(default_factory=lambda: _env("SOCKS_PROXY", ""))
+
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))
 

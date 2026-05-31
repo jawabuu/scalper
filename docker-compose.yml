@@ -1,6 +1,23 @@
 version: "3.9"
 
 services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file:
+      - .env
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - SOCKS5_PROXY=on
+      - SOCKS5_PROXY_LISTENING_ADDRESS=:1080
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+
   scalper:
     # Local: builds from source. VPS: pulls pre-built image from GHCR.
     # IMAGE_TAG is set by GitHub Actions; unset locally so the build target is used.
@@ -11,6 +28,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - SOCKS_PROXY=http://gluetun:8888
+    depends_on:
+      - gluetun
     volumes:
       - ./logs:/app/logs
     logging:
