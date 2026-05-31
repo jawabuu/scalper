@@ -64,6 +64,9 @@ class BotConfig:
     # ── Risk / exits ────────────────────────────────────────────────────
     trailing_stop_pct: float = field(default_factory=lambda: _env_float("TRAILING_STOP_PCT", 0.8))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
+    # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
+    # Take profit then only affects the OCO backstop price (server-side safety net).
+    take_profit_enabled: bool = field(default_factory=lambda: _env_bool("TAKE_PROFIT_ENABLED", True))
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 3))
     max_hold_candles: int = field(default_factory=lambda: _env_int("MAX_HOLD_CANDLES", 12))
     risk_per_trade_pct: float = field(default_factory=lambda: _env_float("RISK_PER_TRADE_PCT", 1.0))

@@ -406,9 +406,13 @@ class ScalpingEngine:
 
     def check_exit(self, sym: str, current_price: float) -> str | None:
         pos = self.positions[sym]
-        tp = pos.entry_price * (1 + self.cfg.take_profit_pct / 100)
-        if current_price >= tp:
-            return "take_profit"
+        # Take profit — only checked when enabled.
+        # When disabled the trailing stop is the sole profit exit,
+        # allowing winners to run as far as momentum carries them.
+        if self.cfg.take_profit_enabled:
+            tp = pos.entry_price * (1 + self.cfg.take_profit_pct / 100)
+            if current_price >= tp:
+                return "take_profit"
         if current_price <= pos.trailing_stop:
             return "trailing_stop"
         if pos.candles_held >= self.cfg.max_hold_candles:

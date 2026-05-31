@@ -38,9 +38,10 @@ if __name__ == "__main__":
         log.error(f"Config error: {e}")
         sys.exit(1)
 
+    tp_info = f"tp={cfg.take_profit_pct}%" if cfg.take_profit_enabled else "tp=disabled"
     log.info(
         f"Starting — testnet={cfg.testnet} tf={cfg.timeframe} "
-        f"stop={cfg.trailing_stop_pct}% tp={cfg.take_profit_pct}% "
+        f"stop={cfg.trailing_stop_pct}% {tp_info} "
         f"risk={cfg.risk_per_trade_pct}%/trade"
     )
 

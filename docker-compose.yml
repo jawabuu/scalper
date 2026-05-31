@@ -13,8 +13,8 @@ services:
     environment:
       - VPN_SERVICE_PROVIDER=custom
       - VPN_TYPE=wireguard
-      - SOCKS5_PROXY=on
-      - SOCKS5_PROXY_LISTENING_ADDRESS=:1080
+      - SOCKS5_ENABLED=on
+      - SOCKS5_LISTENING_ADDRESS=:1080
       - HTTPPROXY=on
       - HTTPPROXY_LISTENING_ADDRESS=:8888
 
@@ -29,7 +29,8 @@ services:
     env_file:
       - .env
     environment:
-      - SOCKS_PROXY=http://gluetun:8888
+      #- SOCKS_PROXY=http://gluetun:8888
+      - SOCKS_PROXY=socks5h://gluetun:1080
     depends_on:
       - gluetun
     volumes:
