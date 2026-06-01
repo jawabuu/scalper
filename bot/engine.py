@@ -459,9 +459,9 @@ class ScalpingEngine:
         total_stop_pct = self.cfg.trailing_stop_pct + self.cfg.stop_limit_offset_pct
         stop_price = self.round_price(reference_price * (1 - total_stop_pct / 100), price_prec)
 
-        log.debug(
-            f"Stop-market calc for {symbol}: entry={entry_price} current={current_price} "
-            f"stop_trigger={stop_price}"
+        log.info(
+            f"Stop-market calc for {symbol}: entry={entry_price} bid={reference_price:.6f} "
+            f"stop_trigger={stop_price} (trailing={self.cfg.trailing_stop_pct}% + offset={self.cfg.stop_limit_offset_pct}%)"
         )
 
         # Clamp to minimum price — prevents rejection on low-price coins
@@ -488,10 +488,20 @@ class ScalpingEngine:
         except Exception as e:
             err = str(e)
             if "PERCENT_PRICE_BY_SIDE" in err:
-                log.warning(
-                    f"Stop-market rejected for {symbol}: stop price outside Binance "
-                    f"allowed band (PERCENT_PRICE_BY_SIDE) — trailing stop only"
-                )
+                # Log the filter values from the market to understand the band
+                try:
+                    market = self.exchange.market(symbol)
+                    filters = market.get("info", {}).get("filters", [])
+                    ppbs = [f for f in filters if f.get("filterType") == "PERCENT_PRICE_BY_SIDE"]
+                    log.warning(
+                        f"Stop-market rejected for {symbol} (PERCENT_PRICE_BY_SIDE): "
+                        f"stop={stop_price} filter={ppbs} — trailing stop only"
+                    )
+                except Exception:
+                    log.warning(
+                        f"Stop-market rejected for {symbol}: stop price outside Binance "
+                        f"allowed band (PERCENT_PRICE_BY_SIDE) — trailing stop only"
+                    )
             elif "market lot size" in err.lower() or "LOT_SIZE" in err:
                 log.warning(f"Stop-market rejected for {symbol}: lot size issue — {e}")
             else:
@@ -710,6 +720,27 @@ class ScalpingEngine:
         # --- Look for new entries ---
         if len(self.positions) >= self.cfg.max_open_positions:
             return
+
+        # Trading hours check — only restricts new entries, not position management
+        if self.cfg.trading_hours_start and self.cfg.trading_hours_end:
+            from datetime import datetime, timezone, time as dt_time
+            now_utc = datetime.now(timezone.utc).time()
+            try:
+                start = dt_time(*map(int, self.cfg.trading_hours_start.split(":")))
+                end   = dt_time(*map(int, self.cfg.trading_hours_end.split(":")))
+                # Handle overnight windows e.g. 22:00–06:00
+                if start <= end:
+                    in_window = start <= now_utc <= end
+                else:
+                    in_window = now_utc >= start or now_utc <= end
+                if not in_window:
+                    log.debug(
+                        f"Outside trading hours ({self.cfg.trading_hours_start}–"
+                        f"{self.cfg.trading_hours_end} UTC) — skipping new entries"
+                    )
+                    return
+            except ValueError as e:
+                log.warning(f"Invalid trading hours format: {e} — trading unrestricted")
 
         for sym in symbols:
             if sym in self.positions:

@@ -100,6 +100,14 @@ class BotConfig:
     # Prevents the bot immediately re-buying something you just closed.
     manual_close_cooldown_candles: int = field(default_factory=lambda: _env_int("MANUAL_CLOSE_COOLDOWN_CANDLES", 3))
 
+    # ── Trading hours ───────────────────────────────────────────────────
+    # Restrict new entries to specific UTC hours. Open positions continue
+    # to be managed (trailing stop, exits) outside trading hours.
+    # Format: "HH:MM" 24hr UTC. Leave empty for unrestricted trading.
+    # Example: TRADING_HOURS_START=08:00 TRADING_HOURS_END=20:00
+    trading_hours_start: str = field(default_factory=lambda: _env("TRADING_HOURS_START", ""))
+    trading_hours_end: str = field(default_factory=lambda: _env("TRADING_HOURS_END", ""))
+
     # ── Proxy ───────────────────────────────────────────────────────────
     # SOCKS5 proxy for ccxt — use socks5h:// so DNS resolves through proxy too.
     # Locally: ssh -D 1080 -N user@vps → set SOCKS_PROXY=socks5h://localhost:1080
