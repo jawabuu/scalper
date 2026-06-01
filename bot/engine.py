@@ -782,13 +782,16 @@ class ScalpingEngine:
             qty           = order.get("filled") or alloc / fill_price
             trailing_stop = fill_price * (1 - self.cfg.trailing_stop_pct / 100)
 
-            # Place server-side backstop — OCO preferred, stop-limit as fallback.
-            # Both are wider than the trailing stop so they only fire if the bot dies.
-            # Use the actual filled qty rounded DOWN to lot step — never try to sell
-            # more than we hold (fees reduce the filled amount slightly below requested).
+            # Place server-side backstop — OCO preferred, stop-market as fallback.
+            # Binance's filled qty in the order response is pre-fee — the actual
+            # balance is slightly less after trading fees (typically 0.1%).
+            # Apply a 0.15% buffer and round DOWN to lot step to ensure we never
+            # try to sell more than we actually hold.
             _, amount_prec = self.get_precision(sym)
             step = self._lot_step_size(sym)
-            backstop_qty = self.round_to_step(qty, step) if step > 0 else self.round_amount(qty, amount_prec)
+            qty_after_fees = qty * (1 - 0.0015)  # 0.15% buffer covers standard + BNB fees
+            backstop_qty = self.round_to_step(qty_after_fees, step) if step > 0                 else self.round_amount(qty_after_fees, amount_prec)
+            log.debug(f"Backstop qty for {sym}: filled={qty} after_fees={qty_after_fees:.6f} rounded={backstop_qty}")
 
             backstop_type = None
             oco_id = self.place_oco(sym, backstop_qty, fill_price)
