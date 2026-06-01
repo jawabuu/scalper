@@ -457,6 +457,20 @@
     background: rgba(255,77,106,0.06);
   }
 
+  /* ── Backstop status pill ── */
+  .backstop-pill {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .bs-oco        { background: rgba(0,153,255,0.12); color: #4db8ff; border: 1px solid rgba(0,153,255,0.3); }
+  .bs-stop       { background: rgba(0,212,170,0.12); color: var(--green); border: 1px solid rgba(0,212,170,0.3); }
+  .bs-none       { background: rgba(255,179,68,0.12); color: var(--warn); border: 1px solid rgba(255,179,68,0.3); }
+
   /* ── Per-position close button ── */
   .btn-row-close {
     font-family: var(--mono);
@@ -523,6 +537,7 @@
     <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
     <div class="header-sep"></div>
     <span class="refresh-hint" id="refresh-hint">—</span>
+    <span class="refresh-hint" id="version-hint" style="color:var(--border2)">—</span>
     <div class="user-info" id="user-info" style="display:none">
       <img class="user-avatar" id="user-avatar" src="" alt=""/>
       <span class="user-name" id="user-name"></span>
@@ -666,6 +681,12 @@ function fmt(n, dec=2) {
 
 function pnlClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
 
+function backstopPill(type) {
+  if (type === 'oco')         return '<span class="backstop-pill bs-oco">OCO</span>';
+  if (type === 'stop_market') return '<span class="backstop-pill bs-stop">Stop ✓</span>';
+  return '<span class="backstop-pill bs-none">None</span>';
+}
+
 function reasonPill(r) {
   const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual', server_side:'r-ss ss' };
   const cls = map[r] || 'r-other';
@@ -730,6 +751,7 @@ async function refresh() {
       modeBadge.textContent = status.testnet ? 'TESTNET' : 'LIVE';
     }
     setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
+    if (status.version) setEl('version-hint', `v${status.version}`);
 
     setKillUI(status.kill_switch);
 
@@ -783,6 +805,7 @@ async function refresh() {
               <div class="stop-bar"><div class="stop-bar-fill" style="width:${stopPct}%"></div></div>
             </div>
           </td>
+          <td>${backstopPill(p.backstop_type)}</td>
           <td class="num">$${fmt(p.current_price * p.qty, 2)}</td>
           <td class="num" style="color:var(--muted)">${p.candles_held}c</td>
           <td style="color:var(--muted);font-size:11px">${timeAgo(p.opened_at)}</td>
@@ -801,7 +824,7 @@ async function refresh() {
         <thead><tr>
           <th>Pair</th><th class="num">Entry</th><th class="num">Now</th>
           <th class="num">P&L %</th><th class="num">P&L $</th>
-          <th>Trailing stop</th><th class="num">Value</th><th class="num">Age</th><th>Opened</th><th></th>
+          <th>Trailing stop</th><th>Backstop</th><th class="num">Value</th><th class="num">Age</th><th>Opened</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`);

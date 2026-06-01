@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from bot import __version__
 from .auth import (
     get_current_user,
     login_route,
@@ -84,6 +85,7 @@ def create_app(engine) -> FastAPI:
 
         return {
             "running":          True,
+            "version":          __version__,
             "testnet":          _engine.cfg.testnet,
             "kill_switch":      _engine.kill_switch,
             "timeframe":        _engine.cfg.timeframe,
@@ -119,6 +121,7 @@ def create_app(engine) -> FastAPI:
                 "opened_at":     pos.opened_at.isoformat(),
                 "pnl_pct":       round(pnl_pct, 4),
                 "pnl_usdt":      round(pnl_usdt, 4),
+                "backstop_type": pos.backstop_type,
             })
         return result
 

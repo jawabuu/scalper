@@ -457,7 +457,10 @@ class ScalpingEngine:
             current_price = entry_price
             reference_price = entry_price
         total_stop_pct = self.cfg.trailing_stop_pct + self.cfg.stop_limit_offset_pct
-        stop_price = self.round_price(reference_price * (1 - total_stop_pct / 100), price_prec)
+        # Ensure minimum price precision of 4 decimal places — prevents rounding
+        # to whole numbers on low-precision testnet markets (e.g. XRP precision=0)
+        effective_prec = max(int(price_prec), 4)
+        stop_price = self.round_price(reference_price * (1 - total_stop_pct / 100), effective_prec)
 
         log.info(
             f"Stop-market calc for {symbol}: entry={entry_price} bid={reference_price:.6f} "
@@ -787,16 +790,21 @@ class ScalpingEngine:
             step = self._lot_step_size(sym)
             backstop_qty = self.round_to_step(qty, step) if step > 0 else self.round_amount(qty, amount_prec)
 
+            backstop_type = None
             oco_id = self.place_oco(sym, backstop_qty, fill_price)
-            if oco_id is None:
+            if oco_id:
+                backstop_type = "oco"
+            else:
                 if not self.cfg.oco_enabled:
-                    log.info(f"OCO disabled — placing stop-limit for {sym}")
+                    log.info(f"OCO disabled — placing stop-market for {sym}")
                 else:
-                    log.debug(f"OCO returned None for {sym} — trying stop-limit fallback")
+                    log.debug(f"OCO returned None for {sym} — trying stop-market fallback")
                 oco_id = self.place_stop_limit(sym, backstop_qty, fill_price)
+                if oco_id:
+                    backstop_type = "stop_market"
 
             if oco_id:
-                log.info(f"✅ Server-side backstop confirmed for {sym}: id={oco_id}")
+                log.info(f"✅ Server-side backstop confirmed for {sym}: type={backstop_type} id={oco_id}")
             else:
                 log.warning(
                     f"⚠️  No server-side backstop placed for {sym} — "
@@ -808,6 +816,7 @@ class ScalpingEngine:
                 qty=qty,
                 trailing_stop=trailing_stop,
                 oco_order_list_id=oco_id,
+                backstop_type=backstop_type,
             )
             log.info(
                 f"ENTERED {sym} @ {fill_price:.6f} "
