@@ -471,12 +471,14 @@ class ScalpingEngine:
             return order_id or None
         except Exception as e:
             err = str(e)
-            # PERCENT_PRICE_BY_SIDE: stop price too far from market — common on
-            # volatile testnet prices. Trailing stop still active, not a real problem.
+            # PERCENT_PRICE_BY_SIDE: stop price too far from current market price.
+            # Binance enforces a band (typically ±20%) around the last traded price.
+            # This means our calculated stop is outside that band — can happen on
+            # fast-moving coins. Trailing stop remains active.
             if "PERCENT_PRICE_BY_SIDE" in err:
-                log.debug(
-                    f"Stop-limit skipped for {symbol}: price moved too far from "
-                    f"calculated stop (PERCENT_PRICE_BY_SIDE) — trailing stop active"
+                log.warning(
+                    f"Stop-limit rejected for {symbol}: stop price outside Binance "
+                    f"allowed band (PERCENT_PRICE_BY_SIDE) — trailing stop only"
                 )
             else:
                 log.warning(f"Stop-limit placement failed for {symbol}: {e}")
@@ -741,9 +743,20 @@ class ScalpingEngine:
             backstop_qty = self.round_to_step(qty, step) if step > 0 else self.round_amount(qty, amount_prec)
 
             oco_id = self.place_oco(sym, backstop_qty, fill_price)
-            if oco_id is None and self.cfg.oco_enabled:
-                # OCO not supported for this pair — try stop-limit instead
+            if oco_id is None:
+                if not self.cfg.oco_enabled:
+                    log.info(f"OCO disabled — placing stop-limit for {sym}")
+                else:
+                    log.debug(f"OCO returned None for {sym} — trying stop-limit fallback")
                 oco_id = self.place_stop_limit(sym, backstop_qty, fill_price)
+
+            if oco_id:
+                log.info(f"✅ Server-side backstop confirmed for {sym}: id={oco_id}")
+            else:
+                log.warning(
+                    f"⚠️  No server-side backstop placed for {sym} — "
+                    f"trailing stop is the only protection"
+                )
 
             self.positions[sym] = PositionState(
                 entry_price=fill_price,
