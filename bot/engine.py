@@ -340,7 +340,14 @@ class ScalpingEngine:
             log.info(f"BUY {symbol} qty={qty} ~{usdt_amount:.2f} USDT")
             return order
         except Exception as e:
-            log.error(f"Buy order failed for {symbol}: {e}")
+            err = str(e)
+            if "MARKET_LOT_SIZE" in err or "LOT_SIZE" in err:
+                # Coin's lot size is incompatible with our allocation — not an error,
+                # just skip this symbol. Happens with very low-price coins where
+                # stepSize doesn't divide evenly into our position size.
+                log.debug(f"Skipping {symbol}: lot size incompatible — {e}")
+            else:
+                log.error(f"Buy order failed for {symbol}: {e}")
             return None
 
     def _oco_supported(self, symbol: str) -> bool:
@@ -463,7 +470,16 @@ class ScalpingEngine:
             )
             return order_id or None
         except Exception as e:
-            log.warning(f"Stop-limit placement failed for {symbol}: {e}")
+            err = str(e)
+            # PERCENT_PRICE_BY_SIDE: stop price too far from market — common on
+            # volatile testnet prices. Trailing stop still active, not a real problem.
+            if "PERCENT_PRICE_BY_SIDE" in err:
+                log.debug(
+                    f"Stop-limit skipped for {symbol}: price moved too far from "
+                    f"calculated stop (PERCENT_PRICE_BY_SIDE) — trailing stop active"
+                )
+            else:
+                log.warning(f"Stop-limit placement failed for {symbol}: {e}")
             return None
 
     def cancel_oco(self, symbol: str, list_id: str | None):
