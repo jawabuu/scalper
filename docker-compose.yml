@@ -37,7 +37,7 @@ services:
       - RSI_MIN=45                 # wider momentum window
       - RSI_MAX=70
       - MAX_SPREAD_PCT=0.2         # testnet spreads are wider
-      - MAX_HOLD_CANDLES=6         # faster cycling for testing
+      - MAX_HOLD_CANDLES=288       # same as live
     depends_on:
       - gluetun
     volumes:

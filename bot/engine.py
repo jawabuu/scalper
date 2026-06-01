@@ -734,10 +734,16 @@ class ScalpingEngine:
 
             # Place server-side backstop — OCO preferred, stop-limit as fallback.
             # Both are wider than the trailing stop so they only fire if the bot dies.
-            oco_id = self.place_oco(sym, qty, fill_price)
+            # Use the actual filled qty rounded DOWN to lot step — never try to sell
+            # more than we hold (fees reduce the filled amount slightly below requested).
+            _, amount_prec = self.get_precision(sym)
+            step = self._lot_step_size(sym)
+            backstop_qty = self.round_to_step(qty, step) if step > 0 else self.round_amount(qty, amount_prec)
+
+            oco_id = self.place_oco(sym, backstop_qty, fill_price)
             if oco_id is None and self.cfg.oco_enabled:
                 # OCO not supported for this pair — try stop-limit instead
-                oco_id = self.place_stop_limit(sym, qty, fill_price)
+                oco_id = self.place_stop_limit(sym, backstop_qty, fill_price)
 
             self.positions[sym] = PositionState(
                 entry_price=fill_price,

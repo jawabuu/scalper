@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Enable BuildKit inline cache — embeds cache metadata in pushed image
+# so subsequent builds can use it as a cache source
+ARG BUILDKIT_INLINE_CACHE=1
+
 WORKDIR /app
 
 # Install dependencies first (cached layer)
