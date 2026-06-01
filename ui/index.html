@@ -271,6 +271,7 @@
   .r-tp    { background: rgba(0,212,170,0.12);  color: var(--green); }
   .r-ts    { background: rgba(255,179,68,0.12); color: var(--warn);  }
   .r-kill  { background: rgba(255,77,106,0.12); color: var(--red);   }
+  .r-ss    { background: rgba(153,0,255,0.12);  color: #aa66ff;      }
   .r-other { background: rgba(74,96,112,0.2);   color: var(--muted); }
 
   /* ── Empty states ── */
@@ -290,6 +291,56 @@
   }
 
   .err { color: var(--red); font-size: 11px; margin-top: 6px; }
+
+  /* ── Mobile responsive ── */
+  @media (max-width: 768px) {
+    header { padding: 0 12px; gap: 8px; }
+    .logo { font-size: 12px; }
+    .refresh-hint { display: none; }
+    .user-name { display: none; }
+
+    main {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto;
+    }
+
+    .stats-row {
+      grid-column: 1;
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    /* Controls go first (before positions) */
+    .kill-panel {
+      grid-column: 1;
+      order: -1;
+    }
+
+    /* Positions and history span full width, scroll horizontally */
+    .positions-panel {
+      grid-column: 1;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .history-panel {
+      grid-column: 1;
+      max-height: none;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* Tables maintain full width — user scrolls horizontally */
+    table { min-width: 600px; }
+
+    .stat-value { font-size: 18px; }
+    .btn { padding: 12px 16px; font-size: 12px; }
+  }
+
+  @media (max-width: 480px) {
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    header { padding: 0 10px; }
+    .login-card { padding: 32px 24px; min-width: 280px; }
+  }
 
   /* ── Login screen ── */
   .login-screen {
@@ -465,7 +516,7 @@
   </div>
 </div>
 
-<div class="shell" id="app">
+<div class="shell" id="app" style="visibility:hidden">
   <header>
     <div class="pulse" id="pulse"></div>
     <span class="logo">⬡ Scalper</span>
@@ -616,7 +667,7 @@ function fmt(n, dec=2) {
 function pnlClass(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : ''; }
 
 function reasonPill(r) {
-  const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual' };
+  const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual', server_side:'r-ss ss' };
   const cls = map[r] || 'r-other';
   const label = r.replace(/_/g,' ');
   return `<span class="reason-pill ${cls}">${label}</span>`;
@@ -771,14 +822,14 @@ async function refresh() {
           <td class="num ${cls}">$${fmt(t.pnl_usdt, 2)}</td>
           <td class="num">$${fmt(t.exit_price * t.qty, 2)}</td>
           <td>${reasonPill(t.reason)}</td>
-          <td style="color:var(--muted);font-size:11px">${timeAgo(t.closed_at)}</td>
+          <td class="" style="color:var(--muted);font-size:11px">${timeAgo(t.closed_at)}</td>
         </tr>`;
       }).join('');
       setEl('history-wrap', `<table>
         <thead><tr>
           <th>Pair</th><th class="num">Entry</th><th class="num">Exit</th>
           <th class="num">Qty</th><th class="num">P&L %</th><th class="num">P&L $</th>
-          <th class="num">Sale value</th><th>Reason</th><th>Closed</th>
+          <th class="num">Sale value</th><th>Reason</th><th class="">Closed</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`);

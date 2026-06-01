@@ -79,6 +79,22 @@ class BotConfig:
     oco_stop_pct: float = field(default_factory=lambda: _env_float("OCO_STOP_PCT", 2.0))
     oco_enabled: bool = field(default_factory=lambda: _env_bool("OCO_ENABLED", True))
 
+    # ── Stop-limit fallback (for pairs that don't support OCO) ──────────
+    # Placed at entry * (1 - (trailing_stop_pct + stop_limit_offset_pct)%).
+    # The offset pushes the stop trigger just below the trailing stop so the
+    # in-memory trailing stop always fires first while the bot is running.
+    # The stop-limit only triggers if the bot dies and price gaps down past
+    # the trailing stop level before the bot can recover.
+    #
+    # stop trigger  = entry * (1 - (trailing_stop_pct + stop_limit_offset_pct))
+    # limit price   = stop trigger * (1 - stop_limit_fill_buffer_pct)
+    #
+    # Example: trailing=1.2%, offset=0.05%, fill_buffer=0.1%
+    #   stop trigger = entry * (1 - 1.25%) — just below trailing stop
+    #   limit price  = stop trigger * (1 - 0.1%) — ensures fill in fast drops
+    stop_limit_offset_pct: float = field(default_factory=lambda: _env_float("STOP_LIMIT_OFFSET_PCT", 0.05))
+    stop_limit_fill_buffer_pct: float = field(default_factory=lambda: _env_float("STOP_LIMIT_FILL_BUFFER_PCT", 0.1))
+
     # ── Cooldown ────────────────────────────────────────────────────────
     # Number of candles to wait before re-entering a manually closed symbol.
     # Prevents the bot immediately re-buying something you just closed.

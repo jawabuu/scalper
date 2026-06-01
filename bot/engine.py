@@ -292,13 +292,44 @@ class ScalpingEngine:
         d = Decimal(str(price)).quantize(Decimal(10) ** -int(precision), rounding=ROUND_DOWN)
         return float(d)
 
+    def _lot_step_size(self, symbol: str) -> float:
+        """Return the MARKET_LOT_SIZE stepSize for a symbol, or 0 if unavailable."""
+        try:
+            market = self.exchange.market(symbol)
+            filters = market.get("info", {}).get("filters", [])
+            for f in filters:
+                if f.get("filterType") == "MARKET_LOT_SIZE":
+                    return float(f.get("stepSize", 0))
+            # Fall back to LOT_SIZE if MARKET_LOT_SIZE not present
+            for f in filters:
+                if f.get("filterType") == "LOT_SIZE":
+                    return float(f.get("stepSize", 0))
+        except Exception:
+            pass
+        return 0
+
+    def round_to_step(self, qty: float, step: float) -> float:
+        """Round qty down to the nearest lot step size."""
+        if step <= 0:
+            return qty
+        from decimal import Decimal, ROUND_DOWN
+        step_d = Decimal(str(step))
+        qty_d  = Decimal(str(qty))
+        return float((qty_d // step_d) * step_d)
+
     def place_buy(self, symbol: str, usdt_amount: float, current_price: float) -> dict | None:
         _, amount_prec = self.get_precision(symbol)
-        qty = self.round_amount(usdt_amount / current_price, amount_prec)
+        raw_qty = usdt_amount / current_price
+
+        # Round to lot step size first (MARKET_LOT_SIZE filter), then to precision
+        step = self._lot_step_size(symbol)
+        if step > 0:
+            qty = self.round_to_step(raw_qty, step)
+        else:
+            qty = self.round_amount(raw_qty, amount_prec)
+
         if qty <= 0:
-            # Allocation too small relative to coin price and lot size precision.
-            # Common for high-price coins (BNB, BTC) with small balance — not an error.
-            log.debug(f"Skipping {symbol}: allocation ${usdt_amount:.2f} too small for lot size (qty rounds to 0)")
+            log.debug(f"Skipping {symbol}: allocation ${usdt_amount:.2f} too small for lot size (step={step})")
             return None
         # Also check min notional (Binance rejects orders below ~$10 equivalent)
         if qty * current_price < self.cfg.min_trade_usdt:
@@ -373,16 +404,83 @@ class ScalpingEngine:
             )
             return None
 
+    def _min_price(self, symbol: str) -> float:
+        """Return the minimum allowed price for a symbol from PRICE_FILTER."""
+        try:
+            market = self.exchange.market(symbol)
+            filters = market.get("info", {}).get("filters", [])
+            for f in filters:
+                if f.get("filterType") == "PRICE_FILTER":
+                    return float(f.get("minPrice", 0))
+        except Exception:
+            pass
+        return 0
+
+    def place_stop_limit(self, symbol: str, qty: float, entry_price: float) -> str | None:
+        """
+        Place a stop-limit sell order as a fallback for pairs that don't support OCO.
+
+        Stop trigger = entry * (1 - (trailing_stop_pct + stop_limit_offset_pct)%)
+          → sits just below the trailing stop so in-memory trailing always fires first
+        Limit price  = stop_trigger * (1 - stop_limit_fill_buffer_pct%)
+          → ensures fill even during fast gap-downs
+
+        Both prices are clamped to the market's minimum price (PRICE_FILTER)
+        to avoid rejection on low-price coins.
+
+        Returns the order ID string on success, None on failure.
+        """
+        price_prec, amount_prec = self.get_precision(symbol)
+        qty = self.round_amount(qty, amount_prec)
+
+        total_stop_pct = self.cfg.trailing_stop_pct + self.cfg.stop_limit_offset_pct
+        stop_price  = self.round_price(entry_price * (1 - total_stop_pct / 100), price_prec)
+        limit_price = self.round_price(stop_price * (1 - self.cfg.stop_limit_fill_buffer_pct / 100), price_prec)
+
+        # Clamp to minimum price — prevents rejection on low-price coins
+        min_price = self._min_price(symbol)
+        if min_price > 0:
+            stop_price  = max(stop_price, min_price)
+            limit_price = max(limit_price, min_price)
+            if limit_price >= stop_price:
+                # If buffer pushed limit above stop, set limit = stop - 1 tick
+                tick = 10 ** -int(price_prec)
+                limit_price = max(round(stop_price - tick, int(price_prec)), min_price)
+
+        try:
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type="STOP_LOSS_LIMIT",
+                side="sell",
+                amount=qty,
+                price=limit_price,
+                params={"stopPrice": stop_price, "timeInForce": "GTC"},
+            )
+            order_id = str(order.get("id") or "")
+            log.info(
+                f"Stop-limit placed for {symbol}: trigger={stop_price} "
+                f"limit={limit_price} id={order_id}"
+            )
+            return order_id or None
+        except Exception as e:
+            log.warning(f"Stop-limit placement failed for {symbol}: {e}")
+            return None
+
     def cancel_oco(self, symbol: str, list_id: str | None):
-        """Cancel a previously placed OCO order before the bot executes its own exit."""
+        """Cancel a previously placed OCO or stop-limit order before the bot exits."""
         if not list_id:
             return
         try:
-            self.exchange.cancel_order(list_id, symbol, params={"orderListId": list_id})
-            log.info(f"OCO cancelled for {symbol} listId={list_id}")
+            # Try as OCO first, then as plain order (stop-limit fallback)
+            try:
+                self.exchange.cancel_order(list_id, symbol, params={"orderListId": list_id})
+                log.info(f"OCO cancelled for {symbol} id={list_id}")
+            except Exception:
+                self.exchange.cancel_order(list_id, symbol)
+                log.info(f"Stop-limit cancelled for {symbol} id={list_id}")
         except Exception as e:
             # May already be filled or cancelled — log and move on
-            log.debug(f"OCO cancel for {symbol} listId={list_id}: {e}")
+            log.debug(f"Order cancel for {symbol} id={list_id}: {e}")
 
     def place_sell(self, symbol: str, qty: float) -> dict | None:
         try:
@@ -517,7 +615,55 @@ class ScalpingEngine:
         log.info(f"Available USDT: {balance:.2f}")
 
         # --- Manage existing positions ---
+        # Fetch full balance once per cycle for server-side close detection
+        try:
+            live_balance = self.exchange.fetch_balance()
+        except Exception as e:
+            log.warning(f"Balance fetch failed — skipping server-side close check: {e}")
+            live_balance = None
+
         for sym in list(self.positions.keys()):
+            pos = self.positions[sym]
+
+            # ── Server-side close detection ──────────────────────────────
+            # If the stop-limit or OCO fired while the bot was running/restarting,
+            # the coin balance will be zero. Detect and record cleanly.
+            if live_balance is not None:
+                coin = sym.replace("/USDT", "")
+                coin_free = float(
+                    (live_balance.get(coin) or {}).get("free") or 0
+                )
+                notional = coin_free * pos.entry_price
+                if notional < self.cfg.min_trade_usdt * 0.5:
+                    # Balance is gone — server-side order must have fired
+                    try:
+                        ticker = self.exchange.fetch_ticker(sym)
+                        exit_price = float(ticker["last"] or pos.entry_price)
+                    except Exception:
+                        exit_price = pos.entry_price
+                    pnl_pct  = (exit_price - pos.entry_price) / pos.entry_price * 100
+                    pnl_usdt = (exit_price - pos.entry_price) * pos.qty
+                    log.warning(
+                        f"SERVER-SIDE CLOSE detected for {sym}: "
+                        f"balance={coin_free} notional={notional:.2f} "
+                        f"pnl={pnl_pct:+.2f}% — recording and removing from store."
+                    )
+                    self.trade_log.append(ClosedTrade(
+                        symbol=sym,
+                        entry_price=pos.entry_price,
+                        exit_price=exit_price,
+                        qty=pos.qty,
+                        pnl_pct=round(pnl_pct, 4),
+                        pnl_usdt=round(pnl_usdt, 4),
+                        reason="server_side",
+                        opened_at=pos.opened_at,
+                    ))
+                    # Cancel any remaining orders for this symbol
+                    self._cancel_open_orders(sym)
+                    del self.positions[sym]
+                    continue
+
+            # ── Normal cycle management ───────────────────────────────────
             df = self.fetch_ohlcv(sym)
             if df is None:
                 continue
@@ -570,8 +716,12 @@ class ScalpingEngine:
             qty           = order.get("filled") or alloc / fill_price
             trailing_stop = fill_price * (1 - self.cfg.trailing_stop_pct / 100)
 
-            # Place OCO backstop — wider than trailing stop, lives on Binance servers
+            # Place server-side backstop — OCO preferred, stop-limit as fallback.
+            # Both are wider than the trailing stop so they only fire if the bot dies.
             oco_id = self.place_oco(sym, qty, fill_price)
+            if oco_id is None and self.cfg.oco_enabled:
+                # OCO not supported for this pair — try stop-limit instead
+                oco_id = self.place_stop_limit(sym, qty, fill_price)
 
             self.positions[sym] = PositionState(
                 entry_price=fill_price,

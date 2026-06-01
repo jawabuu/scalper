@@ -19,8 +19,6 @@ services:
       - HTTPPROXY_LISTENING_ADDRESS=:8888
 
   scalper:
-    # Local: builds from source. VPS: pulls pre-built image from GHCR.
-    # IMAGE_TAG is set by GitHub Actions; unset locally so the build target is used.
     build:
       context: .
       dockerfile: Dockerfile
@@ -29,8 +27,17 @@ services:
     env_file:
       - .env
     environment:
-      #- SOCKS_PROXY=http://gluetun:8888
       - SOCKS_PROXY=socks5h://gluetun:1080
+      - MAX_PORTFOLIO_PCT=24.0
+      - MAX_OPEN_POSITIONS=4
+      # ── Testnet overrides — looser filters to compensate for thin testnet market ──
+      - MIN_VOLUME_USDT=100000     # testnet has low simulated volume
+      - MAX_SYMBOLS=30             # cast wider net
+      - ADX_MIN=20                 # testnet trends are weaker
+      - RSI_MIN=45                 # wider momentum window
+      - RSI_MAX=70
+      - MAX_SPREAD_PCT=0.2         # testnet spreads are wider
+      - MAX_HOLD_CANDLES=6         # faster cycling for testing
     depends_on:
       - gluetun
     volumes:
