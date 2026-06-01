@@ -121,6 +121,8 @@ class ScalpingEngine:
             if not isinstance(amounts, dict):
                 amounts = {}
             free = float(amounts.get("free") or 0)
+            used = float(amounts.get("used") or 0)  # locked in open orders (e.g. stop-market)
+            total = free + used
 
             # Fetch current price for notional check
             try:
@@ -129,13 +131,13 @@ class ScalpingEngine:
             except Exception:
                 price = pos.entry_price
 
-            notional = free * price
+            notional = total * price
 
             if notional < self.cfg.min_trade_usdt * 0.5:
                 # Balance gone — position was likely closed manually or OCO fired
                 log.warning(
                     f"Recovery: {symbol} has no balance on Binance "
-                    f"(free={free} notional={notional:.2f}) — discarding from store."
+                    f"(free={free} used={used} total={total} notional={notional:.2f}) — discarding from store."
                 )
                 del self.positions[symbol]
                 discarded += 1
@@ -169,19 +171,19 @@ class ScalpingEngine:
                 # The excess could be a manual top-up, a testnet quirk, or a
                 # partial fill discrepancy — we only manage what the bot entered.
                 # If Binance shows LESS (partial sell, dust), trust Binance.
-                if free > pos.qty * 1.05:
+                if total > pos.qty * 1.05:
                     log.warning(
-                        f"Recovery: {symbol} Binance balance ({free}) exceeds stored qty "
+                        f"Recovery: {symbol} Binance balance ({total}) exceeds stored qty "
                         f"({pos.qty}) by >5% — managing stored qty only. "
-                        f"Excess {free - pos.qty:.6f} units are unmanaged."
+                        f"Excess {total - pos.qty:.6f} units are unmanaged."
                     )
                     # qty stays as stored — don't update
-                elif free < pos.qty * 0.95:
+                elif total < pos.qty * 0.95:
                     log.warning(
-                        f"Recovery: {symbol} qty adjusted down {pos.qty} → {free} "
+                        f"Recovery: {symbol} qty adjusted down {pos.qty} → {total} "
                         f"(partial sell or dust detected)"
                     )
-                    pos.qty = free
+                    pos.qty = total
                     self.positions[symbol] = pos
 
                 log.warning(
