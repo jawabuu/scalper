@@ -1,5 +1,4 @@
 version: "3.9"
-
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
@@ -39,7 +38,8 @@ services:
       - MAX_SPREAD_PCT=0.2         # testnet spreads are wider
       - MAX_HOLD_CANDLES=288       # same as live
     depends_on:
-      - gluetun
+      gluetun:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     logging:

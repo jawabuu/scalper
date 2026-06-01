@@ -209,6 +209,12 @@ class ScalpingEngine:
             volume_usdt = (t.get("quoteVolume") or 0)
             bid, ask = t.get("bid") or 0, t.get("ask") or 0
             spread_pct = ((ask - bid) / ask * 100) if ask > 0 else 999
+            # Filter out stablecoins and near-stable assets by 24h price change.
+            # Any coin passing ADX/RSI filters will have moved well above 0.5%.
+            price_change = abs(t.get("percentage") or 0)
+            if price_change < 0.5:
+                log.debug(f"Skipping {sym}: 24h change {price_change:.2f}% — likely stablecoin")
+                continue
             if volume_usdt >= self.cfg.min_volume_usdt and spread_pct <= self.cfg.max_spread_pct:
                 candidates.append((sym, volume_usdt))
 
