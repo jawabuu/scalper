@@ -140,8 +140,30 @@ class ScalpingEngine:
                 del self.positions[symbol]
                 discarded += 1
             else:
-                # Cancel any open OCO — trailing stop takes over
-                self._cancel_open_orders(symbol)
+                # Check if the stored backstop order is still active on Binance.
+                # If it is, keep it — don't cancel valid protection.
+                # Only cancel if the order is gone (filled/cancelled) or unknown.
+                backstop_still_active = False
+                if pos.oco_order_list_id:
+                    try:
+                        open_orders = self.exchange.fetch_open_orders(symbol)
+                        open_ids = {str(o.get("id") or "") for o in open_orders}
+                        open_list_ids = {str(o.get("orderListId") or "") for o in open_orders}
+                        backstop_still_active = (
+                            pos.oco_order_list_id in open_ids or
+                            pos.oco_order_list_id in open_list_ids
+                        )
+                        if backstop_still_active:
+                            log.info(f"Recovery: {symbol} backstop order {pos.oco_order_list_id} still active — keeping")
+                        else:
+                            # Backstop is gone — cancel any other stale orders and
+                            # bot will re-place on next cycle via normal management
+                            log.info(f"Recovery: {symbol} backstop {pos.oco_order_list_id} no longer active — clearing")
+                            pos.oco_order_list_id = None
+                            pos.backstop_type = None
+                            self.positions[symbol] = pos
+                    except Exception as e:
+                        log.warning(f"Recovery: could not check orders for {symbol}: {e}")
 
                 # If Binance shows MORE than the stored qty, trust the store.
                 # The excess could be a manual top-up, a testnet quirk, or a
@@ -164,7 +186,8 @@ class ScalpingEngine:
 
                 log.warning(
                     f"RECOVERED {symbol}: entry={pos.entry_price:.6f} "
-                    f"stop={pos.trailing_stop:.6f} qty={pos.qty} candles={pos.candles_held}"
+                    f"stop={pos.trailing_stop:.6f} qty={pos.qty} candles={pos.candles_held} "
+                    f"backstop={'active' if backstop_still_active else 'none'}"
                 )
 
         active = len(self.positions)
@@ -675,23 +698,38 @@ class ScalpingEngine:
             # the coin balance will be zero. Detect and record cleanly.
             if live_balance is not None:
                 coin = sym.replace("/USDT", "")
-                coin_free = float(
-                    (live_balance.get(coin) or {}).get("free") or 0
-                )
-                notional = coin_free * pos.entry_price
+                coin_data = live_balance.get(coin) or {}
+                if not isinstance(coin_data, dict):
+                    coin_data = {}
+                coin_free   = float(coin_data.get("free")  or 0)
+                coin_used   = float(coin_data.get("used")  or 0)
+                coin_total  = coin_free + coin_used  # used = locked in open orders
+                notional = coin_total * pos.entry_price
                 if notional < self.cfg.min_trade_usdt * 0.5:
-                    # Balance is gone — server-side order must have fired
+                    # Balance is gone — server-side order must have fired.
+                    # Fetch actual fill price from recent trade history for accuracy.
+                    exit_price = pos.entry_price
                     try:
-                        ticker = self.exchange.fetch_ticker(sym)
-                        exit_price = float(ticker["last"] or pos.entry_price)
-                    except Exception:
-                        exit_price = pos.entry_price
+                        trades = self.exchange.fetch_my_trades(sym, limit=5)
+                        if trades:
+                            # Most recent trade is the server-side fill
+                            last_trade = sorted(trades, key=lambda t: t["timestamp"])[-1]
+                            exit_price = float(last_trade.get("price") or pos.entry_price)
+                            log.info(f"Server-side fill price for {sym}: {exit_price} (from trade history)")
+                    except Exception as e:
+                        log.debug(f"Could not fetch trade history for {sym}: {e} — using ticker")
+                        try:
+                            ticker = self.exchange.fetch_ticker(sym)
+                            exit_price = float(ticker["last"] or pos.entry_price)
+                        except Exception:
+                            exit_price = pos.entry_price
+
                     pnl_pct  = (exit_price - pos.entry_price) / pos.entry_price * 100
                     pnl_usdt = (exit_price - pos.entry_price) * pos.qty
                     log.warning(
                         f"SERVER-SIDE CLOSE detected for {sym}: "
-                        f"balance={coin_free} notional={notional:.2f} "
-                        f"pnl={pnl_pct:+.2f}% — recording and removing from store."
+                        f"free={coin_free} locked={coin_used} total={coin_total} notional={notional:.2f} "
+                        f"exit={exit_price:.6f} pnl={pnl_pct:+.2f}% — recording and removing from store."
                     )
                     self.trade_log.append(ClosedTrade(
                         symbol=sym,
@@ -703,8 +741,12 @@ class ScalpingEngine:
                         reason="server_side",
                         opened_at=pos.opened_at,
                     ))
-                    # Cancel any remaining orders for this symbol
-                    self._cancel_open_orders(sym)
+                    # Apply cooldown — prevents immediate re-entry on the same cycle
+                    # that could double-up position if detection misfires
+                    from datetime import timezone as _tz
+                    candle_secs = 300  # 5m default
+                    self._cooldown[sym] = time.time() + candle_secs
+                    log.info(f"{sym} server-side cooldown: no re-entry for 1 candle")
                     del self.positions[sym]
                     continue
 
