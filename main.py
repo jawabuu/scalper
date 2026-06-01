@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 
-from bot import BotConfig, ScalpingEngine
+from bot import BotConfig, ScalpingEngine, __version__
 from bot.api import run_api
 
 
@@ -40,7 +40,7 @@ if __name__ == "__main__":
 
     tp_info = f"tp={cfg.take_profit_pct}%" if cfg.take_profit_enabled else "tp=disabled"
     log.info(
-        f"Starting — testnet={cfg.testnet} tf={cfg.timeframe} "
+        f"🚀 Scalper v{__version__} — testnet={cfg.testnet} tf={cfg.timeframe} "
         f"stop={cfg.trailing_stop_pct}% {tp_info} "
         f"risk={cfg.risk_per_trade_pct}%/trade"
     )
