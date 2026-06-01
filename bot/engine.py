@@ -445,18 +445,17 @@ class ScalpingEngine:
         price_prec, amount_prec = self.get_precision(symbol)
         qty = self.round_amount(qty, amount_prec)
 
-        # Binance validates stop price against current market price, not entry price.
-        # Fetch current price and use the higher of entry/current as the reference —
-        # this ensures the stop is within Binance's PERCENT_PRICE_BY_SIDE band.
+        # Binance PERCENT_PRICE_BY_SIDE validates sell stop orders against the bid price.
+        # Fetch ticker once and use bid as reference — this keeps the stop within
+        # the allowed band even when last price and bid diverge (common on testnet).
         try:
             ticker = self.exchange.fetch_ticker(symbol)
-            current_price = float(ticker["last"] or entry_price)
+            current_price = float(ticker.get("last") or entry_price)
+            bid = float(ticker.get("bid") or 0)
+            reference_price = bid if bid > 0 else current_price
         except Exception:
             current_price = entry_price
-
-        # Use current price as reference — always within the band
-        # Stop is still placed below entry to protect capital
-        reference_price = current_price
+            reference_price = entry_price
         total_stop_pct = self.cfg.trailing_stop_pct + self.cfg.stop_limit_offset_pct
         stop_price = self.round_price(reference_price * (1 - total_stop_pct / 100), price_prec)
 
