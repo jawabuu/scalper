@@ -468,7 +468,16 @@ class ScalpingEngine:
         Returns the order ID string on success, None on failure.
         """
         price_prec, amount_prec = self.get_precision(symbol)
-        qty = self.round_amount(qty, amount_prec)
+        # Use lot step rounding — more accurate than decimal precision for stop orders
+        step = self._lot_step_size(symbol)
+        if step > 0:
+            qty = self.round_to_step(qty, step)
+        else:
+            qty = self.round_amount(qty, amount_prec)
+
+        if qty <= 0:
+            log.warning(f"Stop-market qty rounded to 0 for {symbol} — skipping")
+            return None
 
         # Binance PERCENT_PRICE_BY_SIDE validates sell stop orders against the bid price.
         # Fetch ticker once and use bid as reference — this keeps the stop within
