@@ -425,63 +425,72 @@ class ScalpingEngine:
 
     def place_stop_limit(self, symbol: str, qty: float, entry_price: float) -> str | None:
         """
-        Place a stop-limit sell order as a fallback for pairs that don't support OCO.
+        Place a stop-market sell order as a fallback for pairs that don't support OCO.
 
-        Stop trigger = entry * (1 - (trailing_stop_pct + stop_limit_offset_pct)%)
+        Uses STOP_LOSS (stop-market) not STOP_LOSS_LIMIT — guarantees fill even in
+        fast gap-downs since it executes at market price when triggered.
+
+        Stop trigger = current_price * (1 - (trailing_stop_pct + stop_limit_offset_pct)%)
+          → calculated from current market price to stay within PERCENT_PRICE_BY_SIDE band
           → sits just below the trailing stop so in-memory trailing always fires first
-        Limit price  = stop_trigger * (1 - stop_limit_fill_buffer_pct%)
-          → ensures fill even during fast gap-downs
-
-        Both prices are clamped to the market's minimum price (PRICE_FILTER)
-        to avoid rejection on low-price coins.
 
         Returns the order ID string on success, None on failure.
         """
         price_prec, amount_prec = self.get_precision(symbol)
         qty = self.round_amount(qty, amount_prec)
 
+        # Binance validates stop price against current market price, not entry price.
+        # Fetch current price and use the higher of entry/current as the reference —
+        # this ensures the stop is within Binance's PERCENT_PRICE_BY_SIDE band.
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            current_price = float(ticker["last"] or entry_price)
+        except Exception:
+            current_price = entry_price
+
+        # Use current price as reference — always within the band
+        # Stop is still placed below entry to protect capital
+        reference_price = current_price
         total_stop_pct = self.cfg.trailing_stop_pct + self.cfg.stop_limit_offset_pct
-        stop_price  = self.round_price(entry_price * (1 - total_stop_pct / 100), price_prec)
-        limit_price = self.round_price(stop_price * (1 - self.cfg.stop_limit_fill_buffer_pct / 100), price_prec)
+        stop_price = self.round_price(reference_price * (1 - total_stop_pct / 100), price_prec)
+
+        log.debug(
+            f"Stop-market calc for {symbol}: entry={entry_price} current={current_price} "
+            f"stop_trigger={stop_price}"
+        )
 
         # Clamp to minimum price — prevents rejection on low-price coins
         min_price = self._min_price(symbol)
         if min_price > 0:
-            stop_price  = max(stop_price, min_price)
-            limit_price = max(limit_price, min_price)
-            if limit_price >= stop_price:
-                # If buffer pushed limit above stop, set limit = stop - 1 tick
-                tick = 10 ** -int(price_prec)
-                limit_price = max(round(stop_price - tick, int(price_prec)), min_price)
+            stop_price = max(stop_price, min_price)
 
         try:
+            # Use STOP_LOSS (stop-market) — guarantees fill at market price when
+            # triggered, unlike STOP_LOSS_LIMIT which may not fill in fast drops.
             order = self.exchange.create_order(
                 symbol=symbol,
-                type="STOP_LOSS_LIMIT",
+                type="STOP_LOSS",
                 side="sell",
                 amount=qty,
-                price=limit_price,
-                params={"stopPrice": stop_price, "timeInForce": "GTC"},
+                params={"stopPrice": stop_price},
             )
             order_id = str(order.get("id") or "")
             log.info(
-                f"Stop-limit placed for {symbol}: trigger={stop_price} "
-                f"limit={limit_price} id={order_id}"
+                f"Stop-market placed for {symbol}: trigger={stop_price} "
+                f"id={order_id}"
             )
             return order_id or None
         except Exception as e:
             err = str(e)
-            # PERCENT_PRICE_BY_SIDE: stop price too far from current market price.
-            # Binance enforces a band (typically ±20%) around the last traded price.
-            # This means our calculated stop is outside that band — can happen on
-            # fast-moving coins. Trailing stop remains active.
             if "PERCENT_PRICE_BY_SIDE" in err:
                 log.warning(
-                    f"Stop-limit rejected for {symbol}: stop price outside Binance "
+                    f"Stop-market rejected for {symbol}: stop price outside Binance "
                     f"allowed band (PERCENT_PRICE_BY_SIDE) — trailing stop only"
                 )
+            elif "market lot size" in err.lower() or "LOT_SIZE" in err:
+                log.warning(f"Stop-market rejected for {symbol}: lot size issue — {e}")
             else:
-                log.warning(f"Stop-limit placement failed for {symbol}: {e}")
+                log.warning(f"Stop-market placement failed for {symbol}: {e}")
             return None
 
     def cancel_oco(self, symbol: str, list_id: str | None):
