@@ -843,8 +843,17 @@ class ScalpingEngine:
             _, amount_prec = self.get_precision(sym)
             step = self._lot_step_size(sym)
             qty_after_fees = qty * (1 - 0.0015)  # 0.15% buffer covers standard + BNB fees
-            backstop_qty = self.round_to_step(qty_after_fees, step) if step > 0                 else self.round_amount(qty_after_fees, amount_prec)
-            log.debug(f"Backstop qty for {sym}: filled={qty} after_fees={qty_after_fees:.6f} rounded={backstop_qty}")
+            if step > 0:
+                backstop_qty = self.round_to_step(qty_after_fees, step)
+                # If the fee buffer pushed us below one lot step but we genuinely hold
+                # at least one step, fall back to flooring the raw filled qty.
+                # This handles whole-unit coins (e.g. ZEC step=1.0) where a 0.15%
+                # buffer on qty=1.0 would otherwise round to 0.
+                if backstop_qty <= 0 and self.round_to_step(qty, step) >= step:
+                    backstop_qty = self.round_to_step(qty, step)
+            else:
+                backstop_qty = self.round_amount(qty_after_fees, amount_prec)
+            log.debug(f"Backstop qty for {sym}: filled={qty} after_fees={qty_after_fees:.6f} step={step} rounded={backstop_qty}")
 
             backstop_type = None
             oco_id = self.place_oco(sym, backstop_qty, fill_price)
