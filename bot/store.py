@@ -34,6 +34,8 @@ def _serialize(positions: dict[str, PositionState]) -> dict:
             "opened_at":          pos.opened_at.isoformat(),
             "oco_order_list_id":  pos.oco_order_list_id,
             "backstop_type":      pos.backstop_type,
+            "trailing_active":    pos.trailing_active,
+            "activation_price":   pos.activation_price,
         }
     return out
 
@@ -50,6 +52,8 @@ def _deserialize(data: dict) -> dict[str, PositionState]:
                 opened_at=datetime.fromisoformat(d["opened_at"]),
                 oco_order_list_id=d.get("oco_order_list_id"),
                 backstop_type=d.get("backstop_type"),
+                trailing_active=d.get("trailing_active", True),
+                activation_price=float(d.get("activation_price", 0.0)),
             )
         except Exception as e:
             log.warning(f"Skipping malformed position record for {sym}: {e}")

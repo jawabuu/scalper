@@ -63,6 +63,11 @@ class BotConfig:
 
     # ── Risk / exits ────────────────────────────────────────────────────
     trailing_stop_pct: float = field(default_factory=lambda: _env_float("TRAILING_STOP_PCT", 0.8))
+    # Initial value for the trailing-stop activation threshold (UI-toggled, in-memory).
+    # This ONLY sets the default percentage — the feature is enabled/disabled from the UI.
+    # When active, a new position's trailing stop does not engage until price first
+    # reaches entry * (1 + this%). Until then the server-side stop-market is the only stop.
+    trailing_activation_pct: float = field(default_factory=lambda: _env_float("TRAILING_ACTIVATION_PCT", 1.0))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

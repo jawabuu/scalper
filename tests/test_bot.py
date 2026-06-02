@@ -261,3 +261,56 @@ def test_store_survives_parameter_change(tmp_path):
     store2 = PositionStore(path)
     assert "XLM/USDT" in store2, "Position must survive a config change"
     assert store2["XLM/USDT"].qty == 4000.0
+
+
+# ── Trailing activation threshold tests ───────────────────────────────────────
+
+def test_position_state_trailing_active_default_true():
+    """Default must be True so existing behaviour and recovered positions are unchanged."""
+    from bot.state import PositionState
+    p = PositionState(entry_price=100, qty=1.0, trailing_stop=99)
+    assert p.trailing_active is True
+    assert p.activation_price == 0.0
+
+
+def test_trailing_activation_pct_config_default(cfg):
+    """Config provides the seed value; default 1.0."""
+    assert cfg.trailing_activation_pct == 1.0
+
+
+def test_store_roundtrip_preserves_activation(tmp_path):
+    """Persisted activation fields survive a save/load cycle."""
+    from bot.state import PositionState
+    from bot.store import PositionStore
+    path = tmp_path / "positions.json"
+
+    store = PositionStore(path=path)
+    store["BTC/USDT"] = PositionState(
+        entry_price=100.0, qty=1.0, trailing_stop=98.0,
+        trailing_active=False, activation_price=101.0,
+    )
+
+    store2 = PositionStore(path=path)  # re-load from disk
+    p = store2["BTC/USDT"]
+    assert p.trailing_active is False
+    assert p.activation_price == 101.0
+
+
+def test_store_load_legacy_position_defaults_active(tmp_path):
+    """A position saved before this feature (no fields) loads as trailing_active=True."""
+    import json
+    path = tmp_path / "positions.json"
+    legacy = {
+        "BTC/USDT": {
+            "entry_price": 100.0, "qty": 1.0, "trailing_stop": 98.0,
+            "candles_held": 5, "opened_at": "2026-01-01T00:00:00+00:00",
+            "oco_order_list_id": None, "backstop_type": None,
+        }
+    }
+    path.write_text(json.dumps(legacy))
+
+    from bot.store import PositionStore
+    store = PositionStore(path=path)
+    p = store["BTC/USDT"]
+    assert p.trailing_active is True   # legacy positions trail immediately
+    assert p.activation_price == 0.0

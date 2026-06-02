@@ -298,6 +298,71 @@
 
   .err { color: var(--red); font-size: 11px; margin-top: 6px; }
 
+  /* ── Trailing activation control ── */
+  .ta-control {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .ta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .ta-label {
+    font-size: 11px;
+    color: var(--text);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .ta-hint {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+  }
+  .ta-input-wrap { display: flex; align-items: center; gap: 3px; }
+  .ta-input {
+    width: 48px;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 3px 6px;
+    text-align: right;
+  }
+  .ta-input:focus { outline: none; border-color: var(--accent); }
+  .ta-pct-sign { font-size: 11px; color: var(--muted); }
+  .ta-status {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.03em;
+    margin-top: 4px;
+  }
+  .ta-status.on { color: var(--accent); }
+
+  /* Toggle switch */
+  .ta-switch { position: relative; display: inline-block; width: 38px; height: 20px; }
+  .ta-switch input { opacity: 0; width: 0; height: 0; }
+  .ta-slider {
+    position: absolute; cursor: pointer; inset: 0;
+    background: var(--bg3); border: 1px solid var(--border2);
+    border-radius: 20px; transition: 0.2s;
+  }
+  .ta-slider:before {
+    position: absolute; content: ""; height: 14px; width: 14px;
+    left: 2px; bottom: 2px; background: var(--muted);
+    border-radius: 50%; transition: 0.2s;
+  }
+  .ta-switch input:checked + .ta-slider {
+    background: rgba(0,212,170,0.2); border-color: var(--accent);
+  }
+  .ta-switch input:checked + .ta-slider:before {
+    transform: translateX(18px); background: var(--accent);
+  }
+
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     header { padding: 0 12px; gap: 8px; }
@@ -578,6 +643,24 @@
       <div id="ctrl-normal">
         <button class="btn btn-kill" id="btn-kill" onclick="promptKill()">⏹ Engage kill switch</button>
         <button class="btn btn-close" id="btn-closeall" style="margin-top:8px" onclick="promptCloseAll()">✕ Close all positions</button>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">Trailing activation</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="ta-toggle" onchange="onTaToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-row" id="ta-pct-row">
+            <span class="ta-hint">Activate stop after</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="ta-pct" class="ta-input" min="0" max="50" step="0.1" value="1.0" onchange="onTaPct()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-status" id="ta-status">Off — stops trail immediately</div>
+        </div>
       </div>
 
       <div id="ctrl-confirm-kill" style="display:none">
@@ -670,6 +753,78 @@ async function checkAuth() {
   return false;
 }
 
+// ── Trailing activation control ──────────────────────────────────────────────
+let _taEditing = false;  // suppress sync while user is editing the field
+
+function syncTrailingActivation(status) {
+  if (status.trailing_activation_enabled === undefined) return;
+  const toggle = document.getElementById('ta-toggle');
+  const pctInput = document.getElementById('ta-pct');
+  const statusEl = document.getElementById('ta-status');
+  const pctRow = document.getElementById('ta-pct-row');
+  if (!toggle || !pctInput || !statusEl) return;
+
+  const enabled = !!status.trailing_activation_enabled;
+  toggle.checked = enabled;
+
+  // Don't clobber the value while the user is typing in it
+  if (!_taEditing && status.trailing_activation_pct !== undefined) {
+    pctInput.value = Number(status.trailing_activation_pct).toFixed(1);
+  }
+
+  pctRow.style.opacity = enabled ? '1' : '0.45';
+  if (enabled) {
+    statusEl.textContent = `On — stop activates at +${Number(status.trailing_activation_pct).toFixed(1)}%`;
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = 'Off — stops trail immediately';
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postTrailingActivation(body) {
+  try {
+    const r = await fetch(API + '/api/trailing-activation', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncTrailingActivation({
+      trailing_activation_enabled: data.trailing_activation_enabled,
+      trailing_activation_pct: data.trailing_activation_pct,
+    });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update trailing activation: ${e.message}`);
+  }
+}
+
+function onTaToggle() {
+  const enabled = document.getElementById('ta-toggle').checked;
+  postTrailingActivation({ enabled });
+}
+
+function onTaPct() {
+  _taEditing = false;
+  const pct = parseFloat(document.getElementById('ta-pct').value);
+  if (isNaN(pct) || pct < 0 || pct > 50) {
+    setEl('ctrl-msg', 'Activation % must be between 0 and 50');
+    return;
+  }
+  postTrailingActivation({ pct });
+}
+
+// Mark editing so the 10s poll doesn't overwrite the field mid-type
+document.addEventListener('DOMContentLoaded', () => {
+  const pctInput = document.getElementById('ta-pct');
+  if (pctInput) {
+    pctInput.addEventListener('focus', () => { _taEditing = true; });
+    pctInput.addEventListener('blur', () => { _taEditing = false; });
+  }
+});
+
 async function doLogout() {
   await fetch(API + '/auth/logout', { method: 'POST', credentials: 'include' });
   _authed = false;
@@ -758,6 +913,7 @@ async function refresh() {
     }
     setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
     if (status.version) setEl('version-hint', `v${status.version}`);
+    syncTrailingActivation(status);
 
     setKillUI(status.kill_switch);
 

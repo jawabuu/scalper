@@ -88,6 +88,8 @@ def create_app(engine) -> FastAPI:
             "version":          __version__,
             "testnet":          _engine.cfg.testnet,
             "kill_switch":      _engine.kill_switch,
+            "trailing_activation_enabled": _engine.trailing_activation_enabled,
+            "trailing_activation_pct":     _engine.trailing_activation_pct,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -149,6 +151,39 @@ def create_app(engine) -> FastAPI:
     def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
+
+    @app.post("/api/trailing-activation")
+    def set_trailing_activation(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the trailing-stop activation threshold (in-memory, not persisted).
+        Body: {"enabled": bool, "pct": float}
+        Applies to NEW positions entered after this change — not retroactively.
+        """
+        enabled = payload.get("enabled")
+        pct     = payload.get("pct")
+
+        if enabled is not None:
+            _engine.trailing_activation_enabled = bool(enabled)
+
+        if pct is not None:
+            try:
+                pct_val = float(pct)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="pct must be a number")
+            if pct_val < 0 or pct_val > 50:
+                raise HTTPException(status_code=400, detail="pct must be between 0 and 50")
+            _engine.trailing_activation_pct = pct_val
+
+        log.info(
+            f"Trailing activation updated by {user['username']}: "
+            f"enabled={_engine.trailing_activation_enabled} "
+            f"pct={_engine.trailing_activation_pct}"
+        )
+        return {
+            "ok": True,
+            "trailing_activation_enabled": _engine.trailing_activation_enabled,
+            "trailing_activation_pct": _engine.trailing_activation_pct,
+        }
 
     @app.post("/api/kill")
     def kill(user: dict = Depends(_require_auth)):

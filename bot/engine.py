@@ -41,6 +41,11 @@ class ScalpingEngine:
         self._cache_ts: float = 0
         self._cooldown: dict[str, float] = {}  # symbol → earliest re-entry timestamp
         self.kill_switch: bool = False
+        # Trailing-stop activation threshold — in-memory only, UI-controlled.
+        # enabled=False means immediate trailing (original behaviour).
+        # pct seeds from config but is adjustable live via the UI.
+        self.trailing_activation_enabled: bool = False
+        self.trailing_activation_pct: float = cfg.trailing_activation_pct
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -576,6 +581,25 @@ class ScalpingEngine:
 
     def update_trailing_stop(self, sym: str, current_price: float):
         pos = self.positions[sym]
+
+        # Activation threshold: if this position's trailing stop is not yet active,
+        # check whether price has reached the activation level. Until it does, the
+        # trailing stop does not move and check_exit will not use it — the server-side
+        # stop-market is the only protection during this phase.
+        if not pos.trailing_active:
+            if pos.activation_price > 0 and current_price >= pos.activation_price:
+                pos.trailing_active = True
+                # Seed the trailing stop from the current price now that it's active.
+                pos.trailing_stop = current_price * (1 - self.cfg.trailing_stop_pct / 100)
+                self.positions[sym] = pos
+                log.info(
+                    f"{sym} trailing stop ACTIVATED at {current_price:.6f} "
+                    f"(reached threshold {pos.activation_price:.6f}); "
+                    f"stop set to {pos.trailing_stop:.6f}"
+                )
+            # Not yet at threshold — do not trail.
+            return
+
         new_stop = current_price * (1 - self.cfg.trailing_stop_pct / 100)
         if new_stop > pos.trailing_stop:
             self.positions.update_stop(sym, new_stop)
@@ -590,7 +614,9 @@ class ScalpingEngine:
             tp = pos.entry_price * (1 + self.cfg.take_profit_pct / 100)
             if current_price >= tp:
                 return "take_profit"
-        if current_price <= pos.trailing_stop:
+        # Only use the trailing stop as an exit once it has activated.
+        # Before activation, the server-side stop-market is the protection.
+        if pos.trailing_active and current_price <= pos.trailing_stop:
             return "trailing_stop"
         if pos.candles_held >= self.cfg.max_hold_candles:
             return "timeout"
@@ -876,18 +902,33 @@ class ScalpingEngine:
                     f"trailing stop is the only protection"
                 )
 
+            # Determine trailing activation for this position based on the current
+            # in-memory UI setting. If enabled, the trailing stop stays dormant until
+            # price reaches entry * (1 + activation_pct%); until then only the
+            # server-side stop-market protects the position.
+            if self.trailing_activation_enabled and self.trailing_activation_pct > 0:
+                trailing_active = False
+                activation_price = fill_price * (1 + self.trailing_activation_pct / 100)
+            else:
+                trailing_active = True
+                activation_price = 0.0
+
             self.positions[sym] = PositionState(
                 entry_price=fill_price,
                 qty=qty,
                 trailing_stop=trailing_stop,
                 oco_order_list_id=oco_id,
                 backstop_type=backstop_type,
+                trailing_active=trailing_active,
+                activation_price=activation_price,
             )
             log.info(
                 f"ENTERED {sym} @ {fill_price:.6f} "
                 f"trailing_stop={trailing_stop:.6f} "
                 f"oco_stop={fill_price * (1 - self.cfg.oco_stop_pct / 100):.6f} "
-                f"oco_id={oco_id}"
+                f"oco_id={oco_id} "
+                f"trailing_active={trailing_active}"
+                + (f" activation_price={activation_price:.6f}" if not trailing_active else "")
             )
 
     def run(self):
