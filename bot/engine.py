@@ -871,12 +871,17 @@ class ScalpingEngine:
             qty_after_fees = qty * (1 - 0.0015)  # 0.15% buffer covers standard + BNB fees
             if step > 0:
                 backstop_qty = self.round_to_step(qty_after_fees, step)
-                # If the fee buffer pushed us below one lot step but we genuinely hold
-                # at least one step, fall back to flooring the raw filled qty.
-                # This handles whole-unit coins (e.g. ZEC step=1.0) where a 0.15%
-                # buffer on qty=1.0 would otherwise round to 0.
-                if backstop_qty <= 0 and self.round_to_step(qty, step) >= step:
-                    backstop_qty = self.round_to_step(qty, step)
+                # Whole-unit coins (e.g. ZEC step=1.0): a 1.0 buy becomes ~0.999 after
+                # fees, which floors to 0. We cannot place a stop for 1.0 (we don't hold
+                # it) but we also cannot place for 0. In this case the server-side stop
+                # is genuinely impossible — the safety override in the entry logic will
+                # force the in-memory trailing stop active instead.
+                # If, however, we hold MORE than one whole step (e.g. bought 2.0 → 1.998),
+                # we can place a stop for the floored integer.
+                if backstop_qty <= 0:
+                    floored = self.round_to_step(qty, step)
+                    if floored >= step:
+                        backstop_qty = floored
             else:
                 backstop_qty = self.round_amount(qty_after_fees, amount_prec)
             log.debug(f"Backstop qty for {sym}: filled={qty} after_fees={qty_after_fees:.6f} step={step} rounded={backstop_qty}")
@@ -906,12 +911,24 @@ class ScalpingEngine:
             # in-memory UI setting. If enabled, the trailing stop stays dormant until
             # price reaches entry * (1 + activation_pct%); until then only the
             # server-side stop-market protects the position.
-            if self.trailing_activation_enabled and self.trailing_activation_pct > 0:
+            #
+            # CRITICAL SAFETY RULE: a dormant trailing stop relies entirely on the
+            # server-side backstop for protection. If no backstop was placed
+            # (oco_id is None), starting dormant would leave the position COMPLETELY
+            # unprotected. In that case we force the trailing stop active immediately
+            # so there is always at least one layer of protection.
+            if self.trailing_activation_enabled and self.trailing_activation_pct > 0 and oco_id:
                 trailing_active = False
                 activation_price = fill_price * (1 + self.trailing_activation_pct / 100)
             else:
                 trailing_active = True
                 activation_price = 0.0
+                if self.trailing_activation_enabled and not oco_id:
+                    log.warning(
+                        f"{sym}: no server-side backstop — forcing trailing stop ACTIVE "
+                        f"immediately (overriding activation threshold) to avoid an "
+                        f"unprotected position."
+                    )
 
             self.positions[sym] = PositionState(
                 entry_price=fill_price,

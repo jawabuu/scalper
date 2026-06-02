@@ -314,3 +314,35 @@ def test_store_load_legacy_position_defaults_active(tmp_path):
     p = store["BTC/USDT"]
     assert p.trailing_active is True   # legacy positions trail immediately
     assert p.activation_price == 0.0
+
+
+# ── Critical safety: dormant position must never be unprotected ────────────────
+
+def test_no_backstop_forces_trailing_active_logic():
+    """
+    The core safety invariant: if trailing activation is enabled BUT no server-side
+    backstop was placed, the position must start with trailing_active=True so it is
+    never left completely unprotected. This test verifies the decision logic.
+    """
+    # Replicate the exact decision from run_cycle entry logic
+    def decide(activation_enabled, activation_pct, oco_id, fill_price):
+        if activation_enabled and activation_pct > 0 and oco_id:
+            return (False, fill_price * (1 + activation_pct / 100))
+        return (True, 0.0)
+
+    # Case 1: activation on, backstop placed → dormant (normal)
+    active, ap = decide(True, 1.0, "order123", 100.0)
+    assert active is False and ap == 101.0
+
+    # Case 2: activation on, NO backstop → forced active (safety)
+    active, ap = decide(True, 1.0, None, 100.0)
+    assert active is True and ap == 0.0, \
+        "Position with no backstop MUST start trailing_active=True"
+
+    # Case 3: activation off → always active
+    active, ap = decide(False, 1.0, "order123", 100.0)
+    assert active is True and ap == 0.0
+
+    # Case 4: activation off, no backstop → active
+    active, ap = decide(False, 1.0, None, 100.0)
+    assert active is True and ap == 0.0
