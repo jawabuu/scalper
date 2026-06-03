@@ -393,3 +393,49 @@ def test_btc_regime_cache_reset_semantics():
     assert cache is None  # would trigger recompute
     cache = {"available": True, "short_term_falling": False}
     assert cache is not None  # would use cached value
+
+
+# ── Partial backstop coverage (whole-unit coin) safety ─────────────────────────
+
+def test_partial_backstop_detection():
+    """
+    Whole-unit-step coins can't fully cover a fractional holding with a server-side
+    stop. When the uncovered fraction is meaningful (>1%, the TAO bug), the position
+    must be flagged partial so the trailing stop stays active. Fee dust (<1%) is fine.
+    """
+    def round_to_step(qty, step):
+        if step <= 0:
+            return qty
+        return int(round(qty / step, 9)) * step
+
+    def is_partial(qty, step):
+        post_fee = qty * (1 - 0.0015)
+        if step > 0 and post_fee > 0:
+            backstop_qty = round_to_step(post_fee, step)
+            uncovered_pct = (post_fee - backstop_qty) / post_fee * 100
+            return uncovered_pct > 1.0
+        return False
+
+    # Whole-unit coins with meaningful remainder → partial
+    assert is_partial(2.0, 1.0) is True     # TAO: ~50% uncovered
+    assert is_partial(1.0, 1.0) is True     # ZEC: 100% uncovered
+    assert is_partial(3.0, 1.0) is True     # ~33% uncovered
+    # Fine-grained coins → only fee dust uncovered → not partial
+    assert is_partial(100.5, 0.001) is False
+    assert is_partial(50.25, 0.01) is False
+    # Large whole-unit qty → fee dust is < 1 unit → not partial
+    assert is_partial(16219.0, 1.0) is False
+
+
+def test_partial_backstop_forces_trailing_active():
+    """When backstop is partial, the position must not start dormant."""
+    def should_be_dormant(activation_enabled, oco_id, partial_backstop):
+        backstop_fully_covers = bool(oco_id) and not partial_backstop
+        return activation_enabled and backstop_fully_covers
+
+    # Partial backstop + activation on → must NOT be dormant
+    assert should_be_dormant(True, "order123", True) is False
+    # Full backstop + activation on → dormant is allowed
+    assert should_be_dormant(True, "order123", False) is True
+    # No backstop → never dormant
+    assert should_be_dormant(True, None, False) is False

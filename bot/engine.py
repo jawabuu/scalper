@@ -179,10 +179,18 @@ class ScalpingEngine:
                     except Exception as e:
                         log.warning(f"Recovery: could not check orders for {symbol}: {e}")
 
-                # If Binance shows MORE than the stored qty, trust the store.
-                # The excess could be a manual top-up, a testnet quirk, or a
-                # partial fill discrepancy — we only manage what the bot entered.
-                # If Binance shows LESS (partial sell, dust), trust Binance.
+                # Reconcile stored qty against the actual Binance balance.
+                #
+                # `total` = free + used, where `used` is coins locked by open orders
+                # (e.g. the active stop-market backstop). The DELIVERABLE balance — what
+                # we can actually sell — is at most `total`. We never want the stored qty
+                # to exceed what Binance reports, because that inflates the displayed
+                # position value and portfolio total (the TAO 2.0-vs-0.998 discrepancy).
+                #
+                # Rules:
+                #   - Binance MORE than stored (>5%): excess is unmanaged, keep stored qty.
+                #   - Binance LESS than stored (>5%): trust Binance, adjust down.
+                #   - Within 5%: snap to the actual total so the display is exact.
                 if total > pos.qty * 1.05:
                     log.warning(
                         f"Recovery: {symbol} Binance balance ({total}) exceeds stored qty "
@@ -193,7 +201,7 @@ class ScalpingEngine:
                 elif total < pos.qty * 0.95:
                     log.warning(
                         f"Recovery: {symbol} qty adjusted down {pos.qty} → {total} "
-                        f"(partial sell or dust detected)"
+                        f"(partial sell, dust, or stored qty was stale)"
                     )
                     pos.qty = total
                     self.positions[symbol] = pos
@@ -849,6 +857,23 @@ class ScalpingEngine:
                     del self.positions[sym]
                     continue
 
+                # ── Live qty reconciliation ──────────────────────────────
+                # Keep the in-memory qty honest against the actual Binance balance.
+                # This prevents the dashboard from showing an inflated position value
+                # if the holding changed outside the bot's normal flow (partial fill,
+                # manual action, exchange adjustment). Only adjusts DOWN to what's
+                # actually held — never invents coins. Uses total (free+used) so an
+                # active backstop locking the coin doesn't look like a reduced balance.
+                if coin_total > 0 and pos.qty > 0:
+                    divergence = abs(coin_total - pos.qty) / pos.qty
+                    if coin_total < pos.qty * 0.95 and divergence > 0.01:
+                        log.warning(
+                            f"{sym} qty reconciled {pos.qty} → {coin_total} "
+                            f"(live balance below stored qty by {divergence*100:.1f}%)"
+                        )
+                        pos.qty = coin_total
+                        self.positions[sym] = pos
+
             # ── Normal cycle management ───────────────────────────────────
             df = self.fetch_ohlcv(sym)
             if df is None:
@@ -948,23 +973,33 @@ class ScalpingEngine:
             # try to sell more than we actually hold.
             _, amount_prec = self.get_precision(sym)
             step = self._lot_step_size(sym)
-            qty_after_fees = qty * (1 - 0.0015)  # 0.15% buffer covers standard + BNB fees
+            # The deliverable balance after fees (Binance deducts the trading fee from
+            # the asset received unless paid in BNB). A server-side stop can sell at
+            # most this much, floored to the lot step.
+            post_fee_balance = qty * (1 - 0.0015)
             if step > 0:
-                backstop_qty = self.round_to_step(qty_after_fees, step)
-                # Whole-unit coins (e.g. ZEC step=1.0): a 1.0 buy becomes ~0.999 after
-                # fees, which floors to 0. We cannot place a stop for 1.0 (we don't hold
-                # it) but we also cannot place for 0. In this case the server-side stop
-                # is genuinely impossible — the safety override in the entry logic will
-                # force the in-memory trailing stop active instead.
-                # If, however, we hold MORE than one whole step (e.g. bought 2.0 → 1.998),
-                # we can place a stop for the floored integer.
-                if backstop_qty <= 0:
-                    floored = self.round_to_step(qty, step)
-                    if floored >= step:
-                        backstop_qty = floored
+                backstop_qty = self.round_to_step(post_fee_balance, step)
             else:
-                backstop_qty = self.round_amount(qty_after_fees, amount_prec)
-            log.debug(f"Backstop qty for {sym}: filled={qty} after_fees={qty_after_fees:.6f} step={step} rounded={backstop_qty}")
+                backstop_qty = self.round_amount(post_fee_balance, amount_prec)
+
+            # Detect MEANINGFUL partial coverage. Normal fee dust leaves a tiny sliver
+            # uncovered (~0.1-0.15% of the position) which the in-memory trailing stop
+            # mops up at exit — that is fine. The dangerous case is the whole-unit coin
+            # where flooring to a step=1.0 lot leaves a large fraction exposed: e.g.
+            # hold ~1.997 TAO, the stop covers only 1.0, leaving ~0.997 (~50% of the
+            # position) unprotected — the TAO 2-bought/1-stopped bug. We flag partial
+            # when the uncovered amount exceeds 1% of the holding (well above fee dust).
+            # When partial is True the trailing stop must stay ACTIVE to cover the rest.
+            if step > 0 and post_fee_balance > 0:
+                uncovered_pct = (post_fee_balance - backstop_qty) / post_fee_balance * 100
+                partial_backstop = uncovered_pct > 1.0
+            else:
+                partial_backstop = False
+            log.debug(
+                f"Backstop qty for {sym}: filled={qty} step={step} "
+                f"post_fee={post_fee_balance:.6f} backstop_qty={backstop_qty} "
+                f"partial={partial_backstop}"
+            )
 
             backstop_type = None
             oco_id = self.place_oco(sym, backstop_qty, fill_price)
@@ -989,25 +1024,30 @@ class ScalpingEngine:
 
             # Determine trailing activation for this position based on the current
             # in-memory UI setting. If enabled, the trailing stop stays dormant until
-            # price reaches entry * (1 + activation_pct%); until then only the
-            # server-side stop-market protects the position.
+            # price reaches entry * (1 + activation_pct%); until then the server-side
+            # backstop is the protection.
             #
-            # CRITICAL SAFETY RULE: a dormant trailing stop relies entirely on the
-            # server-side backstop for protection. If no backstop was placed
-            # (oco_id is None), starting dormant would leave the position COMPLETELY
-            # unprotected. In that case we force the trailing stop active immediately
-            # so there is always at least one layer of protection.
-            if self.trailing_activation_enabled and self.trailing_activation_pct > 0 and oco_id:
+            # CRITICAL SAFETY RULES — a dormant trailing stop relies on the server-side
+            # backstop. The position may only start dormant if the backstop FULLY covers
+            # it. We force the trailing stop active immediately when either:
+            #   (a) no backstop was placed (oco_id is None), or
+            #   (b) the backstop only PARTIALLY covers the position (whole-unit coins
+            #       where a fractional remainder can't be covered by a step=1.0 stop —
+            #       e.g. hold 1.998 TAO, stop only covers 1.0, leaving 0.998 exposed).
+            # In both cases starting dormant would leave coins unprotected.
+            backstop_fully_covers = bool(oco_id) and not partial_backstop
+            if self.trailing_activation_enabled and self.trailing_activation_pct > 0 and backstop_fully_covers:
                 trailing_active = False
                 activation_price = fill_price * (1 + self.trailing_activation_pct / 100)
             else:
                 trailing_active = True
                 activation_price = 0.0
-                if self.trailing_activation_enabled and not oco_id:
+                if self.trailing_activation_enabled and not backstop_fully_covers:
+                    reason = "no server-side backstop" if not oco_id else \
+                             f"backstop only covers {backstop_qty} of {qty} units"
                     log.warning(
-                        f"{sym}: no server-side backstop — forcing trailing stop ACTIVE "
-                        f"immediately (overriding activation threshold) to avoid an "
-                        f"unprotected position."
+                        f"{sym}: {reason} — forcing trailing stop ACTIVE immediately "
+                        f"(overriding activation threshold) to avoid an unprotected position."
                     )
 
             self.positions[sym] = PositionState(
