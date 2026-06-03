@@ -46,6 +46,13 @@ class ScalpingEngine:
         # pct seeds from config but is adjustable live via the UI.
         self.trailing_activation_enabled: bool = False
         self.trailing_activation_pct: float = cfg.trailing_activation_pct
+        # BTC market-regime filter — in-memory only, UI-controlled.
+        # enabled=False means BTC trend is computed and logged but never blocks entries.
+        self.btc_filter_enabled: bool = False
+        self.btc_trend_lookback: int = cfg.btc_trend_lookback
+        self.btc_trend_threshold_pct: float = cfg.btc_trend_threshold_pct
+        # Per-cycle cache of the BTC regime so we compute it at most once per cycle.
+        self._btc_regime_cache: dict | None = None
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -269,6 +276,59 @@ class ScalpingEngine:
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         df.set_index("ts", inplace=True)
         return df
+
+    def compute_btc_regime(self) -> dict:
+        """
+        Compute BTC's market regime once per cycle and cache it.
+
+        Returns a dict with:
+          - short_term_falling: bool  → BTC down > threshold over the lookback window
+          - short_term_change_pct: float → % change over the lookback window
+          - regime_bullish: bool | None → EMA20 > EMA50 on BTC (slow context); None if unknown
+          - available: bool → False if the BTC fetch failed (callers should fail-open)
+
+        Fail-open contract: if BTC data cannot be fetched, available=False and
+        short_term_falling=False, so a transient error never blocks trading.
+        """
+        if self._btc_regime_cache is not None:
+            return self._btc_regime_cache
+
+        regime = {
+            "short_term_falling": False,
+            "short_term_change_pct": 0.0,
+            "regime_bullish": None,
+            "available": False,
+        }
+
+        df = self.fetch_ohlcv("BTC/USDT")
+        if df is None or len(df) < 51:
+            log.debug("BTC regime: fetch failed or insufficient data — failing open (entries allowed)")
+            self._btc_regime_cache = regime
+            return regime
+
+        try:
+            closes = df["close"]
+            current = float(closes.iloc[-1])
+            lookback = max(1, int(self.btc_trend_lookback))
+            # Guard against a lookback longer than the data we have
+            if lookback >= len(closes):
+                lookback = len(closes) - 1
+            past = float(closes.iloc[-1 - lookback])
+            change_pct = (current - past) / past * 100 if past > 0 else 0.0
+
+            ema20 = float(ta.ema(closes, length=20).iloc[-1])
+            ema50 = float(ta.ema(closes, length=50).iloc[-1])
+
+            regime["short_term_change_pct"] = round(change_pct, 4)
+            regime["short_term_falling"] = change_pct < -abs(self.btc_trend_threshold_pct)
+            regime["regime_bullish"] = ema20 > ema50
+            regime["available"] = True
+        except Exception as e:
+            log.debug(f"BTC regime computation error: {e} — failing open")
+            # leave defaults (available=False, not falling)
+
+        self._btc_regime_cache = regime
+        return regime
 
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -707,6 +767,8 @@ class ScalpingEngine:
 
     def run_cycle(self):
         self.last_cycle_ts = time.time()
+        # Clear the per-cycle BTC regime cache so it's recomputed fresh this cycle.
+        self._btc_regime_cache = None
 
         if self.kill_switch:
             if self.positions:
@@ -824,6 +886,24 @@ class ScalpingEngine:
             except ValueError as e:
                 log.warning(f"Invalid trading hours format: {e} — trading unrestricted")
 
+        # BTC market-regime check — compute once for this cycle (cached).
+        # Always computed so it can be logged on entries; only ENFORCED when enabled.
+        btc = self.compute_btc_regime()
+        if self.btc_filter_enabled:
+            if not btc["available"]:
+                # Fail-open: if BTC data is unavailable, allow entries but warn.
+                log.warning(
+                    "BTC filter enabled but BTC trend unavailable — failing open "
+                    "(entries allowed this cycle)"
+                )
+            elif btc["short_term_falling"]:
+                log.info(
+                    f"BTC short-term trend falling ({btc['short_term_change_pct']:+.2f}% "
+                    f"over {self.btc_trend_lookback} candles, threshold "
+                    f"-{abs(self.btc_trend_threshold_pct):.2f}%) — skipping new entries this cycle"
+                )
+                return
+
         for sym in symbols:
             if sym in self.positions:
                 continue
@@ -939,12 +1019,25 @@ class ScalpingEngine:
                 trailing_active=trailing_active,
                 activation_price=activation_price,
             )
+            # Stamp the BTC regime on every entry so we can later correlate
+            # win-rate against BTC trend, whether or not the filter is enforced.
+            btc_regime = self.compute_btc_regime()
+            if btc_regime["available"]:
+                btc_state = (
+                    f"BTC[{btc_regime['short_term_change_pct']:+.2f}% "
+                    f"{'falling' if btc_regime['short_term_falling'] else 'stable/up'}, "
+                    f"regime={'bull' if btc_regime['regime_bullish'] else 'bear'}]"
+                )
+            else:
+                btc_state = "BTC[unavailable]"
+
             log.info(
                 f"ENTERED {sym} @ {fill_price:.6f} "
                 f"trailing_stop={trailing_stop:.6f} "
                 f"oco_stop={fill_price * (1 - self.cfg.oco_stop_pct / 100):.6f} "
                 f"oco_id={oco_id} "
-                f"trailing_active={trailing_active}"
+                f"trailing_active={trailing_active} "
+                f"{btc_state}"
                 + (f" activation_price={activation_price:.6f}" if not trailing_active else "")
             )
 

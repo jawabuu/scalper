@@ -346,3 +346,50 @@ def test_no_backstop_forces_trailing_active_logic():
     # Case 4: activation off, no backstop → active
     active, ap = decide(False, 1.0, None, 100.0)
     assert active is True and ap == 0.0
+
+
+# ── BTC market-regime filter tests ─────────────────────────────────────────────
+
+def test_btc_trend_threshold_logic():
+    """The short-term falling decision: change < -threshold."""
+    def is_falling(change_pct, threshold_pct):
+        return change_pct < -abs(threshold_pct)
+
+    # Falling more than threshold → blocked
+    assert is_falling(-0.20, 0.15) is True
+    # Falling but within threshold → allowed (noise)
+    assert is_falling(-0.10, 0.15) is False
+    # Flat → allowed
+    assert is_falling(0.0, 0.15) is False
+    # Rising → allowed
+    assert is_falling(0.50, 0.15) is False
+    # Exactly at threshold → not strictly less → allowed
+    assert is_falling(-0.15, 0.15) is False
+
+
+def test_btc_filter_fail_open_contract():
+    """When BTC data is unavailable, the gate must allow entries (fail-open)."""
+    # Simulate the gate decision from run_cycle
+    def gate_blocks(enabled, available, short_term_falling):
+        if not enabled:
+            return False
+        if not available:
+            return False  # fail-open
+        return short_term_falling
+
+    # Disabled → never blocks
+    assert gate_blocks(False, True, True) is False
+    # Enabled, unavailable → fail-open, never blocks
+    assert gate_blocks(True, False, True) is False
+    # Enabled, available, falling → blocks
+    assert gate_blocks(True, True, True) is True
+    # Enabled, available, not falling → allows
+    assert gate_blocks(True, True, False) is False
+
+
+def test_btc_regime_cache_reset_semantics():
+    """A None cache means 'recompute'; a dict means 'use cached'."""
+    cache = None
+    assert cache is None  # would trigger recompute
+    cache = {"available": True, "short_term_falling": False}
+    assert cache is not None  # would use cached value

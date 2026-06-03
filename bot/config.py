@@ -68,6 +68,15 @@ class BotConfig:
     # When active, a new position's trailing stop does not engage until price first
     # reaches entry * (1 + this%). Until then the server-side stop-market is the only stop.
     trailing_activation_pct: float = field(default_factory=lambda: _env_float("TRAILING_ACTIVATION_PCT", 1.0))
+
+    # ── BTC market-regime filter (UI-toggled, in-memory) ────────────────
+    # These ONLY set default values — the filter is enabled/disabled from the UI.
+    # When active, new entries are skipped if BTC's short-term trend is falling:
+    # i.e. BTC's current price is below its price BTC_TREND_LOOKBACK candles ago
+    # by more than BTC_TREND_THRESHOLD_PCT. Open positions are never affected.
+    # The slow EMA20/50 regime on BTC is logged for context but not enforced.
+    btc_trend_lookback: int = field(default_factory=lambda: _env_int("BTC_TREND_LOOKBACK", 3))
+    btc_trend_threshold_pct: float = field(default_factory=lambda: _env_float("BTC_TREND_THRESHOLD_PCT", 0.15))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

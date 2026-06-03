@@ -90,6 +90,10 @@ def create_app(engine) -> FastAPI:
             "kill_switch":      _engine.kill_switch,
             "trailing_activation_enabled": _engine.trailing_activation_enabled,
             "trailing_activation_pct":     _engine.trailing_activation_pct,
+            "btc_filter_enabled":          _engine.btc_filter_enabled,
+            "btc_trend_lookback":          _engine.btc_trend_lookback,
+            "btc_trend_threshold_pct":     _engine.btc_trend_threshold_pct,
+            "btc_regime":                  (_engine._btc_regime_cache or {}),
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -151,6 +155,52 @@ def create_app(engine) -> FastAPI:
     def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
+
+    @app.post("/api/btc-filter")
+    def set_btc_filter(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the BTC market-regime filter (in-memory, not persisted).
+        Body: {"enabled": bool, "lookback": int, "threshold_pct": float}
+        Only gates NEW entries when BTC short-term trend is falling; never
+        affects open positions. Applies from the next cycle.
+        """
+        enabled   = payload.get("enabled")
+        lookback  = payload.get("lookback")
+        threshold = payload.get("threshold_pct")
+
+        if enabled is not None:
+            _engine.btc_filter_enabled = bool(enabled)
+
+        if lookback is not None:
+            try:
+                lb = int(lookback)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="lookback must be an integer")
+            if lb < 1 or lb > 50:
+                raise HTTPException(status_code=400, detail="lookback must be between 1 and 50")
+            _engine.btc_trend_lookback = lb
+
+        if threshold is not None:
+            try:
+                th = float(threshold)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="threshold_pct must be a number")
+            if th < 0 or th > 10:
+                raise HTTPException(status_code=400, detail="threshold_pct must be between 0 and 10")
+            _engine.btc_trend_threshold_pct = th
+
+        log.info(
+            f"BTC filter updated by {user['username']}: "
+            f"enabled={_engine.btc_filter_enabled} "
+            f"lookback={_engine.btc_trend_lookback} "
+            f"threshold={_engine.btc_trend_threshold_pct}"
+        )
+        return {
+            "ok": True,
+            "btc_filter_enabled": _engine.btc_filter_enabled,
+            "btc_trend_lookback": _engine.btc_trend_lookback,
+            "btc_trend_threshold_pct": _engine.btc_trend_threshold_pct,
+        }
 
     @app.post("/api/trailing-activation")
     def set_trailing_activation(payload: dict, user: dict = Depends(_require_auth)):

@@ -661,6 +661,30 @@
           </div>
           <div class="ta-status" id="ta-status">Off — stops trail immediately</div>
         </div>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">BTC trend filter</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="btc-toggle" onchange="onBtcToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-row" id="btc-params-row">
+            <span class="ta-hint">Pause if BTC drops</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="btc-threshold" class="ta-input" min="0" max="10" step="0.05" value="0.15" onchange="onBtcParams()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-row">
+            <span class="ta-hint">over last (candles)</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="btc-lookback" class="ta-input" min="1" max="50" step="1" value="3" onchange="onBtcParams()">
+            </span>
+          </div>
+          <div class="ta-status" id="btc-status">Off — BTC trend not enforced</div>
+        </div>
       </div>
 
       <div id="ctrl-confirm-kill" style="display:none">
@@ -752,6 +776,97 @@ async function checkAuth() {
   }
   return false;
 }
+
+// ── BTC trend filter control ─────────────────────────────────────────────────
+let _btcEditing = false;
+
+function syncBtcFilter(status) {
+  if (status.btc_filter_enabled === undefined) return;
+  const toggle = document.getElementById('btc-toggle');
+  const thr = document.getElementById('btc-threshold');
+  const lb = document.getElementById('btc-lookback');
+  const statusEl = document.getElementById('btc-status');
+  const paramsRow = document.getElementById('btc-params-row');
+  if (!toggle || !thr || !lb || !statusEl) return;
+
+  const enabled = !!status.btc_filter_enabled;
+  toggle.checked = enabled;
+
+  if (!_btcEditing) {
+    if (status.btc_trend_threshold_pct !== undefined)
+      thr.value = Number(status.btc_trend_threshold_pct).toFixed(2);
+    if (status.btc_trend_lookback !== undefined)
+      lb.value = status.btc_trend_lookback;
+  }
+
+  paramsRow.style.opacity = enabled ? '1' : '0.45';
+
+  // Show live BTC regime if available
+  const r = status.btc_regime || {};
+  let regimeText = '';
+  if (r.available) {
+    const dir = r.short_term_falling ? 'falling' : 'stable/up';
+    const chg = Number(r.short_term_change_pct || 0).toFixed(2);
+    regimeText = ` · BTC now ${chg}% (${dir})`;
+  }
+
+  if (enabled) {
+    statusEl.textContent = `On — pause if BTC drops >${Number(status.btc_trend_threshold_pct).toFixed(2)}% over ${status.btc_trend_lookback} candles${regimeText}`;
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = `Off — BTC trend logged, not enforced${regimeText}`;
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postBtcFilter(body) {
+  try {
+    const r = await fetch(API + '/api/btc-filter', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncBtcFilter({
+      btc_filter_enabled: data.btc_filter_enabled,
+      btc_trend_lookback: data.btc_trend_lookback,
+      btc_trend_threshold_pct: data.btc_trend_threshold_pct,
+    });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update BTC filter: ${e.message}`);
+  }
+}
+
+function onBtcToggle() {
+  postBtcFilter({ enabled: document.getElementById('btc-toggle').checked });
+}
+
+function onBtcParams() {
+  _btcEditing = false;
+  const threshold = parseFloat(document.getElementById('btc-threshold').value);
+  const lookback = parseInt(document.getElementById('btc-lookback').value, 10);
+  if (isNaN(threshold) || threshold < 0 || threshold > 10) {
+    setEl('ctrl-msg', 'BTC threshold must be between 0 and 10%');
+    return;
+  }
+  if (isNaN(lookback) || lookback < 1 || lookback > 50) {
+    setEl('ctrl-msg', 'BTC lookback must be between 1 and 50 candles');
+    return;
+  }
+  postBtcFilter({ threshold_pct: threshold, lookback });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['btc-threshold', 'btc-lookback'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('focus', () => { _btcEditing = true; });
+      el.addEventListener('blur', () => { _btcEditing = false; });
+    }
+  });
+});
 
 // ── Trailing activation control ──────────────────────────────────────────────
 let _taEditing = false;  // suppress sync while user is editing the field
@@ -914,6 +1029,7 @@ async function refresh() {
     setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
     if (status.version) setEl('version-hint', `v${status.version}`);
     syncTrailingActivation(status);
+    syncBtcFilter(status);
 
     setKillUI(status.kill_switch);
 
