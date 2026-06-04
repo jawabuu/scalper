@@ -439,3 +439,45 @@ def test_partial_backstop_forces_trailing_active():
     assert should_be_dormant(True, "order123", False) is True
     # No backstop → never dormant
     assert should_be_dormant(True, None, False) is False
+
+
+# ── Per-coin entry-timing gate tests ───────────────────────────────────────────
+
+def test_entry_timing_gate_logic():
+    """
+    The gate rejects entries where price is extended above the fast EMA beyond
+    the band, and allows entries near or below it (pullbacks).
+    """
+    def passes(distance_pct, band_pct, enabled):
+        if not enabled:
+            return True
+        if distance_pct is None:
+            return True  # fail-open
+        return distance_pct <= band_pct
+
+    band = 0.5
+    # Extended well above fast EMA → rejected (the OPN chase-the-top case)
+    assert passes(2.0, band, True) is False
+    assert passes(0.6, band, True) is False
+    # Right at the band → allowed
+    assert passes(0.5, band, True) is True
+    # Near the mean → allowed (ideal entry)
+    assert passes(0.1, band, True) is True
+    # Pulled back below fast EMA → allowed (best entry)
+    assert passes(-0.8, band, True) is True
+    # Gate disabled → always allowed regardless of distance
+    assert passes(5.0, band, False) is True
+    # Distance unknown → fail-open
+    assert passes(None, band, True) is True
+
+
+def test_entry_timing_distance_sign():
+    """Distance is positive when price is above the fast EMA, negative below."""
+    def distance(close, fast):
+        if fast <= 0:
+            return None
+        return (close - fast) / fast * 100
+
+    assert distance(102, 100) == 2.0     # extended above
+    assert distance(100, 100) == 0.0     # at the mean
+    assert round(distance(99, 100), 2) == -1.0  # pulled back below

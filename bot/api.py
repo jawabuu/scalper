@@ -94,6 +94,9 @@ def create_app(engine) -> FastAPI:
             "btc_trend_lookback":          _engine.btc_trend_lookback,
             "btc_trend_threshold_pct":     _engine.btc_trend_threshold_pct,
             "btc_regime":                  (_engine._btc_regime_cache or {}),
+            "entry_timing_enabled":        _engine.entry_timing_enabled,
+            "entry_timing_ema_len":        _engine.entry_timing_ema_len,
+            "entry_timing_band_pct":       _engine.entry_timing_band_pct,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -155,6 +158,52 @@ def create_app(engine) -> FastAPI:
     def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
+
+    @app.post("/api/entry-timing")
+    def set_entry_timing(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the per-coin entry-timing gate (in-memory, not persisted).
+        Body: {"enabled": bool, "ema_len": int, "band_pct": float}
+        Skips entries where price is extended above the fast EMA. Applies to
+        NEW entries from the next cycle; never affects open positions.
+        """
+        enabled  = payload.get("enabled")
+        ema_len  = payload.get("ema_len")
+        band_pct = payload.get("band_pct")
+
+        if enabled is not None:
+            _engine.entry_timing_enabled = bool(enabled)
+
+        if ema_len is not None:
+            try:
+                el = int(ema_len)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="ema_len must be an integer")
+            if el < 2 or el > 100:
+                raise HTTPException(status_code=400, detail="ema_len must be between 2 and 100")
+            _engine.entry_timing_ema_len = el
+
+        if band_pct is not None:
+            try:
+                bp = float(band_pct)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="band_pct must be a number")
+            if bp < 0 or bp > 10:
+                raise HTTPException(status_code=400, detail="band_pct must be between 0 and 10")
+            _engine.entry_timing_band_pct = bp
+
+        log.info(
+            f"Entry-timing gate updated by {user['username']}: "
+            f"enabled={_engine.entry_timing_enabled} "
+            f"ema_len={_engine.entry_timing_ema_len} "
+            f"band_pct={_engine.entry_timing_band_pct}"
+        )
+        return {
+            "ok": True,
+            "entry_timing_enabled": _engine.entry_timing_enabled,
+            "entry_timing_ema_len": _engine.entry_timing_ema_len,
+            "entry_timing_band_pct": _engine.entry_timing_band_pct,
+        }
 
     @app.post("/api/btc-filter")
     def set_btc_filter(payload: dict, user: dict = Depends(_require_auth)):

@@ -77,6 +77,15 @@ class BotConfig:
     # The slow EMA20/50 regime on BTC is logged for context but not enforced.
     btc_trend_lookback: int = field(default_factory=lambda: _env_int("BTC_TREND_LOOKBACK", 3))
     btc_trend_threshold_pct: float = field(default_factory=lambda: _env_float("BTC_TREND_THRESHOLD_PCT", 0.15))
+
+    # ── Entry-timing gate (per-coin, UI-toggled) ────────────────────────
+    # Avoids chasing a coin that has spiked above its short-term mean (the
+    # whipsaw cause): only enter when price is within ENTRY_TIMING_BAND_PCT
+    # above the fast EMA (length ENTRY_TIMING_EMA_LEN). DEFAULT ON — this
+    # targets the core whipsaw problem. The fast-EMA distance is logged on
+    # every entry regardless of whether the gate is enforced.
+    entry_timing_ema_len: int = field(default_factory=lambda: _env_int("ENTRY_TIMING_EMA_LEN", 9))
+    entry_timing_band_pct: float = field(default_factory=lambda: _env_float("ENTRY_TIMING_BAND_PCT", 0.5))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

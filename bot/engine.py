@@ -53,6 +53,11 @@ class ScalpingEngine:
         self.btc_trend_threshold_pct: float = cfg.btc_trend_threshold_pct
         # Per-cycle cache of the BTC regime so we compute it at most once per cycle.
         self._btc_regime_cache: dict | None = None
+        # Entry-timing gate (per-coin) — DEFAULT ON. Skips entries where price is
+        # extended above the fast EMA (chasing a micro-top → whipsaw). Toggle in UI.
+        self.entry_timing_enabled: bool = True
+        self.entry_timing_ema_len: int = cfg.entry_timing_ema_len
+        self.entry_timing_band_pct: float = cfg.entry_timing_band_pct
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -342,6 +347,10 @@ class ScalpingEngine:
         df = df.copy()
         df["ema20"] = ta.ema(df["close"], length=20)
         df["ema50"] = ta.ema(df["close"], length=50)
+        # Fast EMA for the per-coin entry-timing gate (default length 9).
+        # Use the runtime length if set, else fall back to the configured default.
+        fast_len = getattr(self, "entry_timing_ema_len", None) or self.cfg.entry_timing_ema_len
+        df["ema_fast"] = ta.ema(df["close"], length=fast_len)
         df["rsi"]   = ta.rsi(df["close"], length=14)
         adx_df      = ta.adx(df["high"], df["low"], df["close"], length=14)
         df["adx"]   = adx_df["ADX_14"]
@@ -379,6 +388,39 @@ class ScalpingEngine:
             }
             log.debug(f"Entry filter FAILED {failed} — {vals}")
         return passed
+
+    def entry_timing_distance_pct(self, df: pd.DataFrame) -> float | None:
+        """
+        How far current price sits ABOVE the fast EMA, as a percent.
+        Positive = price above the fast EMA (extended); negative = below (pulled back).
+        Returns None if the fast EMA isn't available.
+        """
+        row = df.iloc[-1]
+        fast = row.get("ema_fast")
+        if fast is None or fast != fast or fast <= 0:  # NaN-safe
+            return None
+        return (row["close"] - fast) / fast * 100
+
+    def passes_entry_timing(self, df: pd.DataFrame) -> tuple[bool, float | None]:
+        """
+        Per-coin entry-timing gate. Returns (passes, distance_pct).
+
+        A quality scalp entry is near the short-term mean, not chasing a spike.
+        We allow entry only when price is within the band ABOVE the fast EMA.
+        If price is pulled back to/below the fast EMA, that's an ideal entry too
+        (distance <= band always passes). Only an OVER-extended price is rejected.
+
+        When the gate is disabled, this always passes but still returns the
+        distance so it can be logged for analysis.
+        """
+        distance = self.entry_timing_distance_pct(df)
+        if not self.entry_timing_enabled:
+            return True, distance
+        if distance is None:
+            # Can't assess — fail open (allow), consistent with other gates.
+            return True, distance
+        passes = distance <= self.entry_timing_band_pct
+        return passes, distance
 
     # ------------------------------------------------------------------
     # Order execution
@@ -950,6 +992,18 @@ class ScalpingEngine:
             if not self.passes_entry_filter(df):
                 continue
 
+            # Per-coin entry-timing gate — avoid chasing a coin extended above its
+            # short-term mean (the whipsaw cause). Distance is captured for logging
+            # whether or not the gate is enforced.
+            timing_ok, timing_distance = self.passes_entry_timing(df)
+            if not timing_ok:
+                log.info(
+                    f"{sym} skipped by entry-timing gate: price {timing_distance:+.2f}% "
+                    f"above EMA{self.entry_timing_ema_len} (band {self.entry_timing_band_pct:.2f}%) "
+                    f"— too extended, waiting for pullback"
+                )
+                continue
+
             price = df["close"].iloc[-1]
             atr   = df["atr"].iloc[-1]
             alloc = self.risk.position_size_usdt(balance, atr, price)
@@ -1071,13 +1125,18 @@ class ScalpingEngine:
             else:
                 btc_state = "BTC[unavailable]"
 
+            timing_state = (
+                f"EMA{self.entry_timing_ema_len}_dist="
+                f"{timing_distance:+.2f}%" if timing_distance is not None else "EMA_dist=n/a"
+            )
+
             log.info(
                 f"ENTERED {sym} @ {fill_price:.6f} "
                 f"trailing_stop={trailing_stop:.6f} "
                 f"oco_stop={fill_price * (1 - self.cfg.oco_stop_pct / 100):.6f} "
                 f"oco_id={oco_id} "
                 f"trailing_active={trailing_active} "
-                f"{btc_state}"
+                f"{btc_state} {timing_state}"
                 + (f" activation_price={activation_price:.6f}" if not trailing_active else "")
             )
 
