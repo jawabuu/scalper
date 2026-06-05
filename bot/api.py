@@ -97,6 +97,9 @@ def create_app(engine) -> FastAPI:
             "entry_timing_enabled":        _engine.entry_timing_enabled,
             "entry_timing_ema_len":        _engine.entry_timing_ema_len,
             "entry_timing_band_pct":       _engine.entry_timing_band_pct,
+            "momentum_enabled":            _engine.momentum_enabled,
+            "momentum_lookback":           _engine.momentum_lookback,
+            "momentum_min_slope_pct":      _engine.momentum_min_slope_pct,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -158,6 +161,52 @@ def create_app(engine) -> FastAPI:
     def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
+
+    @app.post("/api/momentum")
+    def set_momentum(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the momentum confirmation gate (in-memory, not persisted).
+        Body: {"enabled": bool, "lookback": int, "min_slope_pct": float}
+        Confirms the coin is rising at entry via raw-price slope. Applies to NEW
+        entries from the next cycle; never affects open positions.
+        """
+        enabled    = payload.get("enabled")
+        lookback   = payload.get("lookback")
+        min_slope  = payload.get("min_slope_pct")
+
+        if enabled is not None:
+            _engine.momentum_enabled = bool(enabled)
+
+        if lookback is not None:
+            try:
+                lb = int(lookback)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="lookback must be an integer")
+            if lb < 1 or lb > 50:
+                raise HTTPException(status_code=400, detail="lookback must be between 1 and 50")
+            _engine.momentum_lookback = lb
+
+        if min_slope is not None:
+            try:
+                ms = float(min_slope)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="min_slope_pct must be a number")
+            if ms < 0 or ms > 10:
+                raise HTTPException(status_code=400, detail="min_slope_pct must be between 0 and 10")
+            _engine.momentum_min_slope_pct = ms
+
+        log.info(
+            f"Momentum gate updated by {user['username']}: "
+            f"enabled={_engine.momentum_enabled} "
+            f"lookback={_engine.momentum_lookback} "
+            f"min_slope={_engine.momentum_min_slope_pct}"
+        )
+        return {
+            "ok": True,
+            "momentum_enabled": _engine.momentum_enabled,
+            "momentum_lookback": _engine.momentum_lookback,
+            "momentum_min_slope_pct": _engine.momentum_min_slope_pct,
+        }
 
     @app.post("/api/entry-timing")
     def set_entry_timing(payload: dict, user: dict = Depends(_require_auth)):

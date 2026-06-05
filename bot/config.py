@@ -86,6 +86,16 @@ class BotConfig:
     # every entry regardless of whether the gate is enforced.
     entry_timing_ema_len: int = field(default_factory=lambda: _env_int("ENTRY_TIMING_EMA_LEN", 9))
     entry_timing_band_pct: float = field(default_factory=lambda: _env_float("ENTRY_TIMING_BAND_PCT", 0.5))
+
+    # ── Momentum confirmation (per-coin, short-term direction, DEFAULT ON) ──
+    # Confirms a coin is actually rising RIGHT NOW at entry, not merely in a
+    # recent uptrend structure (which lagging EMA/RSI/ADX filters can still show
+    # well into a decline — the OPN-rolling-over case). Uses RAW PRICE slope over
+    # the last MOMENTUM_LOOKBACK candles (no smoothing — avoids lag). Requires the
+    # current close to be above the close N candles ago by at least
+    # MOMENTUM_MIN_SLOPE_PCT, and the most recent candle not to be red.
+    momentum_lookback: int = field(default_factory=lambda: _env_int("MOMENTUM_LOOKBACK", 3))
+    momentum_min_slope_pct: float = field(default_factory=lambda: _env_float("MOMENTUM_MIN_SLOPE_PCT", 0.1))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

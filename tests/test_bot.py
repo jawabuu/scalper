@@ -481,3 +481,46 @@ def test_entry_timing_distance_sign():
     assert distance(102, 100) == 2.0     # extended above
     assert distance(100, 100) == 0.0     # at the mean
     assert round(distance(99, 100), 2) == -1.0  # pulled back below
+
+
+# ── Momentum confirmation gate tests ───────────────────────────────────────────
+
+def test_momentum_gate_logic():
+    """
+    The momentum gate requires both a positive short-term slope above the
+    threshold AND the most recent candle not red. This confirms the coin is
+    rising at entry rather than merely in a recent (lagging) uptrend structure.
+    """
+    def passes(slope_pct, last_candle_up, min_slope, enabled):
+        if not enabled:
+            return True
+        if slope_pct is None:
+            return True  # fail-open
+        return (slope_pct >= min_slope) and last_candle_up
+
+    mn = 0.1
+    # Rising, last candle green → pass (the OPN-going-up case we want)
+    assert passes(0.5, True, mn, True) is True
+    # Rising enough but last candle red → reject (early reversal)
+    assert passes(0.5, False, mn, True) is False
+    # Net positive but below threshold → reject (too flat, noise)
+    assert passes(0.05, True, mn, True) is False
+    # Falling → reject (the OPN-rolling-over case that bled us)
+    assert passes(-0.8, True, mn, True) is False
+    assert passes(-0.8, False, mn, True) is False
+    # Disabled → always pass regardless
+    assert passes(-5.0, False, mn, False) is True
+    # Unknown slope → fail-open
+    assert passes(None, True, mn, True) is True
+
+
+def test_momentum_slope_uses_raw_price():
+    """Slope is raw close-to-close percent over the lookback — no smoothing/lag."""
+    def slope(close_now, close_past):
+        if close_past <= 0:
+            return None
+        return (close_now - close_past) / close_past * 100
+
+    assert round(slope(101.0, 100.0), 2) == 1.0      # rising 1%
+    assert round(slope(100.0, 100.0), 2) == 0.0      # flat
+    assert round(slope(98.0, 100.0), 2) == -2.0      # falling 2% (would reject)

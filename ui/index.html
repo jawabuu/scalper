@@ -709,6 +709,30 @@
           </div>
           <div class="ta-status" id="et-status">On — skips entries extended above EMA</div>
         </div>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">Momentum confirm</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="mo-toggle" onchange="onMoToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-row" id="mo-params-row">
+            <span class="ta-hint">Min rise</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="mo-slope" class="ta-input" min="0" max="10" step="0.05" value="0.1" onchange="onMoParams()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-row">
+            <span class="ta-hint">over last (candles)</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="mo-lookback" class="ta-input" min="1" max="50" step="1" value="3" onchange="onMoParams()">
+            </span>
+          </div>
+          <div class="ta-status" id="mo-status">On — only enter coins rising now</div>
+        </div>
       </div>
 
       <div id="ctrl-confirm-kill" style="display:none">
@@ -800,6 +824,87 @@ async function checkAuth() {
   }
   return false;
 }
+
+// ── Momentum confirmation control ────────────────────────────────────────────
+let _moEditing = false;
+
+function syncMomentum(status) {
+  if (status.momentum_enabled === undefined) return;
+  const toggle = document.getElementById('mo-toggle');
+  const slope = document.getElementById('mo-slope');
+  const lb = document.getElementById('mo-lookback');
+  const statusEl = document.getElementById('mo-status');
+  const paramsRow = document.getElementById('mo-params-row');
+  if (!toggle || !slope || !lb || !statusEl) return;
+
+  const enabled = !!status.momentum_enabled;
+  toggle.checked = enabled;
+
+  if (!_moEditing) {
+    if (status.momentum_min_slope_pct !== undefined)
+      slope.value = Number(status.momentum_min_slope_pct).toFixed(2);
+    if (status.momentum_lookback !== undefined)
+      lb.value = status.momentum_lookback;
+  }
+
+  paramsRow.style.opacity = enabled ? '1' : '0.45';
+  if (enabled) {
+    statusEl.textContent = `On — enter only if price rose >${Number(status.momentum_min_slope_pct).toFixed(2)}% over ${status.momentum_lookback} candles`;
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = 'Off — momentum logged, not enforced';
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postMomentum(body) {
+  try {
+    const r = await fetch(API + '/api/momentum', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncMomentum({
+      momentum_enabled: data.momentum_enabled,
+      momentum_lookback: data.momentum_lookback,
+      momentum_min_slope_pct: data.momentum_min_slope_pct,
+    });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update momentum: ${e.message}`);
+  }
+}
+
+function onMoToggle() {
+  postMomentum({ enabled: document.getElementById('mo-toggle').checked });
+}
+
+function onMoParams() {
+  _moEditing = false;
+  const slope = parseFloat(document.getElementById('mo-slope').value);
+  const lb = parseInt(document.getElementById('mo-lookback').value, 10);
+  if (isNaN(slope) || slope < 0 || slope > 10) {
+    setEl('ctrl-msg', 'Min rise must be between 0 and 10%');
+    return;
+  }
+  if (isNaN(lb) || lb < 1 || lb > 50) {
+    setEl('ctrl-msg', 'Lookback must be between 1 and 50 candles');
+    return;
+  }
+  postMomentum({ min_slope_pct: slope, lookback: lb });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['mo-slope', 'mo-lookback'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('focus', () => { _moEditing = true; });
+      el.addEventListener('blur', () => { _moEditing = false; });
+    }
+  });
+});
 
 // ── Entry-timing gate control ────────────────────────────────────────────────
 let _etEditing = false;
@@ -1136,6 +1241,7 @@ async function refresh() {
     syncTrailingActivation(status);
     syncBtcFilter(status);
     syncEntryTiming(status);
+    syncMomentum(status);
 
     setKillUI(status.kill_switch);
 

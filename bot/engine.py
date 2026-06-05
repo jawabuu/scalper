@@ -53,11 +53,17 @@ class ScalpingEngine:
         self.btc_trend_threshold_pct: float = cfg.btc_trend_threshold_pct
         # Per-cycle cache of the BTC regime so we compute it at most once per cycle.
         self._btc_regime_cache: dict | None = None
-        # Entry-timing gate (per-coin) — DEFAULT ON. Skips entries where price is
-        # extended above the fast EMA (chasing a micro-top → whipsaw). Toggle in UI.
-        self.entry_timing_enabled: bool = True
+        # Entry-timing gate (per-coin) — skips entries extended above the fast EMA.
+        # Default OFF now: we are testing momentum confirmation in isolation. It
+        # remains fully available via the UI toggle.
+        self.entry_timing_enabled: bool = False
         self.entry_timing_ema_len: int = cfg.entry_timing_ema_len
         self.entry_timing_band_pct: float = cfg.entry_timing_band_pct
+        # Momentum confirmation (per-coin short-term direction) — DEFAULT ON.
+        # Confirms the coin is rising right now using raw-price slope (no lag).
+        self.momentum_enabled: bool = True
+        self.momentum_lookback: int = cfg.momentum_lookback
+        self.momentum_min_slope_pct: float = cfg.momentum_min_slope_pct
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -421,6 +427,45 @@ class ScalpingEngine:
             return True, distance
         passes = distance <= self.entry_timing_band_pct
         return passes, distance
+
+    def momentum_slope_pct(self, df: pd.DataFrame) -> float | None:
+        """
+        Raw-price slope over the last `momentum_lookback` candles, as a percent.
+        Uses close prices directly (no moving average) to avoid lag.
+        Positive = price higher than N candles ago. None if insufficient data.
+        """
+        lookback = max(1, int(self.momentum_lookback))
+        if len(df) <= lookback:
+            return None
+        current = float(df["close"].iloc[-1])
+        past = float(df["close"].iloc[-1 - lookback])
+        if past <= 0:
+            return None
+        return (current - past) / past * 100
+
+    def passes_momentum(self, df: pd.DataFrame) -> tuple[bool, float | None]:
+        """
+        Short-term direction confirmation. Returns (passes, slope_pct).
+
+        Confirms the coin is actually rising AT ENTRY — not merely in a recent
+        uptrend structure that lagging filters still report during a decline.
+        Requires BOTH:
+          - raw-price slope over the lookback window >= momentum_min_slope_pct
+          - the most recent candle is not red (close >= open)
+        The 'not red' check prevents entering on a net-positive window whose final
+        candle has already turned down (early reversal).
+
+        When disabled, always passes but still returns slope for logging.
+        """
+        slope = self.momentum_slope_pct(df)
+        if not self.momentum_enabled:
+            return True, slope
+        if slope is None:
+            return True, slope  # fail-open, consistent with other gates
+        last = df.iloc[-1]
+        last_candle_up = float(last["close"]) >= float(last["open"])
+        passes = (slope >= self.momentum_min_slope_pct) and last_candle_up
+        return passes, slope
 
     # ------------------------------------------------------------------
     # Order execution
@@ -1004,6 +1049,19 @@ class ScalpingEngine:
                 )
                 continue
 
+            # Momentum confirmation — is the coin actually rising right now?
+            # Raw-price slope over the short lookback; slope captured for logging
+            # whether or not the gate is enforced.
+            momentum_ok, momentum_slope = self.passes_momentum(df)
+            if not momentum_ok:
+                slope_str = f"{momentum_slope:+.2f}%" if momentum_slope is not None else "n/a"
+                log.info(
+                    f"{sym} skipped by momentum gate: {self.momentum_lookback}-candle "
+                    f"slope {slope_str} (min {self.momentum_min_slope_pct:.2f}%) "
+                    f"or last candle red — not confirmed rising"
+                )
+                continue
+
             price = df["close"].iloc[-1]
             atr   = df["atr"].iloc[-1]
             alloc = self.risk.position_size_usdt(balance, atr, price)
@@ -1129,6 +1187,10 @@ class ScalpingEngine:
                 f"EMA{self.entry_timing_ema_len}_dist="
                 f"{timing_distance:+.2f}%" if timing_distance is not None else "EMA_dist=n/a"
             )
+            momentum_state = (
+                f"slope{self.momentum_lookback}="
+                f"{momentum_slope:+.2f}%" if momentum_slope is not None else "slope=n/a"
+            )
 
             log.info(
                 f"ENTERED {sym} @ {fill_price:.6f} "
@@ -1136,7 +1198,7 @@ class ScalpingEngine:
                 f"oco_stop={fill_price * (1 - self.cfg.oco_stop_pct / 100):.6f} "
                 f"oco_id={oco_id} "
                 f"trailing_active={trailing_active} "
-                f"{btc_state} {timing_state}"
+                f"{btc_state} {timing_state} {momentum_state}"
                 + (f" activation_price={activation_price:.6f}" if not trailing_active else "")
             )
 
