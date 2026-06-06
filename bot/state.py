@@ -22,3 +22,6 @@ class PositionState:
     # The price level at which trailing activates (entry * (1 + activation_pct/100)).
     # 0 means "already active / no threshold" (the default immediate-trailing case).
     activation_price: float = 0.0
+    # Highest P&L percent this position has reached, for the continuous profit lock.
+    # Ratchets up only; the locked profit floor is derived from this peak.
+    peak_pnl_pct: float = 0.0

@@ -36,6 +36,7 @@ def _serialize(positions: dict[str, PositionState]) -> dict:
             "backstop_type":      pos.backstop_type,
             "trailing_active":    pos.trailing_active,
             "activation_price":   pos.activation_price,
+            "peak_pnl_pct":       pos.peak_pnl_pct,
         }
     return out
 
@@ -54,6 +55,7 @@ def _deserialize(data: dict) -> dict[str, PositionState]:
                 backstop_type=d.get("backstop_type"),
                 trailing_active=d.get("trailing_active", True),
                 activation_price=float(d.get("activation_price", 0.0)),
+                peak_pnl_pct=float(d.get("peak_pnl_pct", 0.0)),
             )
         except Exception as e:
             log.warning(f"Skipping malformed position record for {sym}: {e}")

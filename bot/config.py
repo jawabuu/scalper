@@ -85,7 +85,7 @@ class BotConfig:
     # targets the core whipsaw problem. The fast-EMA distance is logged on
     # every entry regardless of whether the gate is enforced.
     entry_timing_ema_len: int = field(default_factory=lambda: _env_int("ENTRY_TIMING_EMA_LEN", 9))
-    entry_timing_band_pct: float = field(default_factory=lambda: _env_float("ENTRY_TIMING_BAND_PCT", 0.5))
+    entry_timing_band_pct: float = field(default_factory=lambda: _env_float("ENTRY_TIMING_BAND_PCT", 0.8))
 
     # ── Momentum confirmation (per-coin, short-term direction, DEFAULT ON) ──
     # Confirms a coin is actually rising RIGHT NOW at entry, not merely in a
@@ -94,8 +94,19 @@ class BotConfig:
     # the last MOMENTUM_LOOKBACK candles (no smoothing — avoids lag). Requires the
     # current close to be above the close N candles ago by at least
     # MOMENTUM_MIN_SLOPE_PCT, and the most recent candle not to be red.
-    momentum_lookback: int = field(default_factory=lambda: _env_int("MOMENTUM_LOOKBACK", 3))
+    momentum_lookback: int = field(default_factory=lambda: _env_int("MOMENTUM_LOOKBACK", 2))
     momentum_min_slope_pct: float = field(default_factory=lambda: _env_float("MOMENTUM_MIN_SLOPE_PCT", 0.1))
+
+    # ── Profit lock (continuous, peak-tracking, DEFAULT ON) ─────────────
+    # Once a position's P&L crosses PROFIT_LOCK_ARM_PCT, a profit floor arms and
+    # ratchets up with the peak P&L, locking a rising fraction of the gain. The
+    # give-back (peak minus floor) starts at PROFIT_LOCK_GIVEBACK_PCT at the arm
+    # point and shrinks as the peak climbs, so big winners are locked tightly
+    # (~99%) while small winners keep a little room. Sits alongside the trailing
+    # stop; the position exits at whichever triggers first. Locks scalping gains
+    # that the looser 1.2% trailing stop would otherwise give back.
+    profit_lock_arm_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_ARM_PCT", 1.0))
+    profit_lock_giveback_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_GIVEBACK_PCT", 0.18))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

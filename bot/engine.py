@@ -54,9 +54,10 @@ class ScalpingEngine:
         # Per-cycle cache of the BTC regime so we compute it at most once per cycle.
         self._btc_regime_cache: dict | None = None
         # Entry-timing gate (per-coin) — skips entries extended above the fast EMA.
-        # Default OFF now: we are testing momentum confirmation in isolation. It
-        # remains fully available via the UI toggle.
-        self.entry_timing_enabled: bool = False
+        # Default ON: combined with momentum confirmation, this enforces
+        # "rising BUT not over-extended" — rejecting both downswings (momentum)
+        # and local-top chases (this gate). Fully toggleable via the UI.
+        self.entry_timing_enabled: bool = True
         self.entry_timing_ema_len: int = cfg.entry_timing_ema_len
         self.entry_timing_band_pct: float = cfg.entry_timing_band_pct
         # Momentum confirmation (per-coin short-term direction) — DEFAULT ON.
@@ -64,6 +65,12 @@ class ScalpingEngine:
         self.momentum_enabled: bool = True
         self.momentum_lookback: int = cfg.momentum_lookback
         self.momentum_min_slope_pct: float = cfg.momentum_min_slope_pct
+        # Continuous profit lock (peak-tracking) — DEFAULT ON. Once P&L crosses
+        # the arm threshold, a profit floor ratchets up with the peak P&L and
+        # locks a rising fraction of the gain. Sits alongside the trailing stop.
+        self.profit_lock_enabled: bool = True
+        self.profit_lock_arm_pct: float = cfg.profit_lock_arm_pct
+        self.profit_lock_giveback_pct: float = cfg.profit_lock_giveback_pct
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -467,6 +474,29 @@ class ScalpingEngine:
         passes = (slope >= self.momentum_min_slope_pct) and last_candle_up
         return passes, slope
 
+    def profit_lock_floor_pct(self, peak_pnl_pct: float) -> float | None:
+        """
+        Continuous profit-lock floor, in P&L percent, derived from the peak P&L
+        the position has reached.
+
+        Returns None if the lock hasn't armed (peak below the arm threshold).
+        Once armed, the floor = peak - give_back, where give_back starts at
+        profit_lock_giveback_pct at the arm point and SHRINKS as the peak climbs:
+
+            give_back = giveback_pct * (arm_pct / peak)
+
+        So a +1% peak locks ~82% of the gain (small cushion to let it develop),
+        while a +5% peak locks ~99% (give back almost nothing on a real winner).
+        The floor ratchets up only, because peak_pnl_pct only ever increases.
+        """
+        if not self.profit_lock_enabled:
+            return None
+        arm = self.profit_lock_arm_pct
+        if peak_pnl_pct < arm or arm <= 0:
+            return None
+        give_back = self.profit_lock_giveback_pct * (arm / peak_pnl_pct)
+        return peak_pnl_pct - give_back
+
     # ------------------------------------------------------------------
     # Order execution
     # ------------------------------------------------------------------
@@ -737,6 +767,14 @@ class ScalpingEngine:
     def update_trailing_stop(self, sym: str, current_price: float):
         pos = self.positions[sym]
 
+        # Track the peak P&L this position has reached, for the profit lock.
+        # Ratchets up only. Computed every cycle regardless of trailing-active
+        # state so the lock can arm even during a dormant trailing phase.
+        current_pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+        if current_pnl_pct > pos.peak_pnl_pct:
+            pos.peak_pnl_pct = current_pnl_pct
+            self.positions[sym] = pos
+
         # Activation threshold: if this position's trailing stop is not yet active,
         # check whether price has reached the activation level. Until it does, the
         # trailing stop does not move and check_exit will not use it — the server-side
@@ -773,6 +811,15 @@ class ScalpingEngine:
         # Before activation, the server-side stop-market is the protection.
         if pos.trailing_active and current_price <= pos.trailing_stop:
             return "trailing_stop"
+        # Continuous profit lock — exits at whichever triggers first vs the trail.
+        # Once the peak P&L has armed the lock, the floor ratchets up with the peak.
+        # If current P&L falls back to that locked floor, take the guaranteed gain
+        # rather than letting the looser trailing stop give it back.
+        floor_pct = self.profit_lock_floor_pct(pos.peak_pnl_pct)
+        if floor_pct is not None:
+            current_pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+            if current_pnl_pct <= floor_pct:
+                return "profit_lock"
         if pos.candles_held >= self.cfg.max_hold_candles:
             return "timeout"
         return None
@@ -816,7 +863,11 @@ class ScalpingEngine:
 
         pnl_pct  = (price - pos.entry_price) / pos.entry_price * 100
         pnl_usdt = (price - pos.entry_price) * sell_qty
-        log.info(f"CLOSED {sym} reason={reason} pnl={pnl_pct:+.2f}%")
+        give_back = pos.peak_pnl_pct - pnl_pct
+        log.info(
+            f"CLOSED {sym} reason={reason} pnl={pnl_pct:+.2f}% "
+            f"peak={pos.peak_pnl_pct:+.2f}% gaveback={give_back:.2f}%"
+        )
 
         # Apply re-entry cooldown for manual closes so the bot doesn't
         # immediately buy back something the user just intentionally closed.

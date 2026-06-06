@@ -524,3 +524,59 @@ def test_momentum_slope_uses_raw_price():
     assert round(slope(101.0, 100.0), 2) == 1.0      # rising 1%
     assert round(slope(100.0, 100.0), 2) == 0.0      # flat
     assert round(slope(98.0, 100.0), 2) == -2.0      # falling 2% (would reject)
+
+
+# ── Continuous profit lock tests ───────────────────────────────────────────────
+
+def test_profit_lock_floor_curve():
+    """
+    The floor arms only above the arm threshold and locks a rising fraction of
+    the peak as the peak climbs (give-back shrinks toward zero).
+    """
+    def floor(peak, arm=1.0, giveback=0.18, enabled=True):
+        if not enabled:
+            return None
+        if peak < arm or arm <= 0:
+            return None
+        return peak - giveback * (arm / peak)
+
+    # Below arm → not armed
+    assert floor(0.5) is None
+    assert floor(0.99) is None
+    # Armed → locks a rising fraction
+    assert abs(floor(1.0) - 0.82) < 1e-6      # 82% at +1%
+    assert abs(floor(2.0) - 1.91) < 1e-6      # 95.5% at +2%
+    assert abs(floor(5.0) - 4.964) < 1e-3     # 99.3% at +5%
+    # Floor always below peak (we give back something, never lock above peak)
+    for p in [1.0, 2.0, 3.0, 5.0, 10.0]:
+        assert floor(p) < p
+    # Floor rises monotonically with peak (ratchet)
+    floors = [floor(p) for p in [1.0, 2.0, 3.0, 4.0, 5.0]]
+    assert floors == sorted(floors)
+    # Disabled → never armed
+    assert floor(5.0, enabled=False) is None
+
+
+def test_profit_lock_exit_trigger():
+    """Exit fires when current P&L falls to/below the armed floor."""
+    def should_exit(peak_pnl, current_pnl, arm=1.0, giveback=0.18):
+        if peak_pnl < arm:
+            return False
+        floor = peak_pnl - giveback * (arm / peak_pnl)
+        return current_pnl <= floor
+
+    # Peaked +5%, fell to +3.16% (the TON case) → exit (floor ~4.96%)
+    assert should_exit(5.0, 3.16) is True
+    # Peaked +2%, still at +1.95% (above floor 1.91%) → hold
+    assert should_exit(2.0, 1.95) is False
+    # Peaked +2%, fell to +1.90% (at/below floor 1.91%) → exit
+    assert should_exit(2.0, 1.90) is True
+    # Never armed (peak +0.8%) → never exits on lock
+    assert should_exit(0.8, 0.5) is False
+
+
+def test_peak_pnl_legacy_default():
+    """Positions loaded without peak_pnl_pct default to 0.0 (unarmed)."""
+    from bot.state import PositionState
+    pos = PositionState(entry_price=100.0, qty=1.0, trailing_stop=98.8)
+    assert pos.peak_pnl_pct == 0.0

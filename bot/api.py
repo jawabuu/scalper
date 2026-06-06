@@ -100,6 +100,9 @@ def create_app(engine) -> FastAPI:
             "momentum_enabled":            _engine.momentum_enabled,
             "momentum_lookback":           _engine.momentum_lookback,
             "momentum_min_slope_pct":      _engine.momentum_min_slope_pct,
+            "profit_lock_enabled":         _engine.profit_lock_enabled,
+            "profit_lock_arm_pct":         _engine.profit_lock_arm_pct,
+            "profit_lock_giveback_pct":    _engine.profit_lock_giveback_pct,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -161,6 +164,53 @@ def create_app(engine) -> FastAPI:
     def summary(user: dict = Depends(_require_auth)):
         """Aggregate P&L stats across all closed trades."""
         return _engine.trade_log.summary()
+
+    @app.post("/api/profit-lock")
+    def set_profit_lock(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the continuous profit lock (in-memory, not persisted).
+        Body: {"enabled": bool, "arm_pct": float, "giveback_pct": float}
+        Once P&L crosses arm_pct, a profit floor ratchets up with the peak and
+        locks a rising fraction of the gain. Applies to all open and future
+        positions on the next cycle.
+        """
+        enabled   = payload.get("enabled")
+        arm_pct   = payload.get("arm_pct")
+        giveback  = payload.get("giveback_pct")
+
+        if enabled is not None:
+            _engine.profit_lock_enabled = bool(enabled)
+
+        if arm_pct is not None:
+            try:
+                ap = float(arm_pct)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="arm_pct must be a number")
+            if ap <= 0 or ap > 50:
+                raise HTTPException(status_code=400, detail="arm_pct must be between 0 and 50")
+            _engine.profit_lock_arm_pct = ap
+
+        if giveback is not None:
+            try:
+                gb = float(giveback)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="giveback_pct must be a number")
+            if gb < 0 or gb > 5:
+                raise HTTPException(status_code=400, detail="giveback_pct must be between 0 and 5")
+            _engine.profit_lock_giveback_pct = gb
+
+        log.info(
+            f"Profit lock updated by {user['username']}: "
+            f"enabled={_engine.profit_lock_enabled} "
+            f"arm_pct={_engine.profit_lock_arm_pct} "
+            f"giveback_pct={_engine.profit_lock_giveback_pct}"
+        )
+        return {
+            "ok": True,
+            "profit_lock_enabled": _engine.profit_lock_enabled,
+            "profit_lock_arm_pct": _engine.profit_lock_arm_pct,
+            "profit_lock_giveback_pct": _engine.profit_lock_giveback_pct,
+        }
 
     @app.post("/api/momentum")
     def set_momentum(payload: dict, user: dict = Depends(_require_auth)):

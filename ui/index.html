@@ -272,6 +272,7 @@
   .r-ts    { background: rgba(255,179,68,0.12); color: var(--warn);  }
   .r-kill  { background: rgba(255,77,106,0.12); color: var(--red);   }
   .r-ss    { background: rgba(153,0,255,0.12);  color: #aa66ff;      }
+  .r-pl    { background: rgba(0,212,170,0.18);  color: var(--green); font-weight: 600; }
   .r-other { background: rgba(74,96,112,0.2);   color: var(--muted); }
 
   /* ── Empty states ── */
@@ -697,7 +698,7 @@
           <div class="ta-row" id="et-params-row">
             <span class="ta-hint">Max above fast EMA</span>
             <span class="ta-input-wrap">
-              <input type="number" id="et-band" class="ta-input" min="0" max="10" step="0.1" value="0.5" onchange="onEtParams()">
+              <input type="number" id="et-band" class="ta-input" min="0" max="10" step="0.1" value="0.8" onchange="onEtParams()">
               <span class="ta-pct-sign">%</span>
             </span>
           </div>
@@ -728,10 +729,35 @@
           <div class="ta-row">
             <span class="ta-hint">over last (candles)</span>
             <span class="ta-input-wrap">
-              <input type="number" id="mo-lookback" class="ta-input" min="1" max="50" step="1" value="3" onchange="onMoParams()">
+              <input type="number" id="mo-lookback" class="ta-input" min="1" max="50" step="1" value="2" onchange="onMoParams()">
             </span>
           </div>
           <div class="ta-status" id="mo-status">On — only enter coins rising now</div>
+        </div>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">Profit lock</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="pl-toggle" onchange="onPlToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-row" id="pl-params-row">
+            <span class="ta-hint">Arm at P&amp;L</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="pl-arm" class="ta-input" min="0.1" max="50" step="0.1" value="1.0" onchange="onPlParams()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-row">
+            <span class="ta-hint">Give-back at arm</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="pl-giveback" class="ta-input" min="0" max="5" step="0.01" value="0.18" onchange="onPlParams()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-status" id="pl-status">On — locks gains, tighter as peak climbs</div>
         </div>
       </div>
 
@@ -824,6 +850,87 @@ async function checkAuth() {
   }
   return false;
 }
+
+// ── Profit lock control ──────────────────────────────────────────────────────
+let _plEditing = false;
+
+function syncProfitLock(status) {
+  if (status.profit_lock_enabled === undefined) return;
+  const toggle = document.getElementById('pl-toggle');
+  const arm = document.getElementById('pl-arm');
+  const gb = document.getElementById('pl-giveback');
+  const statusEl = document.getElementById('pl-status');
+  const paramsRow = document.getElementById('pl-params-row');
+  if (!toggle || !arm || !gb || !statusEl) return;
+
+  const enabled = !!status.profit_lock_enabled;
+  toggle.checked = enabled;
+
+  if (!_plEditing) {
+    if (status.profit_lock_arm_pct !== undefined)
+      arm.value = Number(status.profit_lock_arm_pct).toFixed(1);
+    if (status.profit_lock_giveback_pct !== undefined)
+      gb.value = Number(status.profit_lock_giveback_pct).toFixed(2);
+  }
+
+  paramsRow.style.opacity = enabled ? '1' : '0.45';
+  if (enabled) {
+    statusEl.textContent = `On — arms at +${Number(status.profit_lock_arm_pct).toFixed(1)}%, locks tighter as peak climbs`;
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = 'Off — gains not locked, trailing stop only';
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postProfitLock(body) {
+  try {
+    const r = await fetch(API + '/api/profit-lock', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncProfitLock({
+      profit_lock_enabled: data.profit_lock_enabled,
+      profit_lock_arm_pct: data.profit_lock_arm_pct,
+      profit_lock_giveback_pct: data.profit_lock_giveback_pct,
+    });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update profit lock: ${e.message}`);
+  }
+}
+
+function onPlToggle() {
+  postProfitLock({ enabled: document.getElementById('pl-toggle').checked });
+}
+
+function onPlParams() {
+  _plEditing = false;
+  const arm = parseFloat(document.getElementById('pl-arm').value);
+  const gb = parseFloat(document.getElementById('pl-giveback').value);
+  if (isNaN(arm) || arm <= 0 || arm > 50) {
+    setEl('ctrl-msg', 'Arm P&L must be between 0 and 50%');
+    return;
+  }
+  if (isNaN(gb) || gb < 0 || gb > 5) {
+    setEl('ctrl-msg', 'Give-back must be between 0 and 5%');
+    return;
+  }
+  postProfitLock({ arm_pct: arm, giveback_pct: gb });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['pl-arm', 'pl-giveback'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('focus', () => { _plEditing = true; });
+      el.addEventListener('blur', () => { _plEditing = false; });
+    }
+  });
+});
 
 // ── Momentum confirmation control ────────────────────────────────────────────
 let _moEditing = false;
@@ -1174,7 +1281,7 @@ function backstopPill(type) {
 }
 
 function reasonPill(r) {
-  const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual', server_side:'r-ss ss' };
+  const map = { take_profit:'r-tp tp', trailing_stop:'r-ts ts', kill_switch:'r-kill kill', manual:'r-kill manual', server_side:'r-ss ss', profit_lock:'r-pl pl' };
   const cls = map[r] || 'r-other';
   const label = r.replace(/_/g,' ');
   return `<span class="reason-pill ${cls}">${label}</span>`;
@@ -1242,6 +1349,7 @@ async function refresh() {
     syncBtcFilter(status);
     syncEntryTiming(status);
     syncMomentum(status);
+    syncProfitLock(status);
 
     setKillUI(status.kill_switch);
 
