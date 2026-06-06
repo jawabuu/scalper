@@ -15,6 +15,7 @@ Safety:   On entry an OCO order is placed on Binance with a wider fixed stop
 
 import time
 import logging
+import threading
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime, timezone
 
@@ -74,6 +75,13 @@ class ScalpingEngine:
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
+        # Serializes all position mutations so the fast monitor loop and the main
+        # trading cycle never race on the same position (e.g. both trying to close).
+        self._pos_lock = threading.RLock()
+        # Fast peak/exit monitor interval (seconds). Far shorter than the main
+        # trading cycle so the engine sees price spikes the way the dashboard does,
+        # ratcheting peak P&L and triggering the profit lock / trailing stop promptly.
+        self.monitor_interval: float = getattr(cfg, "monitor_interval", 7.0)
 
     # ------------------------------------------------------------------
     # Exchange setup
@@ -767,13 +775,21 @@ class ScalpingEngine:
     def update_trailing_stop(self, sym: str, current_price: float):
         pos = self.positions[sym]
 
+        # Store the live market values — this is the single source of truth that
+        # the dashboard reads, so the displayed price/P&L and the values the engine
+        # acts on are always identical.
+        pos.current_price = current_price
+        pos.pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+        pos.pnl_usdt = (current_price - pos.entry_price) * pos.qty
+        pos.last_price_ts = time.time()
+
         # Track the peak P&L this position has reached, for the profit lock.
-        # Ratchets up only. Computed every cycle regardless of trailing-active
+        # Ratchets up only. Computed every pass regardless of trailing-active
         # state so the lock can arm even during a dormant trailing phase.
-        current_pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+        current_pnl_pct = pos.pnl_pct
         if current_pnl_pct > pos.peak_pnl_pct:
             pos.peak_pnl_pct = current_pnl_pct
-            self.positions[sym] = pos
+        self.positions[sym] = pos
 
         # Activation threshold: if this position's trailing stop is not yet active,
         # check whether price has reached the activation level. Until it does, the
@@ -902,14 +918,15 @@ class ScalpingEngine:
 
     def close_all_positions(self, reason: str = "kill_switch"):
         """Cancel all OCOs and immediately market-sell all open positions."""
-        for sym in list(self.positions.keys()):
-            pos = self.positions[sym]
-            try:
-                df = self.fetch_ohlcv(sym)
-                price = df["close"].iloc[-1] if df is not None else pos.entry_price
-            except Exception:
-                price = pos.entry_price
-            self._close_position(sym, price, reason)
+        with self._pos_lock:
+            for sym in list(self.positions.keys()):
+                pos = self.positions[sym]
+                try:
+                    df = self.fetch_ohlcv(sym)
+                    price = df["close"].iloc[-1] if df is not None else pos.entry_price
+                except Exception:
+                    price = pos.entry_price
+                self._close_position(sym, price, reason)
 
     def run_cycle(self):
         self.last_cycle_ts = time.time()
@@ -1017,12 +1034,17 @@ class ScalpingEngine:
             if df is None:
                 continue
             price = df["close"].iloc[-1]
-            self.update_trailing_stop(sym, price)
-            reason = self.check_exit(sym, price)
-            if reason:
-                self._close_position(sym, price, reason)
-            else:
-                self.positions.increment_candles(sym)
+            with self._pos_lock:
+                # Re-check the position still exists — the fast monitor may have
+                # closed it between the start of this iteration and acquiring the lock.
+                if sym not in self.positions:
+                    continue
+                self.update_trailing_stop(sym, price)
+                reason = self.check_exit(sym, price)
+                if reason:
+                    self._close_position(sym, price, reason)
+                else:
+                    self.positions.increment_candles(sym)
 
         # --- Look for new entries ---
         if len(self.positions) >= self.cfg.max_open_positions:
@@ -1213,15 +1235,18 @@ class ScalpingEngine:
                         f"(overriding activation threshold) to avoid an unprotected position."
                     )
 
-            self.positions[sym] = PositionState(
-                entry_price=fill_price,
-                qty=qty,
-                trailing_stop=trailing_stop,
-                oco_order_list_id=oco_id,
-                backstop_type=backstop_type,
-                trailing_active=trailing_active,
-                activation_price=activation_price,
-            )
+            with self._pos_lock:
+                self.positions[sym] = PositionState(
+                    entry_price=fill_price,
+                    qty=qty,
+                    trailing_stop=trailing_stop,
+                    oco_order_list_id=oco_id,
+                    backstop_type=backstop_type,
+                    trailing_active=trailing_active,
+                    activation_price=activation_price,
+                    current_price=fill_price,
+                    last_price_ts=time.time(),
+                )
             # Stamp the BTC regime on every entry so we can later correlate
             # win-rate against BTC trend, whether or not the filter is enforced.
             btc_regime = self.compute_btc_regime()
@@ -1253,9 +1278,73 @@ class ScalpingEngine:
                 + (f" activation_price={activation_price:.6f}" if not trailing_active else "")
             )
 
+    def monitor_positions_once(self):
+        """
+        One pass of the fast monitor: for each open position, fetch the LIVE
+        ticker price (the same source the dashboard uses), ratchet the peak P&L,
+        and check the trailing stop / profit lock. Runs far more often than the
+        main trading cycle so fast spikes are captured and the profit lock fires
+        near the true peak. All position mutation happens under the position lock
+        so it never races the main cycle.
+        """
+        # Snapshot the symbols so we don't hold the lock during network calls.
+        symbols = list(self.positions.keys())
+
+        for sym in symbols:
+            # Fetch the live price OUTSIDE the lock (network I/O can be slow).
+            try:
+                ticker = self.exchange.fetch_ticker(sym)
+                price = float(ticker["last"] or 0)
+            except Exception as e:
+                log.debug(f"Monitor: ticker fetch failed for {sym}: {e}")
+                continue
+            if price <= 0:
+                continue
+            with self._pos_lock:
+                # The position may have closed (main cycle or a prior monitor pass)
+                # while we were fetching — re-check before acting.
+                if sym not in self.positions:
+                    continue
+                self.update_trailing_stop(sym, price)
+                reason = self.check_exit(sym, price)
+                if reason:
+                    log.info(f"Monitor triggered exit for {sym}: {reason}")
+                    self._close_position(sym, price, reason)
+
+    def _refresh_balance(self):
+        """Update the engine's available-USDT figure (single source of truth)."""
+        try:
+            raw = self.exchange.fetch_balance()
+            free_usdt = raw.get("USDT", {}).get("free")
+            if free_usdt is not None:
+                self.last_balance = float(free_usdt)
+        except Exception as e:
+            log.debug(f"Monitor: balance refresh failed: {e}")
+
+    def _monitor_loop(self):
+        """Daemon loop running the fast peak/exit monitor."""
+        log.info(f"Fast monitor started (interval {self.monitor_interval}s).")
+        while True:
+            try:
+                # Keep available USDT fresh every pass, whether flat or in trades,
+                # so the dashboard's portfolio total reads one consistent source.
+                self._refresh_balance()
+                if not self.kill_switch and self.positions:
+                    self.monitor_positions_once()
+            except Exception as e:
+                log.exception(f"Error in monitor loop: {e}")
+            time.sleep(self.monitor_interval)
+
     def run(self):
         log.info("Bot started. Press Ctrl+C to stop.")
         self.recover_positions()
+        # Seed the balance once up front so the dashboard shows a real figure
+        # immediately, before the first monitor pass refreshes it.
+        self._refresh_balance()
+        # Start the fast peak/exit monitor as a daemon thread so it runs
+        # independently of (and far more often than) the main trading cycle.
+        monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        monitor_thread.start()
         while True:
             try:
                 self.run_cycle()

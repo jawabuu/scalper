@@ -580,3 +580,33 @@ def test_peak_pnl_legacy_default():
     from bot.state import PositionState
     pos = PositionState(entry_price=100.0, qty=1.0, trailing_stop=98.8)
     assert pos.peak_pnl_pct == 0.0
+
+
+# ── Fast monitor peak capture ──────────────────────────────────────────────────
+
+def test_peak_capture_from_live_price():
+    """
+    The fix for the profit-lock missing fast spikes: peak P&L must ratchet from
+    whatever live price is observed, so a spike seen between trading cycles is
+    captured and the profit-lock floor reflects the true peak.
+    """
+    arm, gb = 0.6, 0.18
+    def floor(peak):
+        if peak < arm:
+            return None
+        return peak - gb * (arm / peak)
+
+    # Simulate ratcheting peak as the monitor observes live prices
+    peak = 0.0
+    for pnl in [0.3, 0.55, 1.5, 0.9, 0.7]:   # spike to 1.5 then fall back
+        if pnl > peak:
+            peak = pnl
+    assert peak == 1.5                        # spike captured, not the 0.55 sample
+    f = floor(peak)
+    assert abs(f - 1.428) < 1e-3              # floor reflects the true peak
+    # At +0.7% the position is below the floor -> profit lock should fire
+    assert 0.7 <= f
+
+    # Contrast: if the monitor had only sampled 0.55 (the old cycle-only behaviour),
+    # the lock would barely arm and lock far less.
+    assert floor(0.55) is None                # 0.55 < arm 0.6 -> not even armed

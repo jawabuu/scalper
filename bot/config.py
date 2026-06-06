@@ -105,8 +105,16 @@ class BotConfig:
     # (~99%) while small winners keep a little room. Sits alongside the trailing
     # stop; the position exits at whichever triggers first. Locks scalping gains
     # that the looser 1.2% trailing stop would otherwise give back.
-    profit_lock_arm_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_ARM_PCT", 1.0))
-    profit_lock_giveback_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_GIVEBACK_PCT", 0.18))
+    profit_lock_arm_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_ARM_PCT", 0.6))
+    profit_lock_giveback_pct: float = field(default_factory=lambda: _env_float("PROFIT_LOCK_GIVEBACK_PCT", 0.12))
+
+    # ── Fast peak/exit monitor ──────────────────────────────────────────
+    # Independent of the main trading cycle, a lightweight loop fetches the live
+    # price for each open position every MONITOR_INTERVAL seconds, ratchets the
+    # peak P&L, and checks the trailing stop / profit lock. This makes the engine
+    # see price spikes the way the dashboard does, so the profit lock captures the
+    # true peak instead of only what the slow trading cycle happened to sample.
+    monitor_interval: float = field(default_factory=lambda: _env_float("MONITOR_INTERVAL", 7.0))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

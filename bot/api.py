@@ -76,12 +76,11 @@ def create_app(engine) -> FastAPI:
     @app.get("/api/status")
     def status(user: dict = Depends(_require_auth)):
         """Bot health, mode, and current cycle info."""
-        try:
-            raw = _engine.exchange.fetch_balance()
-            balance_usdt = float(raw.get("USDT", {}).get("free") or _engine.last_balance)
-            _engine.last_balance = balance_usdt
-        except Exception:
-            balance_usdt = _engine.last_balance
+        # Read the engine-maintained balance (refreshed every monitor pass, ~7s)
+        # rather than fetching independently. Single source of truth: the available
+        # USDT shown here is the same figure the engine uses, so the dashboard's
+        # portfolio total (USDT + position values) reconciles consistently.
+        balance_usdt = _engine.last_balance
 
         return {
             "running":          True,
@@ -113,18 +112,27 @@ def create_app(engine) -> FastAPI:
 
     @app.get("/api/positions")
     def positions(user: dict = Depends(_require_auth)):
-        """All currently open positions with live unrealised P&L."""
+        """
+        All currently open positions with live unrealised P&L.
+
+        Reads the live price and P&L the ENGINE maintains (updated every monitor
+        pass), rather than fetching its own ticker. This guarantees a single source
+        of truth: the number shown here is exactly the number the engine acts on
+        for the trailing stop and profit lock.
+        """
         snapshot = _engine.positions.snapshot()
         result = []
         for sym, pos in snapshot.items():
-            try:
-                ticker = _engine.exchange.fetch_ticker(sym)
-                current_price = ticker["last"] or pos.entry_price
-            except Exception:
+            # Use the engine-maintained live values. Fall back to entry price only
+            # if the monitor hasn't populated them yet (brand-new position).
+            if pos.current_price and pos.current_price > 0:
+                current_price = pos.current_price
+                pnl_pct  = pos.pnl_pct
+                pnl_usdt = pos.pnl_usdt
+            else:
                 current_price = pos.entry_price
-
-            pnl_pct  = (current_price - pos.entry_price) / pos.entry_price * 100
-            pnl_usdt = (current_price - pos.entry_price) * pos.qty
+                pnl_pct  = 0.0
+                pnl_usdt = 0.0
 
             result.append({
                 "symbol":        sym,
@@ -136,6 +144,7 @@ def create_app(engine) -> FastAPI:
                 "opened_at":     pos.opened_at.isoformat(),
                 "pnl_pct":       round(pnl_pct, 4),
                 "pnl_usdt":      round(pnl_usdt, 4),
+                "peak_pnl_pct":  round(pos.peak_pnl_pct, 4),
                 "backstop_type": pos.backstop_type,
             })
         return result
@@ -418,7 +427,11 @@ def create_app(engine) -> FastAPI:
             price = float(ticker["last"] or pos.entry_price)
         except Exception:
             price = pos.entry_price
-        _engine._close_position(symbol, price, reason="manual")
+        # Take the position lock so this can't race the fast monitor or main cycle.
+        with _engine._pos_lock:
+            if symbol not in _engine.positions:
+                raise HTTPException(status_code=404, detail=f"{symbol} already closed")
+            _engine._close_position(symbol, price, reason="manual")
         log.info(f"Manually closed {symbol} @ {price} by {user['username']}")
         return {"ok": True, "message": f"Closed {symbol}.", "symbol": symbol}
 
