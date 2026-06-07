@@ -72,6 +72,15 @@ class ScalpingEngine:
         self.profit_lock_enabled: bool = True
         self.profit_lock_arm_pct: float = cfg.profit_lock_arm_pct
         self.profit_lock_giveback_pct: float = cfg.profit_lock_giveback_pct
+        # Hard stop-loss: cut a losing position at a fixed P&L rather than waiting
+        # for the trailing stop. Downside mirror of the profit lock.
+        self.hard_stop_enabled: bool = cfg.hard_stop_enabled
+        self.hard_stop_pct: float = cfg.hard_stop_pct
+        # Smart re-entry guard: after a RED close on a coin, don't re-enter it at a
+        # price HIGHER than the loss exit (avoids chasing a loser back up). Records
+        # the last exit price + whether it was a loss, per symbol.
+        self.reentry_guard_enabled: bool = cfg.reentry_guard_enabled
+        self._last_exit: dict[str, dict] = {}  # symbol → {"price": float, "was_loss": bool}
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -816,6 +825,15 @@ class ScalpingEngine:
 
     def check_exit(self, sym: str, current_price: float) -> str | None:
         pos = self.positions[sym]
+        current_pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+
+        # Hard stop-loss — checked FIRST and regardless of trailing-active state.
+        # Cuts a losing position at a fixed P&L rather than waiting for the looser
+        # trailing stop or riding it down hoping for recovery. This is the downside
+        # mirror of the profit lock: it bounds give-back on the loss side.
+        if self.hard_stop_enabled and current_pnl_pct <= -self.hard_stop_pct:
+            return "hard_stop"
+
         # Take profit — only checked when enabled.
         # When disabled the trailing stop is the sole profit exit,
         # allowing winners to run as far as momentum carries them.
@@ -833,7 +851,6 @@ class ScalpingEngine:
         # rather than letting the looser trailing stop give it back.
         floor_pct = self.profit_lock_floor_pct(pos.peak_pnl_pct)
         if floor_pct is not None:
-            current_pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
             if current_pnl_pct <= floor_pct:
                 return "profit_lock"
         if pos.candles_held >= self.cfg.max_hold_candles:
@@ -884,6 +901,11 @@ class ScalpingEngine:
             f"CLOSED {sym} reason={reason} pnl={pnl_pct:+.2f}% "
             f"peak={pos.peak_pnl_pct:+.2f}% gaveback={give_back:.2f}%"
         )
+
+        # Record this exit for the smart re-entry guard: remember the exit price
+        # and whether the trade was a loss, so the entry logic can refuse to buy
+        # the same coin back at a higher price after a red close.
+        self._last_exit[sym] = {"price": price, "was_loss": pnl_pct < 0}
 
         # Apply re-entry cooldown for manual closes so the bot doesn't
         # immediately buy back something the user just intentionally closed.
@@ -1136,6 +1158,22 @@ class ScalpingEngine:
                 continue
 
             price = df["close"].iloc[-1]
+
+            # Smart re-entry guard — after a RED close on this coin, refuse to buy
+            # it back at a price HIGHER than the loss exit. This stops the bot from
+            # chasing a coin it just lost on back up into the same rolling-over move
+            # (the repeated-HOME churn pattern). A green prior close, or a re-entry
+            # at/below the prior exit, is allowed.
+            if self.reentry_guard_enabled:
+                last = self._last_exit.get(sym)
+                if last and last["was_loss"] and price > last["price"]:
+                    log.info(
+                        f"{sym} skipped by re-entry guard: last close was a loss at "
+                        f"{last['price']:.6f}, would re-enter higher at {price:.6f} "
+                        f"— not chasing a loser back up"
+                    )
+                    continue
+
             atr   = df["atr"].iloc[-1]
             alloc = self.risk.position_size_usdt(balance, atr, price)
 

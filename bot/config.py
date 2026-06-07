@@ -115,6 +115,19 @@ class BotConfig:
     # see price spikes the way the dashboard does, so the profit lock captures the
     # true peak instead of only what the slow trading cycle happened to sample.
     monitor_interval: float = field(default_factory=lambda: _env_float("MONITOR_INTERVAL", 7.0))
+
+    # ── Hard stop-loss ──────────────────────────────────────────────────
+    # Cut a losing position at a fixed P&L (e.g. -0.5%) rather than waiting for
+    # the looser trailing stop. The downside mirror of the profit lock: bounds
+    # give-back on the loss side. Checked before the trailing stop and regardless
+    # of trailing-active state.
+    hard_stop_enabled: bool = field(default_factory=lambda: _env_bool("HARD_STOP_ENABLED", True))
+    hard_stop_pct: float = field(default_factory=lambda: _env_float("HARD_STOP_PCT", 0.5))
+
+    # ── Smart re-entry guard ────────────────────────────────────────────
+    # After a RED close on a coin, refuse to re-enter it at a price higher than
+    # the loss exit — avoids chasing a just-lost coin back up into the same move.
+    reentry_guard_enabled: bool = field(default_factory=lambda: _env_bool("REENTRY_GUARD_ENABLED", True))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 1.5))
     # When disabled the trailing stop is the sole exit — lets winners run indefinitely.
     # Take profit then only affects the OCO backstop price (server-side safety net).

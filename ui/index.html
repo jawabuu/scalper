@@ -152,12 +152,60 @@
     margin-top: 4px;
   }
 
-  /* ── Kill switch panel ── */
+  /* ── Controls panel (full-width, collapsible, above positions) ── */
   .kill-panel {
-    grid-column: 3;
+    grid-column: 1 / -1;
+    order: 1;
+  }
+  .positions-panel { order: 2; }
+  .history-panel { order: 3; }
+  .stats-row { order: 0; }
+  .controls-head {
     display: flex;
-    flex-direction: column;
-    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+  }
+  .controls-toggle {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: var(--mono);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .controls-caret {
+    display: inline-block;
+    transition: transform 0.2s ease;
+    font-size: 10px;
+  }
+  .kill-panel.collapsed .controls-caret { transform: rotate(-90deg); }
+  .kill-panel.collapsed .controls-body { display: none; }
+  /* Lay the controls out across the full width instead of one narrow column. */
+  .controls-body {
+    margin-top: 14px;
+  }
+  .controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px 28px;
+    align-items: start;
+  }
+  /* The kill/close action buttons span the full row at the top of the body. */
+  .controls-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .controls-actions .btn { flex: 1; min-width: 220px; margin-top: 0 !important; }
+  /* Inside the grid, each control is its own cell — drop the stacked-layout
+     top divider and margin so cells align cleanly in their tracks. */
+  .controls-grid .ta-control {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
   }
 
   .btn {
@@ -204,7 +252,7 @@
 
   /* ── Positions table ── */
   .positions-panel {
-    grid-column: 1 / 3;
+    grid-column: 1 / -1;
   }
 
   table {
@@ -324,15 +372,25 @@
   }
   .ta-input-wrap { display: flex; align-items: center; gap: 3px; }
   .ta-input {
-    width: 48px;
+    width: 64px;
     background: var(--bg3);
     border: 1px solid var(--border2);
     border-radius: 3px;
     color: var(--accent);
     font-family: var(--mono);
     font-size: 11px;
-    padding: 3px 6px;
+    padding: 3px 8px;
     text-align: right;
+    -moz-appearance: textfield;
+    appearance: textfield;
+    box-sizing: border-box;
+  }
+  /* Hide the number-input spinner arrows that otherwise overlap the value
+     (the cause of "0.12" rendering clipped to "0.1" on desktop). */
+  .ta-input::-webkit-outer-spin-button,
+  .ta-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
   }
   .ta-input:focus { outline: none; border-color: var(--accent); }
   .ta-pct-sign { font-size: 11px; color: var(--muted); }
@@ -638,12 +696,47 @@
     </div>
 
     <!-- Controls -->
-    <div class="panel kill-panel">
-      <div class="panel-label">Controls</div>
+    <div class="panel kill-panel" id="controls-panel">
+      <div class="controls-head" onclick="toggleControls()">
+        <div class="panel-label" style="margin-bottom:0">Controls</div>
+        <span class="controls-toggle"><span id="controls-caret" class="controls-caret">▼</span> <span id="controls-toggle-text">hide</span></span>
+      </div>
 
-      <div id="ctrl-normal">
-        <button class="btn btn-kill" id="btn-kill" onclick="promptKill()">⏹ Engage kill switch</button>
-        <button class="btn btn-close" id="btn-closeall" style="margin-top:8px" onclick="promptCloseAll()">✕ Close all positions</button>
+      <div class="controls-body" id="controls-body">
+      <div id="ctrl-normal" class="controls-grid">
+        <div class="controls-actions">
+          <button class="btn btn-kill" id="btn-kill" onclick="promptKill()">⏹ Engage kill switch</button>
+          <button class="btn btn-close" id="btn-closeall" onclick="promptCloseAll()">✕ Close all positions</button>
+        </div>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">Hard stop-loss</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="hs-toggle" onchange="onHsToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-row" id="hs-params-row">
+            <span class="ta-hint">Cut loss at</span>
+            <span class="ta-input-wrap">
+              <input type="number" id="hs-pct" class="ta-input" min="0.1" max="50" step="0.1" value="0.5" onchange="onHsParams()">
+              <span class="ta-pct-sign">%</span>
+            </span>
+          </div>
+          <div class="ta-status" id="hs-status">On — exits a losing trade at -0.5%</div>
+        </div>
+
+        <div class="ta-control">
+          <div class="ta-row">
+            <span class="ta-label">Re-entry guard</span>
+            <label class="ta-switch">
+              <input type="checkbox" id="rg-toggle" onchange="onRgToggle()">
+              <span class="ta-slider"></span>
+            </label>
+          </div>
+          <div class="ta-status" id="rg-status" style="margin-top:8px">On — won't re-buy a coin above its last loss exit</div>
+        </div>
 
         <div class="ta-control">
           <div class="ta-row">
@@ -761,7 +854,7 @@
         </div>
       </div>
 
-      <div id="ctrl-confirm-kill" style="display:none">
+      <div id="ctrl-confirm-kill" style="display:none;grid-column:1/-1">
         <div style="font-size:11px;color:var(--warn);margin-bottom:8px;">Confirm: stop bot & close all?</div>
         <div class="confirm-row">
           <button class="btn btn-kill" onclick="doKill()">Confirm</button>
@@ -769,7 +862,7 @@
         </div>
       </div>
 
-      <div id="ctrl-confirm-close" style="display:none">
+      <div id="ctrl-confirm-close" style="display:none;grid-column:1/-1">
         <div style="font-size:11px;color:var(--warn);margin-bottom:8px;">Confirm: close all open positions?</div>
         <div class="confirm-row">
           <button class="btn btn-close" onclick="doCloseAll()">Confirm</button>
@@ -777,7 +870,7 @@
         </div>
       </div>
 
-      <div id="ctrl-killed" style="display:none">
+      <div id="ctrl-killed" style="display:none;grid-column:1/-1">
         <div class="badge badge-kill" style="display:inline-block;margin-bottom:12px;">Kill switch active</div>
         <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6;">
           Bot is paused. Open positions will be closed on next cycle.
@@ -785,14 +878,15 @@
         <button class="btn btn-resume" onclick="doResume()">▶ Resume bot</button>
       </div>
 
-      <div id="ctrl-msg" class="err"></div>
+      <div id="ctrl-msg" class="err" style="grid-column:1/-1"></div>
 
-      <div style="margin-top:auto;padding-top:16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.8;">
+      <div style="grid-column:1/-1;padding-top:16px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.8;display:flex;gap:24px;flex-wrap:wrap;">
         <div id="cfg-tf">—</div>
         <div id="cfg-stop">—</div>
         <div id="cfg-tp">—</div>
         <div id="cfg-last">—</div>
       </div>
+      </div><!-- /controls-body -->
     </div>
 
     <!-- Trade history -->
@@ -930,6 +1024,124 @@ document.addEventListener('DOMContentLoaded', () => {
       el.addEventListener('blur', () => { _plEditing = false; });
     }
   });
+});
+
+// ── Hard stop-loss control ───────────────────────────────────────────────────
+let _hsEditing = false;
+
+function syncHardStop(status) {
+  if (status.hard_stop_enabled === undefined) return;
+  const toggle = document.getElementById('hs-toggle');
+  const pct = document.getElementById('hs-pct');
+  const statusEl = document.getElementById('hs-status');
+  const paramsRow = document.getElementById('hs-params-row');
+  if (!toggle || !pct || !statusEl) return;
+
+  const enabled = !!status.hard_stop_enabled;
+  toggle.checked = enabled;
+  if (!_hsEditing && status.hard_stop_pct !== undefined)
+    pct.value = Number(status.hard_stop_pct).toFixed(1);
+
+  paramsRow.style.opacity = enabled ? '1' : '0.45';
+  if (enabled) {
+    statusEl.textContent = `On — exits a losing trade at -${Number(status.hard_stop_pct).toFixed(1)}%`;
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = 'Off — losses ride the trailing stop only';
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postHardStop(body) {
+  try {
+    const r = await fetch(API + '/api/hard-stop', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncHardStop({ hard_stop_enabled: data.hard_stop_enabled, hard_stop_pct: data.hard_stop_pct });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update hard stop: ${e.message}`);
+  }
+}
+
+function onHsToggle() {
+  postHardStop({ enabled: document.getElementById('hs-toggle').checked });
+}
+function onHsParams() {
+  _hsEditing = false;
+  const p = parseFloat(document.getElementById('hs-pct').value);
+  if (isNaN(p) || p <= 0 || p > 50) {
+    setEl('ctrl-msg', 'Hard stop must be between 0 and 50%');
+    return;
+  }
+  postHardStop({ pct: p });
+}
+
+// ── Re-entry guard control ───────────────────────────────────────────────────
+function syncReentryGuard(status) {
+  if (status.reentry_guard_enabled === undefined) return;
+  const toggle = document.getElementById('rg-toggle');
+  const statusEl = document.getElementById('rg-status');
+  if (!toggle || !statusEl) return;
+  const enabled = !!status.reentry_guard_enabled;
+  toggle.checked = enabled;
+  if (enabled) {
+    statusEl.textContent = "On — won't re-buy a coin above its last loss exit";
+    statusEl.classList.add('on');
+  } else {
+    statusEl.textContent = 'Off — may re-enter a just-lost coin at any price';
+    statusEl.classList.remove('on');
+  }
+}
+
+async function postReentryGuard(body) {
+  try {
+    const r = await fetch(API + '/api/reentry-guard', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const data = await r.json();
+    syncReentryGuard({ reentry_guard_enabled: data.reentry_guard_enabled });
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update re-entry guard: ${e.message}`);
+  }
+}
+function onRgToggle() {
+  postReentryGuard({ enabled: document.getElementById('rg-toggle').checked });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('hs-pct');
+  if (el) {
+    el.addEventListener('focus', () => { _hsEditing = true; });
+    el.addEventListener('blur', () => { _hsEditing = false; });
+  }
+});
+
+// ── Controls panel collapse ──────────────────────────────────────────────────
+function toggleControls() {
+  const panel = document.getElementById('controls-panel');
+  const txt = document.getElementById('controls-toggle-text');
+  panel.classList.toggle('collapsed');
+  const collapsed = panel.classList.contains('collapsed');
+  if (txt) txt.textContent = collapsed ? 'show' : 'hide';
+  try { localStorage.setItem('controlsCollapsed', collapsed ? '1' : '0'); } catch(e) {}
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem('controlsCollapsed') === '1'; } catch(e) {}
+  if (collapsed) {
+    const panel = document.getElementById('controls-panel');
+    const txt = document.getElementById('controls-toggle-text');
+    if (panel) panel.classList.add('collapsed');
+    if (txt) txt.textContent = 'show';
+  }
 });
 
 // ── Momentum confirmation control ────────────────────────────────────────────
@@ -1350,6 +1562,8 @@ async function refresh() {
     syncEntryTiming(status);
     syncMomentum(status);
     syncProfitLock(status);
+    syncHardStop(status);
+    syncReentryGuard(status);
 
     setKillUI(status.kill_switch);
 

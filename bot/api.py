@@ -102,6 +102,9 @@ def create_app(engine) -> FastAPI:
             "profit_lock_enabled":         _engine.profit_lock_enabled,
             "profit_lock_arm_pct":         _engine.profit_lock_arm_pct,
             "profit_lock_giveback_pct":    _engine.profit_lock_giveback_pct,
+            "hard_stop_enabled":           _engine.hard_stop_enabled,
+            "hard_stop_pct":               _engine.hard_stop_pct,
+            "reentry_guard_enabled":       _engine.reentry_guard_enabled,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
@@ -220,6 +223,55 @@ def create_app(engine) -> FastAPI:
             "profit_lock_arm_pct": _engine.profit_lock_arm_pct,
             "profit_lock_giveback_pct": _engine.profit_lock_giveback_pct,
         }
+
+    @app.post("/api/hard-stop")
+    def set_hard_stop(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the hard stop-loss (in-memory, not persisted).
+        Body: {"enabled": bool, "pct": float}
+        Cuts a losing position at -pct% P&L, checked before the trailing stop.
+        """
+        enabled = payload.get("enabled")
+        pct     = payload.get("pct")
+
+        if enabled is not None:
+            _engine.hard_stop_enabled = bool(enabled)
+
+        if pct is not None:
+            try:
+                p = float(pct)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="pct must be a number")
+            if p <= 0 or p > 50:
+                raise HTTPException(status_code=400, detail="pct must be between 0 and 50")
+            _engine.hard_stop_pct = p
+
+        log.info(
+            f"Hard stop updated by {user['username']}: "
+            f"enabled={_engine.hard_stop_enabled} pct={_engine.hard_stop_pct}"
+        )
+        return {
+            "ok": True,
+            "hard_stop_enabled": _engine.hard_stop_enabled,
+            "hard_stop_pct": _engine.hard_stop_pct,
+        }
+
+    @app.post("/api/reentry-guard")
+    def set_reentry_guard(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update the smart re-entry guard (in-memory, not persisted).
+        Body: {"enabled": bool}
+        When on, refuses to re-enter a coin at a price higher than its last
+        loss exit — stops the bot chasing a just-lost coin back up.
+        """
+        enabled = payload.get("enabled")
+        if enabled is not None:
+            _engine.reentry_guard_enabled = bool(enabled)
+        log.info(
+            f"Re-entry guard updated by {user['username']}: "
+            f"enabled={_engine.reentry_guard_enabled}"
+        )
+        return {"ok": True, "reentry_guard_enabled": _engine.reentry_guard_enabled}
 
     @app.post("/api/momentum")
     def set_momentum(payload: dict, user: dict = Depends(_require_auth)):

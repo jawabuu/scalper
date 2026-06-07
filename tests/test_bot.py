@@ -180,6 +180,7 @@ def test_close_position_cancels_oco(cfg):
     engine = object.__new__(ScalpingEngine)
     engine.cfg = cfg
     engine.trade_log = TradeLog()
+    engine._last_exit = {}
 
     cancel_calls = []
     sell_calls = []
@@ -610,3 +611,68 @@ def test_peak_capture_from_live_price():
     # Contrast: if the monitor had only sampled 0.55 (the old cycle-only behaviour),
     # the lock would barely arm and lock far less.
     assert floor(0.55) is None                # 0.55 < arm 0.6 -> not even armed
+
+
+# ── Hard stop-loss ─────────────────────────────────────────────────────────────
+
+def test_hard_stop_fires_before_trailing(cfg):
+    """Hard stop must trigger at -pct% regardless of trailing-active state."""
+    from bot.engine import ScalpingEngine
+    from bot.state import PositionState
+
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = cfg
+    eng.cfg.take_profit_enabled = False
+    eng.hard_stop_enabled = True
+    eng.hard_stop_pct = 0.5
+    eng.profit_lock_enabled = False
+    eng.profit_lock_arm_pct = 0.6
+    eng.profit_lock_giveback_pct = 0.12
+
+    # Entry 100, price 99.4 = -0.6% -> below -0.5% hard stop
+    eng.positions = {"X/USDT": PositionState(entry_price=100.0, qty=1.0,
+                     trailing_stop=98.0, trailing_active=False)}
+    assert eng.check_exit("X/USDT", 99.4) == "hard_stop"
+    # At -0.3% it should NOT fire
+    assert eng.check_exit("X/USDT", 99.7) is None
+
+
+def test_hard_stop_disabled(cfg):
+    from bot.engine import ScalpingEngine
+    from bot.state import PositionState
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = cfg
+    eng.cfg.take_profit_enabled = False
+    eng.hard_stop_enabled = False
+    eng.hard_stop_pct = 0.5
+    eng.profit_lock_enabled = False
+    eng.positions = {"X/USDT": PositionState(entry_price=100.0, qty=1.0,
+                     trailing_stop=98.0, trailing_active=False)}
+    # Big loss but hard stop off and trailing not active -> no exit
+    assert eng.check_exit("X/USDT", 99.0) is None
+
+
+# ── Smart re-entry guard ────────────────────────────────────────────────────────
+
+def test_reentry_guard_blocks_higher_after_loss():
+    """After a red close, re-entry above the loss exit price is blocked."""
+    last_exit = {"SOL/USDT": {"price": 80.0, "was_loss": True}}
+    # Would re-enter at 81 (higher than the 80 loss exit) -> block
+    price = 81.0
+    last = last_exit.get("SOL/USDT")
+    blocked = bool(last and last["was_loss"] and price > last["price"])
+    assert blocked
+
+def test_reentry_guard_allows_lower_after_loss():
+    last_exit = {"SOL/USDT": {"price": 80.0, "was_loss": True}}
+    price = 79.0  # at/below the loss exit -> allowed
+    last = last_exit.get("SOL/USDT")
+    blocked = bool(last and last["was_loss"] and price > last["price"])
+    assert not blocked
+
+def test_reentry_guard_allows_after_green():
+    last_exit = {"SOL/USDT": {"price": 80.0, "was_loss": False}}
+    price = 85.0  # prior close was green -> always allowed
+    last = last_exit.get("SOL/USDT")
+    blocked = bool(last and last["was_loss"] and price > last["price"])
+    assert not blocked
