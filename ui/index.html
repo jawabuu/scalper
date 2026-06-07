@@ -280,6 +280,8 @@
 
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: var(--bg2); }
+  th.sortable { cursor: pointer; user-select: none; transition: color 0.15s; }
+  th.sortable:hover { color: var(--accent); }
 
   .sym { font-weight: 600; color: #e8f0f8; letter-spacing: 0.05em; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -948,6 +950,50 @@ async function checkAuth() {
 // ── Profit lock control ──────────────────────────────────────────────────────
 let _plEditing = false;
 
+// ── Open-positions sorting ───────────────────────────────────────────────────
+// Click a column header to sort; click again to reverse. Default: age descending
+// (oldest first). Holds the latest positions so re-sorting needs no refetch.
+let _posSort = { key: 'age', dir: 'desc' };
+let _lastPositions = [];
+
+const _posSortAccessors = {
+  pair:  p => p.symbol,
+  entry: p => p.entry_price,
+  now:   p => p.current_price,
+  pnlpct:p => p.pnl_pct,
+  pnlusd:p => p.pnl_usdt,
+  value: p => p.current_price * p.qty,
+  age:   p => p.candles_held,
+};
+
+function sortPositions(list) {
+  const acc = _posSortAccessors[_posSort.key];
+  if (!acc) return list;
+  const sorted = [...list].sort((a, b) => {
+    const va = acc(a), vb = acc(b);
+    if (typeof va === 'string') return va.localeCompare(vb);
+    return va - vb;
+  });
+  if (_posSort.dir === 'desc') sorted.reverse();
+  return sorted;
+}
+
+function setPosSort(key) {
+  if (_posSort.key === key) {
+    _posSort.dir = _posSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _posSort.key = key;
+    _posSort.dir = (key === 'pair') ? 'asc' : 'desc';
+  }
+  renderPositionsTable(_lastPositions);
+}
+
+function _sortArrow(key) {
+  if (_posSort.key !== key) return '';
+  return _posSort.dir === 'asc' ? ' ▲' : ' ▼';
+}
+
+
 function syncProfitLock(status) {
   if (status.profit_lock_enabled === undefined) return;
   const toggle = document.getElementById('pl-toggle');
@@ -1538,6 +1584,61 @@ async function api(path, method='GET') {
   return r.json();
 }
 
+function renderPositionsTable(positions) {
+  if (!positions || positions.length === 0) {
+    setEl('positions-wrap', '<div class="empty">No open positions</div>');
+    return;
+  }
+  const sorted = sortPositions(positions);
+  const rows = sorted.map(p => {
+    const pnlPct = p.pnl_pct;
+    const cls = pnlClass(pnlPct);
+    const stopDist = ((p.current_price - p.trailing_stop) / p.current_price * 100);
+    const stopPct = Math.min(100, Math.max(0, (1 - stopDist / 2) * 100));
+    const safeId = p.symbol.replace('/','_');
+    return `<tr id="row-${safeId}">
+      <td class="sym">${p.symbol.replace('/USDT','')}</td>
+      <td class="num">${fmt(p.entry_price, 4)}</td>
+      <td class="num">${fmt(p.current_price, 4)}</td>
+      <td class="num ${cls}">${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct, 3)}%</td>
+      <td class="num ${cls}">$${fmt(p.pnl_usdt, 2)}</td>
+      <td>
+        <div class="stop-bar-wrap">
+          <span style="font-size:11px">${fmt(p.trailing_stop, 4)}</span>
+          <div class="stop-bar"><div class="stop-bar-fill" style="width:${stopPct}%"></div></div>
+        </div>
+      </td>
+      <td>${backstopPill(p.backstop_type)}</td>
+      <td class="num">$${fmt(p.current_price * p.qty, 2)}</td>
+      <td class="num" style="color:var(--muted)">${p.candles_held}c</td>
+      <td style="color:var(--muted);font-size:11px">${timeAgo(p.opened_at)}</td>
+      <td>
+        <div id="ctrl-${safeId}-idle">
+          <button class="btn-row-close" onclick="promptCloseOne('${p.symbol}')">Close</button>
+        </div>
+        <div id="ctrl-${safeId}-confirm" style="display:none;gap:4px;align-items:center">
+          <button class="btn-row-confirm yes" onclick="doCloseOne('${p.symbol}')">Confirm</button>
+          <button class="btn-row-confirm no"  onclick="cancelCloseOne('${p.symbol}')">Cancel</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+  setEl('positions-wrap', `<table>
+    <thead><tr>
+      <th class="sortable" onclick="setPosSort('pair')">Pair${_sortArrow('pair')}</th>
+      <th class="num sortable" onclick="setPosSort('entry')">Entry${_sortArrow('entry')}</th>
+      <th class="num sortable" onclick="setPosSort('now')">Now${_sortArrow('now')}</th>
+      <th class="num sortable" onclick="setPosSort('pnlpct')">P&L %${_sortArrow('pnlpct')}</th>
+      <th class="num sortable" onclick="setPosSort('pnlusd')">P&L $${_sortArrow('pnlusd')}</th>
+      <th>Trailing stop</th><th>Backstop</th>
+      <th class="num sortable" onclick="setPosSort('value')">Value${_sortArrow('value')}</th>
+      <th class="num sortable" onclick="setPosSort('age')">Age${_sortArrow('age')}</th>
+      <th>Opened</th><th></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`);
+}
+
 async function refresh() {
   try {
     const [status, positions, summary, trades] = await Promise.all([
@@ -1595,52 +1696,8 @@ async function refresh() {
     avgEl.className = `stat-value ${pnlClass(avg)}`;
 
     // Positions
-    if (positions.length === 0) {
-      setEl('positions-wrap', '<div class="empty">No open positions</div>');
-    } else {
-      const rows = positions.map(p => {
-        const pnlPct = p.pnl_pct;
-        const cls = pnlClass(pnlPct);
-        // Stop distance as % of price range entry→stop (how close to stop)
-        const stopDist = ((p.current_price - p.trailing_stop) / p.current_price * 100);
-        const stopPct = Math.min(100, Math.max(0, (1 - stopDist / 2) * 100)); // visual fill
-        const safeId = p.symbol.replace('/','_');
-        return `<tr id="row-${safeId}">
-          <td class="sym">${p.symbol.replace('/USDT','')}</td>
-          <td class="num">${fmt(p.entry_price, 4)}</td>
-          <td class="num">${fmt(p.current_price, 4)}</td>
-          <td class="num ${cls}">${pnlPct >= 0 ? '+' : ''}${fmt(pnlPct, 3)}%</td>
-          <td class="num ${cls}">$${fmt(p.pnl_usdt, 2)}</td>
-          <td>
-            <div class="stop-bar-wrap">
-              <span style="font-size:11px">${fmt(p.trailing_stop, 4)}</span>
-              <div class="stop-bar"><div class="stop-bar-fill" style="width:${stopPct}%"></div></div>
-            </div>
-          </td>
-          <td>${backstopPill(p.backstop_type)}</td>
-          <td class="num">$${fmt(p.current_price * p.qty, 2)}</td>
-          <td class="num" style="color:var(--muted)">${p.candles_held}c</td>
-          <td style="color:var(--muted);font-size:11px">${timeAgo(p.opened_at)}</td>
-          <td>
-            <div id="ctrl-${safeId}-idle">
-              <button class="btn-row-close" onclick="promptCloseOne('${p.symbol}')">Close</button>
-            </div>
-            <div id="ctrl-${safeId}-confirm" style="display:none;display:none;gap:4px;align-items:center">
-              <button class="btn-row-confirm yes" onclick="doCloseOne('${p.symbol}')">Confirm</button>
-              <button class="btn-row-confirm no"  onclick="cancelCloseOne('${p.symbol}')">Cancel</button>
-            </div>
-          </td>
-        </tr>`;
-      }).join('');
-      setEl('positions-wrap', `<table>
-        <thead><tr>
-          <th>Pair</th><th class="num">Entry</th><th class="num">Now</th>
-          <th class="num">P&L %</th><th class="num">P&L $</th>
-          <th>Trailing stop</th><th>Backstop</th><th class="num">Value</th><th class="num">Age</th><th>Opened</th><th></th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`);
-    }
+    _lastPositions = positions;
+    renderPositionsTable(positions);
 
     // History
     if (trades.length === 0) {

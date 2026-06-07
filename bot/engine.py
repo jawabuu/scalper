@@ -373,6 +373,30 @@ class ScalpingEngine:
         self._btc_regime_cache = regime
         return regime
 
+    def candle_seconds(self) -> int:
+        """Duration of one candle in seconds, parsed from the configured timeframe."""
+        tf = self.cfg.timeframe.lower().strip()
+        try:
+            if tf.endswith("m"):
+                return int(tf[:-1]) * 60
+            if tf.endswith("h"):
+                return int(tf[:-1]) * 3600
+            if tf.endswith("d"):
+                return int(tf[:-1]) * 86400
+        except ValueError:
+            pass
+        return 300  # fallback: 5m
+
+    def candles_held_actual(self, pos) -> int:
+        """
+        True number of candles a position has been held, derived from elapsed
+        wall-clock time since entry — NOT a per-cycle counter. This is correct
+        regardless of how often the trading cycle runs.
+        """
+        from datetime import datetime, timezone
+        elapsed = (datetime.now(timezone.utc) - pos.opened_at).total_seconds()
+        return int(elapsed // self.candle_seconds())
+
     def compute_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df["ema20"] = ta.ema(df["close"], length=20)
@@ -853,7 +877,7 @@ class ScalpingEngine:
         if floor_pct is not None:
             if current_pnl_pct <= floor_pct:
                 return "profit_lock"
-        if pos.candles_held >= self.cfg.max_hold_candles:
+        if self.candles_held_actual(pos) >= self.cfg.max_hold_candles:
             return "timeout"
         return None
 
@@ -1066,7 +1090,10 @@ class ScalpingEngine:
                 if reason:
                     self._close_position(sym, price, reason)
                 else:
-                    self.positions.increment_candles(sym)
+                    # Store the TRUE candles-held (from elapsed time) rather than
+                    # incrementing per cycle, so the dashboard age and the timeout
+                    # both reflect real candle count regardless of cycle frequency.
+                    self.positions.set_candles(sym, self.candles_held_actual(self.positions[sym]))
 
         # --- Look for new entries ---
         if len(self.positions) >= self.cfg.max_open_positions:

@@ -676,3 +676,36 @@ def test_reentry_guard_allows_after_green():
     last = last_exit.get("SOL/USDT")
     blocked = bool(last and last["was_loss"] and price > last["price"])
     assert not blocked
+
+
+# ── Time-based candle counting ──────────────────────────────────────────────────
+
+def test_candles_held_actual_is_time_based(cfg):
+    """candles_held must derive from elapsed time, not per-cycle increments."""
+    from bot.engine import ScalpingEngine
+    from bot.state import PositionState
+    from datetime import datetime, timezone, timedelta
+
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = cfg
+    eng.cfg.timeframe = "5m"
+    assert eng.candle_seconds() == 300
+
+    # 15 minutes on a 5m timeframe = 3 candles (not 13-15 cycles)
+    pos = PositionState(entry_price=1.0, qty=1.0, trailing_stop=0.99,
+                        opened_at=datetime.now(timezone.utc) - timedelta(minutes=15))
+    assert eng.candles_held_actual(pos) == 3
+
+    # 24h = 288 candles -> confirms MAX_HOLD_CANDLES=288 is genuinely 24h
+    pos2 = PositionState(entry_price=1.0, qty=1.0, trailing_stop=0.99,
+                         opened_at=datetime.now(timezone.utc) - timedelta(hours=24))
+    assert eng.candles_held_actual(pos2) == 288
+
+
+def test_candle_seconds_parses_timeframes(cfg):
+    from bot.engine import ScalpingEngine
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = cfg
+    for tf, secs in [("1m", 60), ("5m", 300), ("15m", 900), ("1h", 3600), ("4h", 14400)]:
+        eng.cfg.timeframe = tf
+        assert eng.candle_seconds() == secs

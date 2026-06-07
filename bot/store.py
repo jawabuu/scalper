@@ -162,3 +162,10 @@ class PositionStore:
         with self._lock:
             self._data[symbol].candles_held += 1
             self._flush()
+
+    def set_candles(self, symbol: str, value: int):
+        """Set candles_held to an absolute value (true time-based count) and flush."""
+        with self._lock:
+            if symbol in self._data:
+                self._data[symbol].candles_held = int(value)
+                self._flush()
