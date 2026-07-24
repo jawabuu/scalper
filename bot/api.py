@@ -109,22 +109,22 @@ def create_app(engine) -> FastAPI:
             # Pullback strategy settings (read-only; set via env, shown in the UI so
             # the operator can see what's actually governing entries on this instance).
             "pullback": {
-                "gainer_enabled":     _engine.cfg.pb_gainer_enabled,
-                "dipper_enabled":     _engine.cfg.pb_dipper_enabled,
-                "rsi_min":            _engine.cfg.pb_rsi_min,
-                "rsi_max":            _engine.cfg.pb_rsi_max,
-                "rsi_rising_lookback":_engine.cfg.pb_rsi_rising_lookback,
+                "gainer_enabled":     _engine.pb_gainer_enabled,
+                "dipper_enabled":     _engine.pb_dipper_enabled,
+                "rsi_min":            _engine.pb_rsi_min,
+                "rsi_max":            _engine.pb_rsi_max,
+                "rsi_rising_lookback":_engine.pb_rsi_rising_lookback,
                 "ema_fast":           _engine.cfg.pb_ema_fast,
                 "ema_slow":           _engine.cfg.pb_ema_slow,
                 "ema_buffer_pct":     _engine.cfg.pb_ema_buffer_pct,
-                "vol_spike_mult":     _engine.cfg.pb_vol_spike_mult,
-                "candle_pos_max":     _engine.cfg.pb_candle_pos_max,
-                "upper_wick_max":     _engine.cfg.pb_upper_wick_max,
-                "low_proximity_pct":  _engine.cfg.pb_low_proximity_pct,
-                "max_wick_stop_pct":  _engine.cfg.pb_max_wick_stop_pct,
-                "min_volume_usdt":    _engine.cfg.pb_min_volume_usdt,
-                "timeout_candles":    _engine.cfg.pb_timeout_candles,
-                "session_windows":    _engine.cfg.pb_session_windows or "always active",
+                "vol_spike_mult":     _engine.pb_vol_spike_mult,
+                "candle_pos_max":     _engine.pb_candle_pos_max,
+                "upper_wick_max":     _engine.pb_upper_wick_max,
+                "low_proximity_pct":  _engine.pb_low_proximity_pct,
+                "max_wick_stop_pct":  _engine.pb_max_wick_stop_pct,
+                "min_volume_usdt":    _engine.pb_min_volume_usdt,
+                "timeout_candles":    _engine.pb_timeout_candles,
+                "session_windows":    _engine.pb_session_windows or "always active",
                 "session_tz_offset":  _engine.cfg.pb_session_tz_offset,
             } if _engine.cfg.strategy == "pullback" else None,
             "timeframe":        _engine.cfg.timeframe,
@@ -294,6 +294,60 @@ def create_app(engine) -> FastAPI:
             f"enabled={_engine.reentry_guard_enabled}"
         )
         return {"ok": True, "reentry_guard_enabled": _engine.reentry_guard_enabled}
+
+    @app.post("/api/pullback")
+    def set_pullback(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Update live-editable pullback entry-tuning knobs (in-memory, not persisted;
+        take effect on the next scan). Structural params (EMA/MA periods, sizing)
+        are env-only and NOT settable here. Body accepts any subset of the keys.
+        Each is validated; invalid values are rejected without changing anything.
+        """
+        if _engine.cfg.strategy != "pullback":
+            raise HTTPException(status_code=400, detail="not running the pullback strategy")
+
+        # (attr, type, min, max) — bounds guard against fat-finger mistakes.
+        spec = {
+            "rsi_min":             (float, 0, 100),
+            "rsi_max":             (float, 0, 100),
+            "rsi_rising_lookback": (int, 1, 50),
+            "vol_spike_mult":      (float, 0, 100),
+            "candle_pos_max":      (float, 0.01, 1.0),
+            "upper_wick_max":      (float, 0.0, 1.0),
+            "low_proximity_pct":   (float, 0.0, 100),
+            "max_wick_stop_pct":   (float, 0.01, 50),
+            "min_volume_usdt":     (float, 0, 1e12),
+            "timeout_candles":     (int, 1, 1000),
+        }
+        bool_keys = {"gainer_enabled", "dipper_enabled"}
+
+        applied = {}
+        for key, val in payload.items():
+            if key in bool_keys:
+                setattr(_engine, f"pb_{key}", bool(val))
+                applied[key] = bool(val)
+            elif key == "session_windows":
+                # Empty string = always active; otherwise validated by the parser.
+                _engine.pb_session_windows = str(val)
+                applied[key] = str(val)
+            elif key in spec:
+                typ, lo, hi = spec[key]
+                try:
+                    v = typ(val)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail=f"{key} must be {typ.__name__}")
+                if not (lo <= v <= hi):
+                    raise HTTPException(status_code=400, detail=f"{key} must be in [{lo}, {hi}]")
+                setattr(_engine, f"pb_{key}", v)
+                applied[key] = v
+            # unknown keys ignored
+
+        # Coherence check: rsi_min < rsi_max after applying.
+        if _engine.pb_rsi_min >= _engine.pb_rsi_max:
+            raise HTTPException(status_code=400, detail="rsi_min must be < rsi_max")
+
+        log.info(f"Pullback knobs updated by {user['username']}: {applied}")
+        return {"ok": True, "applied": applied}
 
     @app.post("/api/momentum")
     def set_momentum(payload: dict, user: dict = Depends(_require_auth)):

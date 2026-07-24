@@ -84,6 +84,23 @@ class ScalpingEngine:
         # Pullback strategy runtime state.
         self._ticker_low_24h: dict[str, float] = {}   # symbol → 24h low (from scan)
         self._pending_pullback_stop: dict[str, dict] = {}  # symbol → {"stop","regime"}
+        # Live-editable pullback entry-tuning knobs. Initialized from config but
+        # mutable at runtime via the dashboard (the pullback evaluator reads these,
+        # not cfg.*, so changes take effect on the next scan). Structural params
+        # (EMA/MA periods, position sizing) stay env-only and remain on cfg.
+        self.pb_rsi_min: float = cfg.pb_rsi_min
+        self.pb_rsi_max: float = cfg.pb_rsi_max
+        self.pb_rsi_rising_lookback: int = cfg.pb_rsi_rising_lookback
+        self.pb_vol_spike_mult: float = cfg.pb_vol_spike_mult
+        self.pb_candle_pos_max: float = cfg.pb_candle_pos_max
+        self.pb_upper_wick_max: float = cfg.pb_upper_wick_max
+        self.pb_low_proximity_pct: float = cfg.pb_low_proximity_pct
+        self.pb_max_wick_stop_pct: float = cfg.pb_max_wick_stop_pct
+        self.pb_min_volume_usdt: float = cfg.pb_min_volume_usdt
+        self.pb_timeout_candles: int = cfg.pb_timeout_candles
+        self.pb_gainer_enabled: bool = cfg.pb_gainer_enabled
+        self.pb_dipper_enabled: bool = cfg.pb_dipper_enabled
+        self.pb_session_windows: str = cfg.pb_session_windows
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -888,7 +905,7 @@ class ScalpingEngine:
         if self.cfg.strategy == "pullback":
             # Pullback: 5-candle backstop, but ONLY close if flat/negative. A trade
             # in profit is left to the trailing stop / profit lock (don't cut a runner).
-            if self.candles_held_actual(pos) >= self.cfg.pb_timeout_candles:
+            if self.candles_held_actual(pos) >= self.pb_timeout_candles:
                 if current_pnl_pct <= 0:
                     return "timeout"
                 # In profit — let the shared trailing/profit-lock engine manage it.
@@ -990,6 +1007,39 @@ class ScalpingEngine:
                     price = pos.entry_price
                 self._close_position(sym, price, reason)
 
+    def _pb_live_cfg(self):
+        """
+        A config-like view where the live-editable pullback knobs reflect the
+        current runtime values (mutated via the dashboard), while structural
+        params (EMA/MA periods, sizing) fall through to cfg. The pullback module
+        reads attributes by name, so this SimpleNamespace-over-cfg overlay lets
+        live edits take effect without changing the module's signature.
+        """
+        from types import SimpleNamespace
+        base = self.cfg
+        overlay = {
+            "pb_rsi_min": self.pb_rsi_min,
+            "pb_rsi_max": self.pb_rsi_max,
+            "pb_rsi_rising_lookback": self.pb_rsi_rising_lookback,
+            "pb_vol_spike_mult": self.pb_vol_spike_mult,
+            "pb_candle_pos_max": self.pb_candle_pos_max,
+            "pb_upper_wick_max": self.pb_upper_wick_max,
+            "pb_low_proximity_pct": self.pb_low_proximity_pct,
+            "pb_max_wick_stop_pct": self.pb_max_wick_stop_pct,
+            "pb_min_volume_usdt": self.pb_min_volume_usdt,
+            "pb_timeout_candles": self.pb_timeout_candles,
+            "pb_gainer_enabled": self.pb_gainer_enabled,
+            "pb_dipper_enabled": self.pb_dipper_enabled,
+            "pb_session_windows": self.pb_session_windows,
+        }
+
+        class _LiveCfg:
+            def __getattr__(self, name):
+                if name in overlay:
+                    return overlay[name]
+                return getattr(base, name)
+        return _LiveCfg()
+
     def _pullback_entry_decision(self, sym: str, df) -> float | None:
         """
         Pullback entry decision for one symbol. Returns the entry price if all
@@ -1000,7 +1050,8 @@ class ScalpingEngine:
         from bot import pullback as pb
 
         # Session-window gate.
-        if not pb.in_session(datetime.now(timezone.utc), self.cfg):
+        live = self._pb_live_cfg()
+        if not pb.in_session(datetime.now(timezone.utc), live):
             log.debug(f"{sym} skipped — outside pullback session windows")
             return None
 
@@ -1012,7 +1063,7 @@ class ScalpingEngine:
                 log.debug(f"{sym} skipped by re-entry guard (recent loss)")
                 return None
 
-        prepared = pb.prepare_indicators(df, self.cfg)
+        prepared = pb.prepare_indicators(df, live)
 
         # 24h low / volume for the dipper regime — from the cached candidate ticker
         # if available, else derived from the frame.
@@ -1020,7 +1071,7 @@ class ScalpingEngine:
         if low_24h is None:
             low_24h = float(prepared["low"].min())
 
-        decision = pb.evaluate_entry(prepared, self.cfg, low_24h=low_24h)
+        decision = pb.evaluate_entry(prepared, live, low_24h=low_24h)
         if not decision.enter:
             log.info(f"{sym} pullback skip: {decision.reason} | stamps={decision.stamps}")
             return None

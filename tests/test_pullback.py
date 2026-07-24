@@ -213,6 +213,7 @@ def test_pullback_timeout_closes_flat_trade():
     eng.cfg = BotConfig()
     eng.cfg.strategy = "pullback"
     eng.cfg.pb_timeout_candles = 5
+    eng.pb_timeout_candles = 5
     eng.cfg.timeframe = "3m"
     eng.cfg.take_profit_enabled = False
     eng.hard_stop_enabled = False
@@ -240,6 +241,7 @@ def test_pullback_timeout_spares_profitable_trade():
     eng.cfg = BotConfig()
     eng.cfg.strategy = "pullback"
     eng.cfg.pb_timeout_candles = 5
+    eng.pb_timeout_candles = 5
     eng.cfg.timeframe = "3m"
     eng.cfg.take_profit_enabled = False
     eng.hard_stop_enabled = False
@@ -327,3 +329,29 @@ def test_pullback_cap_does_not_silently_clip_share():
     size = eng._pullback_position_size(10000.0, 100.0, "X/USDT")
     # Must honor the 25% share, not clip to 20%
     assert abs(size - 2500.0) < 1, f"expected 2500, got {size}"
+
+
+# ── Live-editable knobs (runtime overlay) ──────────────────────────────────────
+
+def test_live_cfg_overlay_reflects_runtime_changes():
+    """The pullback evaluator must read runtime knobs, not frozen cfg values."""
+    import os
+    os.environ['STRATEGY'] = 'pullback'
+    from bot.engine import ScalpingEngine
+    from bot.config import BotConfig
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = BotConfig()
+    # Seed runtime attrs from cfg (as __init__ would)
+    for k in ['pb_rsi_min','pb_rsi_max','pb_rsi_rising_lookback','pb_vol_spike_mult',
+              'pb_candle_pos_max','pb_upper_wick_max','pb_low_proximity_pct',
+              'pb_max_wick_stop_pct','pb_min_volume_usdt','pb_timeout_candles',
+              'pb_gainer_enabled','pb_dipper_enabled','pb_session_windows']:
+        setattr(eng, k, getattr(eng.cfg, k))
+
+    # Change a runtime knob; the live cfg view must reflect it, cfg must not.
+    eng.pb_rsi_min = 60.0
+    live = eng._pb_live_cfg()
+    assert live.pb_rsi_min == 60.0          # runtime override visible
+    assert eng.cfg.pb_rsi_min == 55.0       # original cfg untouched
+    # Structural param falls through to cfg unchanged
+    assert live.pb_ema_fast == eng.cfg.pb_ema_fast

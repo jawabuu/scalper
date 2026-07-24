@@ -88,6 +88,16 @@
   .pb-setting .v { color: var(--accent); font-family: var(--mono); }
   .pb-setting .v.on { color: var(--green); }
   .pb-setting .v.off { color: var(--muted); }
+  .pb-input {
+    width: 90px; background: var(--bg3); border: 1px solid var(--border2);
+    border-radius: 3px; color: var(--accent); font-family: var(--mono);
+    font-size: 11px; padding: 2px 6px; text-align: right;
+    -moz-appearance: textfield; appearance: textfield; box-sizing: border-box;
+  }
+  .pb-input.wide { width: 100%; text-align: left; }
+  .pb-input::-webkit-outer-spin-button, .pb-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .pb-input:focus { outline: none; border-color: var(--accent); }
+  .ta-switch.sm { transform: scale(0.85); }
 
   .pulse {
     width: 7px; height: 7px; border-radius: 50%;
@@ -908,7 +918,7 @@
 
     <!-- Pullback strategy settings (read-only; shown only when strategy=pullback) -->
     <div class="panel pullback-panel" id="pullback-panel" style="display:none;order:1.5">
-      <div class="panel-label">Pullback strategy — active settings <span style="color:var(--muted);font-weight:normal;font-size:10px">(read-only, set via env)</span></div>
+      <div class="panel-label">Pullback strategy — tuning <span style="color:var(--muted);font-weight:normal;font-size:10px">(live-editable; changes apply next scan · EMA/timeframe are env-only)</span></div>
       <div class="pb-settings-grid" id="pb-settings-grid"></div>
     </div>
 
@@ -1631,27 +1641,81 @@ function applyStrategyView(status) {
 function renderPullbackSettings(pb, timeframe) {
   const grid = document.getElementById('pb-settings-grid');
   if (!grid) return;
-  const onoff = (b) => `<span class="v ${b ? 'on' : 'off'}">${b ? 'ON' : 'OFF'}</span>`;
-  const val = (v) => `<span class="v">${v}</span>`;
-  const rows = [
-    ['Timeframe', val(timeframe || '—')],
-    ['Gainer regime', onoff(pb.gainer_enabled)],
-    ['Dipper regime', onoff(pb.dipper_enabled)],
-    ['RSI band', val(`${pb.rsi_min}–${pb.rsi_max}`)],
-    ['RSI rising lookback', val(`${pb.rsi_rising_lookback} candles`)],
-    ['EMA', val(`${pb.ema_fast}/${pb.ema_slow} (+${pb.ema_buffer_pct}%)`)],
-    ['Volume spike', val(`${pb.vol_spike_mult}×`)],
-    ['Candle position max', val(pb.candle_pos_max)],
-    ['Upper-wick veto', val(pb.upper_wick_max)],
-    ['24h-low proximity', val(`${pb.low_proximity_pct}%`)],
-    ['Max wick stop', val(`${pb.max_wick_stop_pct}%`)],
-    ['Min volume', val(`$${Number(pb.min_volume_usdt).toLocaleString()}`)],
-    ['Timeout', val(`${pb.timeout_candles} candles`)],
-    ['Session windows', val(pb.session_windows)],
-  ];
-  grid.innerHTML = rows.map(([k, v]) =>
-    `<div class="pb-setting"><span class="k">${k}</span>${v}</div>`).join('');
+  if (grid.dataset.editing === '1') return;  // don't clobber while user edits
+
+  // Read-only (structural / env-only) rows shown as plain text.
+  const ro = (k, v) => `<div class="pb-setting"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+  // Editable numeric knob.
+  const num = (label, id, val, step) =>
+    `<div class="pb-setting"><span class="k">${label}</span>` +
+    `<input type="number" class="pb-input" id="${id}" value="${val}" step="${step}" ` +
+    `onchange="onPbChange('${id}')"></div>`;
+  // Editable toggle.
+  const tog = (label, id, on) =>
+    `<div class="pb-setting"><span class="k">${label}</span>` +
+    `<label class="ta-switch sm"><input type="checkbox" id="${id}" ${on ? 'checked' : ''} ` +
+    `onchange="onPbToggle('${id}')"><span class="ta-slider"></span></label></div>`;
+
+  grid.innerHTML = [
+    ro('Timeframe (env)', timeframe || '—'),
+    ro('EMA (env)', `${pb.ema_fast}/${pb.ema_slow} (+${pb.ema_buffer_pct}%)`),
+    tog('Gainer regime', 'pb-gainer_enabled', pb.gainer_enabled),
+    tog('Dipper regime', 'pb-dipper_enabled', pb.dipper_enabled),
+    num('RSI min', 'pb-rsi_min', pb.rsi_min, '1'),
+    num('RSI max', 'pb-rsi_max', pb.rsi_max, '1'),
+    num('RSI rising lookback', 'pb-rsi_rising_lookback', pb.rsi_rising_lookback, '1'),
+    num('Volume spike ×', 'pb-vol_spike_mult', pb.vol_spike_mult, '0.1'),
+    num('Candle position max', 'pb-candle_pos_max', pb.candle_pos_max, '0.05'),
+    num('Upper-wick veto', 'pb-upper_wick_max', pb.upper_wick_max, '0.05'),
+    num('24h-low proximity %', 'pb-low_proximity_pct', pb.low_proximity_pct, '0.5'),
+    num('Max wick stop %', 'pb-max_wick_stop_pct', pb.max_wick_stop_pct, '0.1'),
+    num('Min volume USDT', 'pb-min_volume_usdt', pb.min_volume_usdt, '100000'),
+    num('Timeout candles', 'pb-timeout_candles', pb.timeout_candles, '1'),
+    `<div class="pb-setting" style="grid-column:1/-1"><span class="k">Session windows</span>` +
+      `<input type="text" class="pb-input wide" id="pb-session_windows" value="${pb.session_windows === 'always active' ? '' : pb.session_windows}" ` +
+      `placeholder="empty = always active" onchange="onPbSessionChange()"></div>`,
+  ].join('');
 }
+
+let _pbSaveTimer = null;
+function _pbMarkEditing() {
+  const grid = document.getElementById('pb-settings-grid');
+  if (grid) { grid.dataset.editing = '1'; clearTimeout(_pbSaveTimer);
+    _pbSaveTimer = setTimeout(() => { grid.dataset.editing = '0'; }, 4000); }
+}
+
+async function _pbPost(body) {
+  _pbMarkEditing();
+  try {
+    const r = await fetch(API + '/api/pullback', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      setEl('ctrl-msg', `Pullback update rejected: ${e.detail || r.status}`);
+    }
+  } catch (e) {
+    setEl('ctrl-msg', `Could not update pullback: ${e.message}`);
+  }
+}
+
+function onPbChange(id) {
+  const key = id.replace('pb-', '');
+  const el = document.getElementById(id);
+  const v = parseFloat(el.value);
+  if (isNaN(v)) { setEl('ctrl-msg', `${key} must be a number`); return; }
+  _pbPost({ [key]: v });
+}
+function onPbToggle(id) {
+  const key = id.replace('pb-', '');
+  _pbPost({ [key]: document.getElementById(id).checked });
+}
+function onPbSessionChange() {
+  _pbPost({ session_windows: document.getElementById('pb-session_windows').value });
+}
+
 
 function renderPositionsTable(positions) {
   if (!positions || positions.length === 0) {
