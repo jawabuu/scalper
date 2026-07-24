@@ -25,6 +25,12 @@ class PositionState:
     # Highest P&L percent this position has reached, for the continuous profit lock.
     # Ratchets up only; the locked profit floor is derived from this peak.
     peak_pnl_pct: float = 0.0
+    # Strategy attribution + entry diagnostics, carried to the ClosedTrade for
+    # per-regime performance analysis. Transient (not persisted); repopulated is
+    # not needed since they're only used at close within the same session.
+    strategy: str = "breakout"
+    regime: str | None = None
+    entry_stamps: dict = None
     # ── Live market values — the single source of truth ──────────────────
     # The fast monitor updates these from the live price each pass. The dashboard
     # READS these rather than fetching its own ticker, so the displayed price/P&L

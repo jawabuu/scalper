@@ -98,6 +98,14 @@
   .pb-input::-webkit-outer-spin-button, .pb-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .pb-input:focus { outline: none; border-color: var(--accent); }
   .ta-switch.sm { transform: scale(0.85); }
+  .pb-regime-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 12px; }
+  .regime-card { border: 1px solid var(--border); border-radius: 4px; padding: 12px; }
+  .regime-name { font-size: 11px; font-weight: bold; color: var(--accent2); letter-spacing: 1px; margin-bottom: 8px; }
+  .regime-row { display: flex; justify-content: space-between; font-size: 11px; padding: 3px 0; color: var(--muted); }
+  .regime-row span:last-child { color: var(--text); font-family: var(--mono); }
+  .regime-row .pos { color: var(--green); }
+  .regime-row .neg { color: var(--red); }
+  .regime-row .muted { color: var(--muted); }
 
   .pulse {
     width: 7px; height: 7px; border-radius: 50%;
@@ -920,6 +928,8 @@
     <div class="panel pullback-panel" id="pullback-panel" style="display:none;order:1.5">
       <div class="panel-label">Pullback strategy — tuning <span style="color:var(--muted);font-weight:normal;font-size:10px">(live-editable; changes apply next scan · EMA/timeframe are env-only)</span></div>
       <div class="pb-settings-grid" id="pb-settings-grid"></div>
+      <div class="panel-label" style="margin-top:16px">Regime performance <span style="color:var(--muted);font-weight:normal;font-size:10px">(gainer vs dipper — avg peak shows traction)</span></div>
+      <div id="pb-regime-stats" class="pb-regime-stats"></div>
     </div>
 
     <!-- Trade history -->
@@ -1638,6 +1648,25 @@ function applyStrategyView(status) {
   }
 }
 
+function renderRegimeStats(byRegime) {
+  const el = document.getElementById('pb-regime-stats');
+  if (!el) return;
+  const card = (name, d) => {
+    const wr = d.count ? d.win_rate : 0;
+    const wrCls = d.count === 0 ? 'muted' : (wr >= 50 ? 'pos' : 'neg');
+    const pnlCls = d.avg_pnl_pct > 0 ? 'pos' : (d.avg_pnl_pct < 0 ? 'neg' : 'muted');
+    return `<div class="regime-card">
+      <div class="regime-name">${name}</div>
+      <div class="regime-row"><span>trades</span><span>${d.count}</span></div>
+      <div class="regime-row"><span>win rate</span><span class="${wrCls}">${d.count ? wr + '%' : '—'}</span></div>
+      <div class="regime-row"><span>avg P&L</span><span class="${pnlCls}">${d.count ? (d.avg_pnl_pct >= 0 ? '+' : '') + d.avg_pnl_pct + '%' : '—'}</span></div>
+      <div class="regime-row"><span>avg peak</span><span>${d.count ? '+' + d.avg_peak_pct + '%' : '—'}</span></div>
+      <div class="regime-row"><span>total P&L</span><span class="${d.total_pnl_pct >= 0 ? 'pos' : 'neg'}">${d.count ? (d.total_pnl_pct >= 0 ? '+' : '') + d.total_pnl_pct + '%' : '—'}</span></div>
+    </div>`;
+  };
+  el.innerHTML = card('GAINER', byRegime.gainer) + card('DIPPER', byRegime.dipper);
+}
+
 function renderPullbackSettings(pb, timeframe) {
   const grid = document.getElementById('pb-settings-grid');
   if (!grid) return;
@@ -1794,6 +1823,9 @@ async function refresh() {
 
     // Strategy badge + strategy-specific control visibility.
     applyStrategyView(status);
+    if (status.strategy === 'pullback' && summary && summary.by_regime) {
+      renderRegimeStats(summary.by_regime);
+    }
 
     syncTrailingActivation(status);
     syncBtcFilter(status);

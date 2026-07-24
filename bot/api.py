@@ -188,6 +188,10 @@ def create_app(engine) -> FastAPI:
                 "pnl_pct":     t.pnl_pct,
                 "pnl_usdt":    t.pnl_usdt,
                 "reason":      t.reason,
+                "strategy":    getattr(t, "strategy", "breakout"),
+                "regime":      getattr(t, "regime", None),
+                "peak_pnl_pct": getattr(t, "peak_pnl_pct", 0.0),
+                "entry_stamps": getattr(t, "entry_stamps", {}) or {},
                 "opened_at":   t.opened_at.isoformat(),
                 "closed_at":   t.closed_at.isoformat(),
             }

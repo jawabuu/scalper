@@ -382,3 +382,22 @@ def test_pullback_entry_log_vars_initialized():
     branch_idx = src.index('if self.cfg.strategy == "pullback"')
     assert src.index("timing_distance = None") < branch_idx
     assert src.index("momentum_slope = None") < branch_idx
+
+
+# ── Per-regime trade attribution ────────────────────────────────────────────────
+
+def test_trade_log_regime_breakdown():
+    from bot.trade_log import TradeLog, ClosedTrade
+    from datetime import datetime, timezone
+    tl = TradeLog()
+    now = datetime.now(timezone.utc)
+    tl.append(ClosedTrade("BNB","","",6,0.57,19,"profit_lock",now,strategy="pullback",regime="gainer",peak_pnl_pct=0.69))
+    tl.append(ClosedTrade("DOGE","","",500,-0.14,-5,"trailing_stop",now,strategy="pullback",regime="dipper",peak_pnl_pct=0.04))
+    s = tl.summary()
+    assert s["by_regime"]["gainer"]["count"] == 1
+    assert s["by_regime"]["gainer"]["win_rate"] == 100.0
+    assert s["by_regime"]["dipper"]["count"] == 1
+    assert s["by_regime"]["dipper"]["win_rate"] == 0.0
+    # avg_peak distinguishes traction: gainer peaked 0.69, dipper only 0.04
+    assert s["by_regime"]["gainer"]["avg_peak_pct"] == 0.69
+    assert s["by_regime"]["dipper"]["avg_peak_pct"] == 0.04

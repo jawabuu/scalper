@@ -998,6 +998,10 @@ class ScalpingEngine:
             pnl_usdt=round(pnl_usdt, 4),
             reason=reason,
             opened_at=pos.opened_at,
+            strategy=getattr(pos, "strategy", "breakout") or "breakout",
+            regime=getattr(pos, "regime", None),
+            peak_pnl_pct=round(pos.peak_pnl_pct, 4),
+            entry_stamps=getattr(pos, "entry_stamps", None) or {},
         ))
         del self.positions[sym]
 
@@ -1094,6 +1098,7 @@ class ScalpingEngine:
         self._pending_pullback_stop[sym] = {
             "stop": decision.stop_price,
             "regime": decision.regime,
+            "stamps": decision.stamps or {},
         }
         return decision.entry_ref_price
 
@@ -1222,6 +1227,10 @@ class ScalpingEngine:
                         pnl_usdt=round(pnl_usdt, 4),
                         reason="server_side",
                         opened_at=pos.opened_at,
+                        strategy=getattr(pos, "strategy", "breakout") or "breakout",
+                        regime=getattr(pos, "regime", None),
+                        peak_pnl_pct=round(pos.peak_pnl_pct, 4),
+                        entry_stamps=getattr(pos, "entry_stamps", None) or {},
                     ))
                     # Apply cooldown — prevents immediate re-entry on the same cycle
                     # that could double-up position if detection misfires
@@ -1507,6 +1516,9 @@ class ScalpingEngine:
                     activation_price=activation_price,
                     current_price=fill_price,
                     last_price_ts=time.time(),
+                    strategy=self.cfg.strategy,
+                    regime=(pending_stop or {}).get("regime") if self.cfg.strategy == "pullback" else None,
+                    entry_stamps=(pending_stop or {}).get("stamps", {}) if self.cfg.strategy == "pullback" else {},
                 )
             # Stamp the BTC regime on every entry so we can later correlate
             # win-rate against BTC trend, whether or not the filter is enforced.
