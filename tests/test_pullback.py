@@ -267,3 +267,63 @@ def test_env_bool_strips_inline_comment():
     del os.environ['X_TEST_FLAG']
     # unset → default
     assert _env_bool('X_TEST_FLAG', True) is True
+
+
+# ── Position sizing (regression for the oversized-position bug) ─────────────────
+
+def test_pullback_sizing_does_not_explode_on_tiny_stop():
+    """A razor-thin wick-stop must NOT produce a portfolio-maxing position."""
+    import os
+    os.environ['STRATEGY'] = 'pullback'
+    from bot.engine import ScalpingEngine
+    from bot.config import BotConfig
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = BotConfig()
+    eng.cfg.pb_position_pct = 0.0      # auto-derive
+    eng.cfg.max_open_positions = 4     # → 25% each
+    eng.cfg.risk_per_trade_pct = 1.0
+    eng.cfg.max_portfolio_pct = 25.0
+    eng.cfg.pb_sizing_stop_floor_pct = 0.5
+    balance = 10000.0
+    eng._pending_pullback_stop = {"BNB/USDT": {"stop": 561.0 * 0.999, "regime": "gainer"}}
+    size = eng._pullback_position_size(balance, 561.0, "BNB/USDT")
+    # ~25% (the even share), NOT an exploded number
+    assert size <= balance * 0.26, f"size {size} too large"
+    assert size >= balance * 0.24, f"size {size} too small"
+
+
+def test_pullback_sizing_auto_derives_from_max_positions():
+    import os
+    os.environ['STRATEGY'] = 'pullback'
+    from bot.engine import ScalpingEngine
+    from bot.config import BotConfig
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = BotConfig()
+    eng.cfg.pb_position_pct = 0.0
+    eng.cfg.risk_per_trade_pct = 1.0
+    eng.cfg.pb_sizing_stop_floor_pct = 0.5
+    eng._pending_pullback_stop = {}
+    for n, expected_pct in [(4, 0.25), (5, 0.20), (2, 0.50)]:
+        eng.cfg.max_open_positions = n
+        eng.cfg.max_portfolio_pct = 100.0 / n  # matched cap
+        size = eng._pullback_position_size(10000.0, 100.0, "X/USDT")
+        assert abs(size - 10000.0 * expected_pct) < 1, f"n={n}: {size}"
+
+
+def test_pullback_cap_does_not_silently_clip_share():
+    """If per-position share exceeds the cap, honor the share (operator intent)."""
+    import os
+    os.environ['STRATEGY'] = 'pullback'
+    from bot.engine import ScalpingEngine
+    from bot.config import BotConfig
+    eng = object.__new__(ScalpingEngine)
+    eng.cfg = BotConfig()
+    eng.cfg.pb_position_pct = 0.0
+    eng.cfg.max_open_positions = 4      # 25% each
+    eng.cfg.max_portfolio_pct = 20.0    # cap LOWER than share
+    eng.cfg.risk_per_trade_pct = 1.0
+    eng.cfg.pb_sizing_stop_floor_pct = 0.5
+    eng._pending_pullback_stop = {}
+    size = eng._pullback_position_size(10000.0, 100.0, "X/USDT")
+    # Must honor the 25% share, not clip to 20%
+    assert abs(size - 2500.0) < 1, f"expected 2500, got {size}"

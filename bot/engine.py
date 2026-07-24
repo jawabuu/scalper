@@ -1038,20 +1038,53 @@ class ScalpingEngine:
 
     def _pullback_position_size(self, balance: float, price: float, sym: str) -> float:
         """
-        Size a pullback position from the wick-stop distance so the risk budget
-        (risk_per_trade_pct of balance) is respected: a wider stop → smaller size.
-        Falls back to the portfolio cap if no stop is pending.
+        Size a pullback position.
+
+        Per-position size is AUTO-DERIVED as an even share of the portfolio across
+        the max number of concurrent positions: pb_position_pct defaults to
+        100 / max_open_positions (e.g. 4 positions → 25% each → full even
+        deployment). Set PB_POSITION_PCT explicitly to override. This means you
+        only tune ONE number (max_open_positions) and the per-position size stays
+        consistent — no second value to keep in sync.
+
+        Wick-based risk sizing is applied only as an UPPER bound with a floored
+        stop distance, so a razor-thin wick can't inflate size. The smaller wins.
         """
+        # Auto-derive the even share unless explicitly overridden.
+        if self.cfg.pb_position_pct and self.cfg.pb_position_pct > 0:
+            share_pct = self.cfg.pb_position_pct
+        else:
+            n = max(self.cfg.max_open_positions, 1)
+            share_pct = 100.0 / n
+        base = balance * (share_pct / 100)
+
+        # Risk-based upper bound with a floored stop distance.
         pending = self._pending_pullback_stop.get(sym)
         risk_usdt = balance * (self.cfg.risk_per_trade_pct / 100)
         if pending and pending.get("stop"):
             stop = pending["stop"]
-            stop_dist_pct = max((price - stop) / price, 1e-6)
-            size = risk_usdt / stop_dist_pct
+            raw_dist = (price - stop) / price
+            stop_dist = max(raw_dist, self.cfg.pb_sizing_stop_floor_pct / 100)
+            risk_bound = risk_usdt / stop_dist
+            size = min(base, risk_bound)
         else:
-            size = balance * (self.cfg.max_portfolio_pct / 100)
-        # Never exceed the portfolio cap.
+            size = base
+
+        # Cap — but the cap must not silently undercut the intended even share.
+        # If the per-position share is larger than max_portfolio_pct, the share
+        # wins (with a warning once), since the operator explicitly chose that
+        # deployment via max_open_positions. Otherwise the cap applies.
         cap = balance * (self.cfg.max_portfolio_pct / 100)
+        if base > cap:
+            if not getattr(self, "_warned_pb_cap", False):
+                log.warning(
+                    f"Pullback per-position share ({share_pct:.1f}%) exceeds "
+                    f"MAX_PORTFOLIO_PCT ({self.cfg.max_portfolio_pct}%). Honoring the "
+                    f"share (you set this via MAX_OPEN_POSITIONS). Raise "
+                    f"MAX_PORTFOLIO_PCT to silence this."
+                )
+                self._warned_pb_cap = True
+            return size  # honor the intended share, don't clip below it
         return min(size, cap)
 
     def run_cycle(self):

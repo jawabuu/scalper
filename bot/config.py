@@ -227,6 +227,11 @@ class BotConfig:
     pb_tp_pct: float = field(default_factory=lambda: _env_float("PB_TP_PCT", 1.0))
     pb_tp_use_ma10: bool = field(default_factory=lambda: _env_bool("PB_TP_USE_MA10", True))
     pb_price_ma_len: int = field(default_factory=lambda: _env_int("PB_PRICE_MA_LEN", 10))
+    # Position sizing: per-position share of the portfolio. Default 0 = AUTO-DERIVE
+    # as an even split across max_open_positions (4 positions → 25% each → full even
+    # deployment). Set a positive value to override with a fixed fraction.
+    pb_position_pct: float = field(default_factory=lambda: _env_float("PB_POSITION_PCT", 0.0))
+    pb_sizing_stop_floor_pct: float = field(default_factory=lambda: _env_float("PB_SIZING_STOP_FLOOR_PCT", 0.5))
     pb_timeout_candles: int = field(default_factory=lambda: _env_int("PB_TIMEOUT_CANDLES", 5))
 
     # Session windows (UTC+3) — comma-separated HH:MM-HH:MM ranges. Empty = always.
