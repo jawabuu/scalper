@@ -205,7 +205,10 @@ class BotConfig:
     # ── Pullback strategy parameters ────────────────────────────────────
     # Universal "good entry price" gate (BOTH regimes): never enter high in the
     # candle, never at the tip of a rejection (upper-wick) spike.
-    pb_candle_pos_max: float = field(default_factory=lambda: _env_float("PB_CANDLE_POS_MAX", 0.5))
+    # Good-price gate. The upper-wick veto is the PRIMARY filter (avoid spike
+    # rejections). candle_pos_max is now a high BACKSTOP (default 0.90) that only
+    # catches the extreme top — a clean high close with no wick passes.
+    pb_candle_pos_max: float = field(default_factory=lambda: _env_float("PB_CANDLE_POS_MAX", 0.90))
     pb_upper_wick_max: float = field(default_factory=lambda: _env_float("PB_UPPER_WICK_MAX", 0.40))
 
     # Strict, load-bearing gates (trusted from experience — do not flex).

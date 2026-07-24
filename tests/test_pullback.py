@@ -45,42 +45,34 @@ def _rising_uptrend(cfg, n=60, base=100.0):
 
 # ── good-price gate ──
 
-def test_good_price_rejects_high_in_candle(cfg):
-    df = _rising_uptrend(cfg)
-    # Force the last candle to close at its high (position ~1.0)
-    i = df.index[-1]
-    df.loc[i, "low"] = df.loc[i, "close"] * 0.99
-    df.loc[i, "high"] = df.loc[i, "close"]
-    row = df.loc[i]
+def test_good_price_accepts_clean_high_close(cfg):
+    # A candle closing at its high with NO upper wick is a strong candle, not a
+    # spike — it must PASS now (previously wrongly rejected as "high in candle").
+    import pandas as pd
+    row = pd.Series({"open": 100.0, "high": 101.0, "low": 100.0, "close": 101.0})
+    ok, why = pb.passes_good_price(row, cfg)
+    assert ok, f"clean high close should pass, got: {why}"
+
+
+def test_good_price_rejects_long_upper_wick(cfg):
+    # A long upper wick = price spiked and got rejected → skip regardless of close.
+    import pandas as pd
+    row = pd.Series({"open": 100.2, "high": 101.0, "low": 100.0, "close": 100.3})
+    assert pb.upper_wick_fraction(row) >= cfg.pb_upper_wick_max
     ok, why = pb.passes_good_price(row, cfg)
     assert not ok
-    assert "high in candle" in why
-
-
-def test_good_price_rejects_rejection_wick(cfg):
-    df = _rising_uptrend(cfg)
-    i = df.index[-1]
-    c = df.loc[i, "close"]
-    df.loc[i, "low"] = c * 0.999
-    df.loc[i, "close"] = c
-    df.loc[i, "open"] = c * 0.9995
-    df.loc[i, "high"] = c * 1.02   # long upper wick above the body
-    row = df.loc[i]
-    # position must be > 0.5 for the wick veto; make close sit high
-    if pb.candle_position(row) > 0.5:
-        ok, why = pb.passes_good_price(row, cfg)
-        assert not ok
+    assert "upper wick" in why
 
 
 def test_good_price_accepts_low_in_candle(cfg):
-    df = _rising_uptrend(cfg)
-    i = df.index[-1]
-    c = df.loc[i, "close"]
-    df.loc[i, "high"] = c * 1.01
-    df.loc[i, "low"] = c * 0.998   # close near the low → low position
-    row = df.loc[i]
+    # Close low in the candle with a SMALL upper wick → should pass.
+    import pandas as pd
+    # open 100.25, close 100.20 (small body low in range), high 100.30 (tiny wick),
+    # low 100.0 → upper wick small, close near lower-middle.
+    row = pd.Series({"open": 100.25, "high": 100.30, "low": 100.0, "close": 100.20})
+    assert pb.upper_wick_fraction(row) < cfg.pb_upper_wick_max
     ok, why = pb.passes_good_price(row, cfg)
-    assert ok
+    assert ok, f"expected pass, got: {why}"
 
 
 # ── RSI rising ──
@@ -117,8 +109,8 @@ def test_gainer_entry_accepts(cfg):
     i = df.index[-1]
     c = df.loc[i, "close"]
     # ensure good price: close low in candle
-    df.loc[i, "high"] = c * 1.01
-    df.loc[i, "low"] = c * 0.999
+    df.loc[i, "high"] = c * 1.0005
+    df.loc[i, "low"] = c * 0.996
     d = pb.evaluate_entry(df, cfg)
     assert d.enter
     assert d.regime == "gainer"
@@ -130,7 +122,7 @@ def test_gainer_rejected_on_collapsed_volume(cfg):
     # floor % of MA. Steady/normal volume must PASS (unlike the old spike gate).
     df = _rising_uptrend(cfg)
     i = df.index[-1]; c = df.loc[i, "close"]
-    df.loc[i, "high"] = c * 1.01; df.loc[i, "low"] = c * 0.999  # good price
+    df.loc[i, "high"] = c * 1.0005; df.loc[i, "low"] = c * 0.996  # good price: close near high, small wick, low deep
     # Normal volume (~equal to MA) should now PASS the floor
     df.loc[i, "volume"] = 1000.0
     d_ok = pb.evaluate_entry(df, cfg)
@@ -148,7 +140,7 @@ def test_gainer_rejected_rsi_out_of_band(cfg):
     df = pb.prepare_indicators(_frame(closes), cfg)
     df.loc[df.index[-1], "volume"] = 5000.0
     i = df.index[-1]; c = df.loc[i, "close"]
-    df.loc[i, "high"] = c * 1.01; df.loc[i, "low"] = c * 0.999
+    df.loc[i, "high"] = c * 1.0005; df.loc[i, "low"] = c * 0.996
     d = pb.evaluate_entry(df, cfg)
     # RSI likely > 72 → rejected (or good-price), either way no entry as gainer in-band
     if d.enter:
@@ -165,7 +157,7 @@ def test_dipper_entry_near_low(cfg):
     df.loc[df.index[-1], "volume"] = 5000.0
     df = pb.prepare_indicators(df, cfg)
     i = df.index[-1]; c = df.loc[i, "close"]
-    df.loc[i, "high"] = c * 1.01; df.loc[i, "low"] = c * 0.999  # good price
+    df.loc[i, "high"] = c * 1.0005; df.loc[i, "low"] = c * 0.996  # good price: close near high, small wick, low deep
     low_24h = min(closes)
     d = pb.evaluate_entry(df, cfg, low_24h=low_24h)
     # near the low and RSI rising → dipper (or rejected if RSI not yet rising)

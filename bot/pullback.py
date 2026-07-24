@@ -74,14 +74,31 @@ def passes_good_price(row, cfg) -> tuple[bool, str]:
     """
     Universal good-entry-price gate. Reject entries high in the candle or under a
     long upper (rejection) wick.
+
+    The real thing to avoid is entering at the top of a long UPPER WICK — a spike
+    where price shot up and got rejected (sellers pushed it back down within the
+    candle). That rejection wick is the danger signal, NOT a high close per se: a
+    candle that closes cleanly at its high with little/no upper wick is a strong
+    candle (buyers in control), which is fine to enter. So the gate is driven by
+    the upper-wick fraction, with candle position only used as a secondary guard
+    against the genuinely pathological case.
     """
     pos = candle_position(row)
-    if pos > cfg.pb_candle_pos_max:
-        return False, f"price high in candle (pos={pos:.2f} > {cfg.pb_candle_pos_max})"
     uw = upper_wick_fraction(row)
-    # A long upper wick with price near the top = rejection spike → skip.
-    if uw >= cfg.pb_upper_wick_max and pos > 0.5:
-        return False, f"rejection upper-wick (wick={uw:.2f}, pos={pos:.2f})"
+
+    # Primary veto: a long upper wick = price spiked up and got rejected. Avoid
+    # buying into that regardless of where the close landed.
+    if uw >= cfg.pb_upper_wick_max:
+        return False, f"long upper wick / spike rejection (wick={uw:.2f} >= {cfg.pb_upper_wick_max})"
+
+    # Secondary guard: reject a near-top close ONLY if it also carries a
+    # non-trivial upper wick (a partial spike). A clean strong close at the high
+    # with negligible wick is fine — that's strength, not a rejection — so it
+    # passes. This is what lets normal strong up-candles through instead of
+    # rejecting nearly everything.
+    if pos > cfg.pb_candle_pos_max and uw >= cfg.pb_upper_wick_max * 0.5:
+        return False, f"near top with partial wick (pos={pos:.2f}, wick={uw:.2f})"
+
     return True, "good price"
 
 
