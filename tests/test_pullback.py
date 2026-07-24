@@ -364,3 +364,21 @@ def test_live_cfg_overlay_reflects_runtime_changes():
     assert eng.cfg.pb_rsi_min == 55.0       # original cfg untouched
     # Structural param falls through to cfg unchanged
     assert live.pb_ema_fast == eng.cfg.pb_ema_fast
+
+
+def test_pullback_entry_log_vars_initialized():
+    """
+    Regression: the shared post-entry log block references timing_distance and
+    momentum_slope, which only the breakout branch assigns. They must be
+    initialized so a pullback entry doesn't raise UnboundLocalError.
+    Verifies the source guards these defaults before the strategy branch.
+    """
+    import inspect
+    from bot.engine import ScalpingEngine
+    src = inspect.getsource(ScalpingEngine.run_cycle)
+    # The defaults must appear before the strategy branch in the entry loop.
+    assert "timing_distance = None" in src
+    assert "momentum_slope = None" in src
+    branch_idx = src.index('if self.cfg.strategy == "pullback"')
+    assert src.index("timing_distance = None") < branch_idx
+    assert src.index("momentum_slope = None") < branch_idx

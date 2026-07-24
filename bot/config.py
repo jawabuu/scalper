@@ -188,6 +188,10 @@ class BotConfig:
 
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))
+    # Drop the still-forming last candle from OHLCV so entry/confirmation logic
+    # reads only CLOSED candles (correct for both strategies; essential for the
+    # pullback good-price and RSI-rising gates). Default on.
+    drop_incomplete_candle: bool = field(default_factory=lambda: _env_bool("DROP_INCOMPLETE_CANDLE", True))
 
     # ══════════════════════════════════════════════════════════════════════
     # STRATEGY SELECTOR

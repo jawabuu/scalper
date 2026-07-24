@@ -342,6 +342,16 @@ class ScalpingEngine:
         df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
         df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         df.set_index("ts", inplace=True)
+
+        # Binance returns the CURRENT, still-forming candle as the last row. Its
+        # OHLC changes every tick until it closes — reading it as the "confirmation
+        # candle" makes candle-position, RSI-rising, and volume unstable (e.g. the
+        # live price is usually near the running high, so candle_pos ≈ 1.0 and the
+        # good-price gate rejects almost everything). Drop it so iloc[-1] is the
+        # most recent CLOSED candle. Controlled by drop_incomplete_candle (default
+        # on) so behaviour is explicit and reversible.
+        if self.cfg.drop_incomplete_candle and len(df) > 1:
+            df = df.iloc[:-1]
         return df
 
     def compute_btc_regime(self) -> dict:
@@ -1318,6 +1328,12 @@ class ScalpingEngine:
             df = self.fetch_ohlcv(sym)
             if df is None:
                 continue
+
+            # Defaults so the shared post-entry log block never references an
+            # unset variable — the breakout branch assigns these; pullback leaves
+            # them None (its own stamps are logged in _pullback_entry_decision).
+            timing_distance = None
+            momentum_slope = None
 
             # ── Strategy branch: pullback vs breakout ──────────────────────
             if self.cfg.strategy == "pullback":
