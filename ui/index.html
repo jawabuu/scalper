@@ -74,6 +74,20 @@
   .badge-live    { background: rgba(255,77,106,0.15);  color: var(--red);  border: 1px solid rgba(255,77,106,0.3); }
   .badge-ok      { background: rgba(0,212,170,0.1);   color: var(--green); border: 1px solid rgba(0,212,170,0.25); }
   .badge-kill    { background: rgba(255,77,106,0.2);  color: var(--red);  border: 1px solid rgba(255,77,106,0.4); }
+  .badge-breakout { background: rgba(0,153,255,0.12); color: var(--accent2); border: 1px solid rgba(0,153,255,0.3); }
+  .badge-pullback { background: rgba(160,120,255,0.15); color: #a078ff; border: 1px solid rgba(160,120,255,0.35); }
+  .pullback-panel { grid-column: 1 / -1; }
+  .pb-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 8px 24px;
+    margin-top: 12px;
+  }
+  .pb-setting { display: flex; justify-content: space-between; font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .pb-setting .k { color: var(--muted); }
+  .pb-setting .v { color: var(--accent); font-family: var(--mono); }
+  .pb-setting .v.on { color: var(--green); }
+  .pb-setting .v.off { color: var(--muted); }
 
   .pulse {
     width: 7px; height: 7px; border-radius: 50%;
@@ -667,6 +681,7 @@
     <div class="pulse" id="pulse"></div>
     <span class="logo">⬡ Scalper</span>
     <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
+    <span class="badge" id="strategy-badge" style="display:none"></span>
     <div class="header-sep"></div>
     <span class="refresh-hint" id="refresh-hint">—</span>
     <span class="version-badge" id="version-hint">—</span>
@@ -740,7 +755,7 @@
           <div class="ta-status" id="rg-status" style="margin-top:8px">On — won't re-buy a coin above its last loss exit</div>
         </div>
 
-        <div class="ta-control">
+        <div class="ta-control breakout-only">
           <div class="ta-row">
             <span class="ta-label">Trailing activation</span>
             <label class="ta-switch">
@@ -758,7 +773,7 @@
           <div class="ta-status" id="ta-status">Off — stops trail immediately</div>
         </div>
 
-        <div class="ta-control">
+        <div class="ta-control breakout-only">
           <div class="ta-row">
             <span class="ta-label">BTC trend filter</span>
             <label class="ta-switch">
@@ -782,7 +797,7 @@
           <div class="ta-status" id="btc-status">Off — BTC trend not enforced</div>
         </div>
 
-        <div class="ta-control">
+        <div class="ta-control breakout-only">
           <div class="ta-row">
             <span class="ta-label">Entry timing gate</span>
             <label class="ta-switch">
@@ -806,7 +821,7 @@
           <div class="ta-status" id="et-status">On — skips entries extended above EMA</div>
         </div>
 
-        <div class="ta-control">
+        <div class="ta-control breakout-only">
           <div class="ta-row">
             <span class="ta-label">Momentum confirm</span>
             <label class="ta-switch">
@@ -889,6 +904,12 @@
         <div id="cfg-last">—</div>
       </div>
       </div><!-- /controls-body -->
+    </div>
+
+    <!-- Pullback strategy settings (read-only; shown only when strategy=pullback) -->
+    <div class="panel pullback-panel" id="pullback-panel" style="display:none;order:1.5">
+      <div class="panel-label">Pullback strategy — active settings <span style="color:var(--muted);font-weight:normal;font-size:10px">(read-only, set via env)</span></div>
+      <div class="pb-settings-grid" id="pb-settings-grid"></div>
     </div>
 
     <!-- Trade history -->
@@ -1584,6 +1605,54 @@ async function api(path, method='GET') {
   return r.json();
 }
 
+function applyStrategyView(status) {
+  const strat = status.strategy || 'breakout';
+  const sb = document.getElementById('strategy-badge');
+  if (sb) {
+    sb.style.display = 'inline-block';
+    sb.className = 'badge badge-' + (strat === 'pullback' ? 'pullback' : 'breakout');
+    sb.textContent = strat.toUpperCase();
+  }
+  // Hide breakout-only controls when running pullback (they don't govern it).
+  document.querySelectorAll('.breakout-only').forEach(el => {
+    el.style.display = (strat === 'pullback') ? 'none' : '';
+  });
+  const panel = document.getElementById('pullback-panel');
+  if (panel) {
+    if (strat === 'pullback' && status.pullback) {
+      panel.style.display = '';
+      renderPullbackSettings(status.pullback, status.timeframe);
+    } else {
+      panel.style.display = 'none';
+    }
+  }
+}
+
+function renderPullbackSettings(pb, timeframe) {
+  const grid = document.getElementById('pb-settings-grid');
+  if (!grid) return;
+  const onoff = (b) => `<span class="v ${b ? 'on' : 'off'}">${b ? 'ON' : 'OFF'}</span>`;
+  const val = (v) => `<span class="v">${v}</span>`;
+  const rows = [
+    ['Timeframe', val(timeframe || '—')],
+    ['Gainer regime', onoff(pb.gainer_enabled)],
+    ['Dipper regime', onoff(pb.dipper_enabled)],
+    ['RSI band', val(`${pb.rsi_min}–${pb.rsi_max}`)],
+    ['RSI rising lookback', val(`${pb.rsi_rising_lookback} candles`)],
+    ['EMA', val(`${pb.ema_fast}/${pb.ema_slow} (+${pb.ema_buffer_pct}%)`)],
+    ['Volume spike', val(`${pb.vol_spike_mult}×`)],
+    ['Candle position max', val(pb.candle_pos_max)],
+    ['Upper-wick veto', val(pb.upper_wick_max)],
+    ['24h-low proximity', val(`${pb.low_proximity_pct}%`)],
+    ['Max wick stop', val(`${pb.max_wick_stop_pct}%`)],
+    ['Min volume', val(`$${Number(pb.min_volume_usdt).toLocaleString()}`)],
+    ['Timeout', val(`${pb.timeout_candles} candles`)],
+    ['Session windows', val(pb.session_windows)],
+  ];
+  grid.innerHTML = rows.map(([k, v]) =>
+    `<div class="pb-setting"><span class="k">${k}</span>${v}</div>`).join('');
+}
+
 function renderPositionsTable(positions) {
   if (!positions || positions.length === 0) {
     setEl('positions-wrap', '<div class="empty">No open positions</div>');
@@ -1658,6 +1727,10 @@ async function refresh() {
     }
     setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
     if (status.version) setEl('version-hint', `v${status.version}`);
+
+    // Strategy badge + strategy-specific control visibility.
+    applyStrategyView(status);
+
     syncTrailingActivation(status);
     syncBtcFilter(status);
     syncEntryTiming(status);

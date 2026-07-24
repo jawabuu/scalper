@@ -106,6 +106,27 @@ def create_app(engine) -> FastAPI:
             "hard_stop_enabled":           _engine.hard_stop_enabled,
             "hard_stop_pct":               _engine.hard_stop_pct,
             "reentry_guard_enabled":       _engine.reentry_guard_enabled,
+            # Pullback strategy settings (read-only; set via env, shown in the UI so
+            # the operator can see what's actually governing entries on this instance).
+            "pullback": {
+                "gainer_enabled":     _engine.cfg.pb_gainer_enabled,
+                "dipper_enabled":     _engine.cfg.pb_dipper_enabled,
+                "rsi_min":            _engine.cfg.pb_rsi_min,
+                "rsi_max":            _engine.cfg.pb_rsi_max,
+                "rsi_rising_lookback":_engine.cfg.pb_rsi_rising_lookback,
+                "ema_fast":           _engine.cfg.pb_ema_fast,
+                "ema_slow":           _engine.cfg.pb_ema_slow,
+                "ema_buffer_pct":     _engine.cfg.pb_ema_buffer_pct,
+                "vol_spike_mult":     _engine.cfg.pb_vol_spike_mult,
+                "candle_pos_max":     _engine.cfg.pb_candle_pos_max,
+                "upper_wick_max":     _engine.cfg.pb_upper_wick_max,
+                "low_proximity_pct":  _engine.cfg.pb_low_proximity_pct,
+                "max_wick_stop_pct":  _engine.cfg.pb_max_wick_stop_pct,
+                "min_volume_usdt":    _engine.cfg.pb_min_volume_usdt,
+                "timeout_candles":    _engine.cfg.pb_timeout_candles,
+                "session_windows":    _engine.cfg.pb_session_windows or "always active",
+                "session_tz_offset":  _engine.cfg.pb_session_tz_offset,
+            } if _engine.cfg.strategy == "pullback" else None,
             "timeframe":        _engine.cfg.timeframe,
             "last_cycle_ts":    _engine.last_cycle_ts,
             "last_cycle_ago_s": round(time.time() - _engine.last_cycle_ts, 1)
