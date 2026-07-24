@@ -20,7 +20,13 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _env_bool(key: str, default: bool) -> bool:
-    val = os.environ.get(key, "").lower()
+    # Strip inline comments and whitespace before matching. Some env/compose
+    # tooling folds a trailing `# comment` into the value; without this, a line
+    # like `TESTNET=false  # note` would fail the exact match and silently fall
+    # back to the default — a real hazard for a safety-critical flag. Stripping
+    # makes boolean parsing robust regardless of how the value was supplied.
+    raw = os.environ.get(key, "")
+    val = raw.split("#", 1)[0].strip().lower()
     if val in ("1", "true", "yes"):
         return True
     if val in ("0", "false", "no"):

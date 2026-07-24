@@ -250,3 +250,20 @@ def test_pullback_timeout_spares_profitable_trade():
     eng.positions = {"X/USDT": pos}
     # In profit (price 102, above trailing 99) and past timeout → NOT closed by timeout
     assert eng.check_exit("X/USDT", 102.0) is None
+
+
+# ── _env_bool robustness (safety-critical for TESTNET) ──────────────────────
+
+def test_env_bool_strips_inline_comment():
+    """A folded inline comment must NOT silently defeat a boolean flag."""
+    import os
+    from bot.config import _env_bool
+    os.environ['X_TEST_FLAG'] = 'false  # this is a comment'
+    assert _env_bool('X_TEST_FLAG', True) is False   # must read False, not default True
+    os.environ['X_TEST_FLAG'] = 'true   # testnet only'
+    assert _env_bool('X_TEST_FLAG', False) is True
+    os.environ['X_TEST_FLAG'] = '  yes '
+    assert _env_bool('X_TEST_FLAG', False) is True
+    del os.environ['X_TEST_FLAG']
+    # unset → default
+    assert _env_bool('X_TEST_FLAG', True) is True
