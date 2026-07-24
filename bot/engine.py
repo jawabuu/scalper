@@ -81,6 +81,9 @@ class ScalpingEngine:
         # the last exit price + whether it was a loss, per symbol.
         self.reentry_guard_enabled: bool = cfg.reentry_guard_enabled
         self._last_exit: dict[str, dict] = {}  # symbol → {"price": float, "was_loss": bool}
+        # Pullback strategy runtime state.
+        self._ticker_low_24h: dict[str, float] = {}   # symbol → 24h low (from scan)
+        self._pending_pullback_stop: dict[str, dict] = {}  # symbol → {"stop","regime"}
         self.trade_log = TradeLog()
         self.last_balance: float = 0.0
         self.last_cycle_ts: float = 0.0
@@ -297,6 +300,10 @@ class ScalpingEngine:
                 continue
             if volume_usdt >= self.cfg.min_volume_usdt and spread_pct <= self.cfg.max_spread_pct:
                 candidates.append((sym, volume_usdt))
+            # Capture the 24h low for the pullback dipper regime (cheap, from ticker).
+            low_24h = t.get("low")
+            if low_24h:
+                self._ticker_low_24h[sym] = float(low_24h)
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         self._symbol_cache = [s for s, _ in candidates[:self.cfg.max_symbols]]
@@ -877,8 +884,17 @@ class ScalpingEngine:
         if floor_pct is not None:
             if current_pnl_pct <= floor_pct:
                 return "profit_lock"
-        if self.candles_held_actual(pos) >= self.cfg.max_hold_candles:
-            return "timeout"
+        # Timeout — strategy-aware.
+        if self.cfg.strategy == "pullback":
+            # Pullback: 5-candle backstop, but ONLY close if flat/negative. A trade
+            # in profit is left to the trailing stop / profit lock (don't cut a runner).
+            if self.candles_held_actual(pos) >= self.cfg.pb_timeout_candles:
+                if current_pnl_pct <= 0:
+                    return "timeout"
+                # In profit — let the shared trailing/profit-lock engine manage it.
+        else:
+            if self.candles_held_actual(pos) >= self.cfg.max_hold_candles:
+                return "timeout"
         return None
 
     def _close_position(self, sym: str, price: float, reason: str):
@@ -973,6 +989,70 @@ class ScalpingEngine:
                 except Exception:
                     price = pos.entry_price
                 self._close_position(sym, price, reason)
+
+    def _pullback_entry_decision(self, sym: str, df) -> float | None:
+        """
+        Pullback entry decision for one symbol. Returns the entry price if all
+        gates pass (and stores the wick-stop for the exit engine), else None.
+        Uses the pure-logic pullback module. Session-window gating is applied here.
+        """
+        from datetime import datetime, timezone
+        from bot import pullback as pb
+
+        # Session-window gate.
+        if not pb.in_session(datetime.now(timezone.utc), self.cfg):
+            log.debug(f"{sym} skipped — outside pullback session windows")
+            return None
+
+        # Re-entry guard (shared behaviour with breakout).
+        if self.reentry_guard_enabled:
+            last = self._last_exit.get(sym)
+            if last and last["was_loss"]:
+                # for pullback we simply avoid re-entering a just-lost coin this pass
+                log.debug(f"{sym} skipped by re-entry guard (recent loss)")
+                return None
+
+        prepared = pb.prepare_indicators(df, self.cfg)
+
+        # 24h low / volume for the dipper regime — from the cached candidate ticker
+        # if available, else derived from the frame.
+        low_24h = self._ticker_low_24h.get(sym)
+        if low_24h is None:
+            low_24h = float(prepared["low"].min())
+
+        decision = pb.evaluate_entry(prepared, self.cfg, low_24h=low_24h)
+        if not decision.enter:
+            log.info(f"{sym} pullback skip: {decision.reason} | stamps={decision.stamps}")
+            return None
+
+        log.info(
+            f"{sym} PULLBACK ENTRY ({decision.regime}): {decision.reason} | "
+            f"stamps={decision.stamps} stop={decision.stop_price}"
+        )
+        # Stash the wick-based stop so the buy path can seed the position with it.
+        self._pending_pullback_stop[sym] = {
+            "stop": decision.stop_price,
+            "regime": decision.regime,
+        }
+        return decision.entry_ref_price
+
+    def _pullback_position_size(self, balance: float, price: float, sym: str) -> float:
+        """
+        Size a pullback position from the wick-stop distance so the risk budget
+        (risk_per_trade_pct of balance) is respected: a wider stop → smaller size.
+        Falls back to the portfolio cap if no stop is pending.
+        """
+        pending = self._pending_pullback_stop.get(sym)
+        risk_usdt = balance * (self.cfg.risk_per_trade_pct / 100)
+        if pending and pending.get("stop"):
+            stop = pending["stop"]
+            stop_dist_pct = max((price - stop) / price, 1e-6)
+            size = risk_usdt / stop_dist_pct
+        else:
+            size = balance * (self.cfg.max_portfolio_pct / 100)
+        # Never exceed the portfolio cap.
+        cap = balance * (self.cfg.max_portfolio_pct / 100)
+        return min(size, cap)
 
     def run_cycle(self):
         self.last_cycle_ts = time.time()
@@ -1155,54 +1235,63 @@ class ScalpingEngine:
             if df is None:
                 continue
 
-            df = self.compute_indicators(df)
-            if not self.passes_entry_filter(df):
-                continue
+            # ── Strategy branch: pullback vs breakout ──────────────────────
+            if self.cfg.strategy == "pullback":
+                pb_price = self._pullback_entry_decision(sym, df)
+                if pb_price is None:
+                    continue
+                price = pb_price
+            else:
+                # ── Breakout path (unchanged) ──
+                df = self.compute_indicators(df)
+                if not self.passes_entry_filter(df):
+                    continue
 
-            # Per-coin entry-timing gate — avoid chasing a coin extended above its
-            # short-term mean (the whipsaw cause). Distance is captured for logging
-            # whether or not the gate is enforced.
-            timing_ok, timing_distance = self.passes_entry_timing(df)
-            if not timing_ok:
-                log.info(
-                    f"{sym} skipped by entry-timing gate: price {timing_distance:+.2f}% "
-                    f"above EMA{self.entry_timing_ema_len} (band {self.entry_timing_band_pct:.2f}%) "
-                    f"— too extended, waiting for pullback"
-                )
-                continue
-
-            # Momentum confirmation — is the coin actually rising right now?
-            # Raw-price slope over the short lookback; slope captured for logging
-            # whether or not the gate is enforced.
-            momentum_ok, momentum_slope = self.passes_momentum(df)
-            if not momentum_ok:
-                slope_str = f"{momentum_slope:+.2f}%" if momentum_slope is not None else "n/a"
-                log.info(
-                    f"{sym} skipped by momentum gate: {self.momentum_lookback}-candle "
-                    f"slope {slope_str} (min {self.momentum_min_slope_pct:.2f}%) "
-                    f"or last candle red — not confirmed rising"
-                )
-                continue
-
-            price = df["close"].iloc[-1]
-
-            # Smart re-entry guard — after a RED close on this coin, refuse to buy
-            # it back at a price HIGHER than the loss exit. This stops the bot from
-            # chasing a coin it just lost on back up into the same rolling-over move
-            # (the repeated-HOME churn pattern). A green prior close, or a re-entry
-            # at/below the prior exit, is allowed.
-            if self.reentry_guard_enabled:
-                last = self._last_exit.get(sym)
-                if last and last["was_loss"] and price > last["price"]:
+                # Per-coin entry-timing gate — avoid chasing a coin extended above its
+                # short-term mean (the whipsaw cause). Distance is captured for logging
+                # whether or not the gate is enforced.
+                timing_ok, timing_distance = self.passes_entry_timing(df)
+                if not timing_ok:
                     log.info(
-                        f"{sym} skipped by re-entry guard: last close was a loss at "
-                        f"{last['price']:.6f}, would re-enter higher at {price:.6f} "
-                        f"— not chasing a loser back up"
+                        f"{sym} skipped by entry-timing gate: price {timing_distance:+.2f}% "
+                        f"above EMA{self.entry_timing_ema_len} (band {self.entry_timing_band_pct:.2f}%) "
+                        f"— too extended, waiting for pullback"
                     )
                     continue
 
-            atr   = df["atr"].iloc[-1]
-            alloc = self.risk.position_size_usdt(balance, atr, price)
+                # Momentum confirmation — is the coin actually rising right now?
+                # Raw-price slope over the short lookback; slope captured for logging
+                # whether or not the gate is enforced.
+                momentum_ok, momentum_slope = self.passes_momentum(df)
+                if not momentum_ok:
+                    slope_str = f"{momentum_slope:+.2f}%" if momentum_slope is not None else "n/a"
+                    log.info(
+                        f"{sym} skipped by momentum gate: {self.momentum_lookback}-candle "
+                        f"slope {slope_str} (min {self.momentum_min_slope_pct:.2f}%) "
+                        f"or last candle red — not confirmed rising"
+                    )
+                    continue
+
+                price = df["close"].iloc[-1]
+
+                # Smart re-entry guard — after a RED close on this coin, refuse to buy
+                # it back at a price HIGHER than the loss exit. This stops the bot from
+                # chasing a coin it just lost on back up into the same rolling-over move
+                # (the repeated-HOME churn pattern). A green prior close, or a re-entry
+                # at/below the prior exit, is allowed.
+                if self.reentry_guard_enabled:
+                    last = self._last_exit.get(sym)
+                    if last and last["was_loss"] and price > last["price"]:
+                        log.info(
+                            f"{sym} skipped by re-entry guard: last close was a loss at "
+                            f"{last['price']:.6f}, would re-enter higher at {price:.6f} "
+                            f"— not chasing a loser back up"
+                        )
+                        continue
+
+            atr   = df["atr"].iloc[-1] if "atr" in df.columns else None
+            alloc = self.risk.position_size_usdt(balance, atr, price) if atr is not None \
+                    else self._pullback_position_size(balance, price, sym)
 
             if alloc < self.cfg.min_trade_usdt:
                 log.debug(f"{sym} allocation {alloc:.2f} below minimum, skipping")
@@ -1214,7 +1303,14 @@ class ScalpingEngine:
 
             fill_price    = order.get("average") or price
             qty           = order.get("filled") or alloc / fill_price
-            trailing_stop = fill_price * (1 - self.cfg.trailing_stop_pct / 100)
+            # Pullback uses the wick-based stop as its initial protection; breakout
+            # uses the configured trailing_stop_pct. After entry, the shared exit
+            # engine (trailing + profit lock) takes over for both.
+            pending_stop = self._pending_pullback_stop.pop(sym, None)
+            if self.cfg.strategy == "pullback" and pending_stop and pending_stop.get("stop"):
+                trailing_stop = pending_stop["stop"]
+            else:
+                trailing_stop = fill_price * (1 - self.cfg.trailing_stop_pct / 100)
 
             # Place server-side backstop — OCO preferred, stop-market as fallback.
             # Binance's filled qty in the order response is pre-fee — the actual

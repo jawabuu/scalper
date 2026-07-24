@@ -86,6 +86,7 @@ def create_app(engine) -> FastAPI:
             "running":          True,
             "version":          __version__,
             "testnet":          _engine.cfg.testnet,
+            "strategy":         _engine.cfg.strategy,
             "kill_switch":      _engine.kill_switch,
             "trailing_activation_enabled": _engine.trailing_activation_enabled,
             "trailing_activation_pct":     _engine.trailing_activation_pct,

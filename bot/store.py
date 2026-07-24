@@ -12,6 +12,7 @@ survives container restarts as long as the volume is intact).
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +21,11 @@ from .state import PositionState
 
 log = logging.getLogger("store")
 
-STORE_PATH = Path("logs/positions.json")
+# Store location. Defaults to logs/positions.json but can be overridden via
+# STATE_PATH so multiple isolated instances (e.g. live-breakout and
+# testnet-pullback) each keep their own separate positions file on their own
+# volume — they can never read or overwrite each other's state.
+STORE_PATH = Path(os.environ.get("STATE_PATH", "logs/positions.json"))
 
 
 def _serialize(positions: dict[str, PositionState]) -> dict:

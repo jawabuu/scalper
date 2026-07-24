@@ -183,12 +183,92 @@ class BotConfig:
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))
 
+    # ══════════════════════════════════════════════════════════════════════
+    # STRATEGY SELECTOR
+    # "breakout" = the original five-filter continuation system (default).
+    # "pullback" = mean-reversion / good-price scalp with gainer & dipper regimes.
+    # The two are mutually exclusive per running instance; deploy separate
+    # containers to run both concurrently.
+    # ══════════════════════════════════════════════════════════════════════
+    strategy: str = field(default_factory=lambda: _env("STRATEGY", "breakout").lower())
+
+    # ── Pullback strategy parameters ────────────────────────────────────
+    # Universal "good entry price" gate (BOTH regimes): never enter high in the
+    # candle, never at the tip of a rejection (upper-wick) spike.
+    pb_candle_pos_max: float = field(default_factory=lambda: _env_float("PB_CANDLE_POS_MAX", 0.5))
+    pb_upper_wick_max: float = field(default_factory=lambda: _env_float("PB_UPPER_WICK_MAX", 0.40))
+
+    # Strict, load-bearing gates (trusted from experience — do not flex).
+    pb_ema_fast: int = field(default_factory=lambda: _env_int("PB_EMA_FAST", 9))
+    pb_ema_slow: int = field(default_factory=lambda: _env_int("PB_EMA_SLOW", 21))
+    pb_ema_buffer_pct: float = field(default_factory=lambda: _env_float("PB_EMA_BUFFER_PCT", 0.05))
+    pb_rsi_min: float = field(default_factory=lambda: _env_float("PB_RSI_MIN", 55.0))
+    pb_rsi_max: float = field(default_factory=lambda: _env_float("PB_RSI_MAX", 72.0))
+    pb_rsi_rising_lookback: int = field(default_factory=lambda: _env_int("PB_RSI_RISING_LOOKBACK", 3))
+    pb_vol_spike_mult: float = field(default_factory=lambda: _env_float("PB_VOL_SPIKE_MULT", 1.3))
+    pb_vol_ma_len: int = field(default_factory=lambda: _env_int("PB_VOL_MA_LEN", 5))
+
+    # Tunable knobs (loosen on testnet for more data flow).
+    pb_low_proximity_pct: float = field(default_factory=lambda: _env_float("PB_LOW_PROXIMITY_PCT", 3.0))
+    pb_max_wick_stop_pct: float = field(default_factory=lambda: _env_float("PB_MAX_WICK_STOP_PCT", 1.5))
+    pb_min_volume_usdt: float = field(default_factory=lambda: _env_float("PB_MIN_VOLUME_USDT", 10_000_000))
+
+    # Regime enable flags — run gainer, dipper, or both.
+    pb_gainer_enabled: bool = field(default_factory=lambda: _env_bool("PB_GAINER_ENABLED", True))
+    pb_dipper_enabled: bool = field(default_factory=lambda: _env_bool("PB_DIPPER_ENABLED", True))
+
+    # Exits (strictly as specified — no profit-lock/trailing machinery).
+    pb_tp_pct: float = field(default_factory=lambda: _env_float("PB_TP_PCT", 1.0))
+    pb_tp_use_ma10: bool = field(default_factory=lambda: _env_bool("PB_TP_USE_MA10", True))
+    pb_price_ma_len: int = field(default_factory=lambda: _env_int("PB_PRICE_MA_LEN", 10))
+    pb_timeout_candles: int = field(default_factory=lambda: _env_int("PB_TIMEOUT_CANDLES", 5))
+
+    # Session windows (UTC+3) — comma-separated HH:MM-HH:MM ranges. Empty = always.
+    # Default: the four windows from the spec.
+    pb_session_windows: str = field(default_factory=lambda: _env(
+        "PB_SESSION_WINDOWS",
+        "23:00-23:15,04:00-06:00,11:00-13:00,15:00-17:00"))
+    pb_session_tz_offset: int = field(default_factory=lambda: _env_int("PB_SESSION_TZ_OFFSET", 3))
+
     def validate(self):
         suffix = "TEST" if self.testnet else "LIVE"
         assert self.api_key, f"BINANCE_API_KEY_{suffix} must be set"
         assert self.api_secret, f"BINANCE_API_SECRET_{suffix} must be set"
-        assert 0 < self.trailing_stop_pct < self.take_profit_pct, \
-            "trailing_stop_pct must be less than take_profit_pct"
+
+        # ── Cross-wire safety ──────────────────────────────────────────────
+        # Prevent an instance intended for one environment accidentally using the
+        # other's credentials. If running LIVE, the LIVE keys must be present AND
+        # must not be identical to the TEST keys (a common copy-paste misconfig
+        # that would point a "testnet" container at real funds, or vice versa).
+        test_key = _env("BINANCE_API_KEY_TEST")
+        live_key = _env("BINANCE_API_KEY_LIVE")
+        if test_key and live_key:
+            assert test_key != live_key, (
+                "BINANCE_API_KEY_TEST and BINANCE_API_KEY_LIVE are identical — "
+                "refusing to start to avoid a testnet/live cross-wire. Check your env."
+            )
+        if not self.testnet:
+            # Running live: ensure we're actually using the live key, not a stray test key.
+            assert self.api_key == live_key, (
+                "TESTNET=false but the resolved API key is not the LIVE key — "
+                "refusing to start (possible cross-wire)."
+            )
+        else:
+            assert self.api_key == test_key or not live_key, (
+                "TESTNET=true but the resolved API key matches the LIVE key — "
+                "refusing to start (possible cross-wire)."
+            )
+
+        assert self.strategy in ("breakout", "pullback"), \
+            f"STRATEGY must be 'breakout' or 'pullback', got {self.strategy!r}"
         assert 0 < self.risk_per_trade_pct <= 5, \
             "risk_per_trade_pct should be 0–5% for conservative trading"
+        if self.strategy == "breakout":
+            assert 0 < self.trailing_stop_pct < self.take_profit_pct, \
+                "trailing_stop_pct must be less than take_profit_pct"
+        else:  # pullback
+            assert self.pb_rsi_min < self.pb_rsi_max, "pb_rsi_min must be < pb_rsi_max"
+            assert 0 < self.pb_candle_pos_max <= 1.0, "pb_candle_pos_max in (0,1]"
+            assert self.pb_gainer_enabled or self.pb_dipper_enabled, \
+                "at least one pullback regime (gainer/dipper) must be enabled"
         return self
