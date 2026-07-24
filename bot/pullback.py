@@ -149,12 +149,19 @@ def evaluate_entry(df: pd.DataFrame, cfg, *, vol_24h_usdt: float | None = None,
     if not ok:
         return PullbackDecision(False, reason=why, stamps=stamps)
 
-    # ── Volume expansion (strict, both regimes) ──
+    # ── Volume floor (coarse veto, both regimes) ──
+    # NOT a spike requirement. A strong move can rise on steady or even gently
+    # declining volume; what kills a trade is volume COLLAPSING to a small
+    # fraction of its recent average (a dead/exhausted move). So we only veto
+    # when current volume falls below pb_vol_floor_pct% of the recent MA — a
+    # coarse "is this move still alive" check, letting the price/momentum gates
+    # do the real work.
     if pd.isna(row["vol_ma"]) or row["vol_ma"] <= 0:
         return PullbackDecision(False, reason="no volume MA", stamps=stamps)
-    if row["volume"] < cfg.pb_vol_spike_mult * row["vol_ma"]:
+    vol_frac_pct = row["volume"] / row["vol_ma"] * 100
+    if vol_frac_pct < cfg.pb_vol_floor_pct:
         return PullbackDecision(False,
-            reason=f"no volume spike (ratio={stamps['vol_ratio']} < {cfg.pb_vol_spike_mult})",
+            reason=f"volume collapsed ({vol_frac_pct:.0f}% of MA < floor {cfg.pb_vol_floor_pct:.0f}%)",
             stamps=stamps)
 
     # ── Determine regime ──

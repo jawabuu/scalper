@@ -211,7 +211,10 @@ class BotConfig:
     pb_rsi_min: float = field(default_factory=lambda: _env_float("PB_RSI_MIN", 55.0))
     pb_rsi_max: float = field(default_factory=lambda: _env_float("PB_RSI_MAX", 72.0))
     pb_rsi_rising_lookback: int = field(default_factory=lambda: _env_int("PB_RSI_RISING_LOOKBACK", 3))
-    pb_vol_spike_mult: float = field(default_factory=lambda: _env_float("PB_VOL_SPIKE_MULT", 1.3))
+    # Volume FLOOR (coarse veto): current volume must be at least this % of the
+    # recent volume MA, else the move is treated as collapsed/dead. NOT a spike
+    # requirement. Tunable; default 40%.
+    pb_vol_floor_pct: float = field(default_factory=lambda: _env_float("PB_VOL_FLOOR_PCT", 40.0))
     pb_vol_ma_len: int = field(default_factory=lambda: _env_int("PB_VOL_MA_LEN", 5))
 
     # Tunable knobs (loosen on testnet for more data flow).

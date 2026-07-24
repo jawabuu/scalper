@@ -91,7 +91,7 @@ class ScalpingEngine:
         self.pb_rsi_min: float = cfg.pb_rsi_min
         self.pb_rsi_max: float = cfg.pb_rsi_max
         self.pb_rsi_rising_lookback: int = cfg.pb_rsi_rising_lookback
-        self.pb_vol_spike_mult: float = cfg.pb_vol_spike_mult
+        self.pb_vol_floor_pct: float = cfg.pb_vol_floor_pct
         self.pb_candle_pos_max: float = cfg.pb_candle_pos_max
         self.pb_upper_wick_max: float = cfg.pb_upper_wick_max
         self.pb_low_proximity_pct: float = cfg.pb_low_proximity_pct
@@ -1021,7 +1021,7 @@ class ScalpingEngine:
             "pb_rsi_min": self.pb_rsi_min,
             "pb_rsi_max": self.pb_rsi_max,
             "pb_rsi_rising_lookback": self.pb_rsi_rising_lookback,
-            "pb_vol_spike_mult": self.pb_vol_spike_mult,
+            "pb_vol_floor_pct": self.pb_vol_floor_pct,
             "pb_candle_pos_max": self.pb_candle_pos_max,
             "pb_upper_wick_max": self.pb_upper_wick_max,
             "pb_low_proximity_pct": self.pb_low_proximity_pct,

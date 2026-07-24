@@ -125,12 +125,21 @@ def test_gainer_entry_accepts(cfg):
     assert d.stop_price is not None
 
 
-def test_gainer_rejected_without_volume_spike(cfg):
+def test_gainer_rejected_on_collapsed_volume(cfg):
+    # Volume floor is a coarse veto: only reject when volume COLLAPSES below the
+    # floor % of MA. Steady/normal volume must PASS (unlike the old spike gate).
     df = _rising_uptrend(cfg)
-    df.loc[df.index[-1], "volume"] = 1000.0  # no spike
-    d = pb.evaluate_entry(df, cfg)
-    assert not d.enter
-    assert "volume spike" in d.reason
+    i = df.index[-1]; c = df.loc[i, "close"]
+    df.loc[i, "high"] = c * 1.01; df.loc[i, "low"] = c * 0.999  # good price
+    # Normal volume (~equal to MA) should now PASS the floor
+    df.loc[i, "volume"] = 1000.0
+    d_ok = pb.evaluate_entry(df, cfg)
+    assert d_ok.enter, f"steady volume should pass floor: {d_ok.reason}"
+    # Collapsed volume (well below 40% of the ~1000 MA) should be vetoed
+    df.loc[i, "volume"] = 100.0   # ~10% of MA
+    d_bad = pb.evaluate_entry(df, cfg)
+    assert not d_bad.enter
+    assert "volume collapsed" in d_bad.reason
 
 
 def test_gainer_rejected_rsi_out_of_band(cfg):
@@ -342,7 +351,7 @@ def test_live_cfg_overlay_reflects_runtime_changes():
     eng = object.__new__(ScalpingEngine)
     eng.cfg = BotConfig()
     # Seed runtime attrs from cfg (as __init__ would)
-    for k in ['pb_rsi_min','pb_rsi_max','pb_rsi_rising_lookback','pb_vol_spike_mult',
+    for k in ['pb_rsi_min','pb_rsi_max','pb_rsi_rising_lookback','pb_vol_floor_pct',
               'pb_candle_pos_max','pb_upper_wick_max','pb_low_proximity_pct',
               'pb_max_wick_stop_pct','pb_min_volume_usdt','pb_timeout_candles',
               'pb_gainer_enabled','pb_dipper_enabled','pb_session_windows']:
