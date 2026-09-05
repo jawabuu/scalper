@@ -39,6 +39,11 @@ class ScanConfig:
     min_abs_change_pct: float = 5.0
     short_rsi_min: float = 70.0
     long_rsi_min: float = 50.0
+    # Upper bound for LONG candidates. Without it the long screen admits the
+    # whole RSI range above the floor, so an overbought coin in a bearish
+    # structure (arguably a short setup) surfaces as a long. Longs want
+    # oversold-to-neutral and recovering, not already-hot.
+    long_rsi_max: float = 65.0
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_len: int = 14
@@ -213,12 +218,12 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
         )
 
     # LONG potential: recovering inside a still-bearish structure
-    if gap < 0 and rsi >= cfg.long_rsi_min:
+    if gap < 0 and cfg.long_rsi_min <= rsi <= cfg.long_rsi_max:
         return Candidate(
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
-            note=(f"RSI {rsi:.0f} (>={cfg.long_rsi_min:.0f}); EMA9 {gap:+.2f}% below "
+            note=(f"RSI {rsi:.0f} (in {cfg.long_rsi_min:.0f}-{cfg.long_rsi_max:.0f}); EMA9 {gap:+.2f}% below "
                   f"EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
         )

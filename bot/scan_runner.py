@@ -174,6 +174,7 @@ class ScanRunner:
                     "min_abs_change_pct": self.cfg.min_abs_change_pct,
                     "short_rsi_min": self.cfg.short_rsi_min,
                     "long_rsi_min": self.cfg.long_rsi_min,
+                    "long_rsi_max": self.cfg.long_rsi_max,
                     "timeframe": self.timeframe,
                 },
             }

@@ -344,3 +344,38 @@ def test_unknown_range_does_not_crash_ranking():
     c = Candidate("U/USDT", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=None)
     assert c.range_quality == "unknown"
     assert len(rank_with_deltas(t.annotate([c]))) == 1
+
+
+# ── Long RSI upper bound ─────────────────────────────────────────────────────
+
+def _bearish_frame():
+    """Bearish EMA structure (fast below slow) that is converging upward."""
+    closes = [100 - i * 0.5 for i in range(48)]
+    last = closes[-1]
+    closes += [last + i * 0.35 for i in range(1, 13)]
+    return _frame(closes)
+
+
+def test_long_screen_excludes_overbought(cfg):
+    """
+    Without an upper bound, a coin at RSI 85 in a bearish structure surfaced as
+    a LONG candidate — arguably a short setup. The max must exclude it.
+    """
+    c = ScanConfig(long_rsi_min=38.0, long_rsi_max=65.0)
+    assert not (c.long_rsi_min <= 85 <= c.long_rsi_max)
+    assert not (c.long_rsi_min <= 70 <= c.long_rsi_max)
+
+
+def test_long_screen_admits_recovering_range():
+    c = ScanConfig(long_rsi_min=38.0, long_rsi_max=65.0)
+    for rsi in (38, 45, 55, 65):
+        assert c.long_rsi_min <= rsi <= c.long_rsi_max
+
+
+def test_long_max_applied_in_evaluate():
+    """A bearish-structure coin above long_rsi_max must not surface as long."""
+    c = ScanConfig(long_rsi_min=38.0, long_rsi_max=45.0)  # deliberately tight
+    df = _bearish_frame()
+    got = evaluate_symbol("BBB/USDT", df, 200e6, -15.0, c)
+    if got is not None:
+        assert c.long_rsi_min <= got.rsi <= c.long_rsi_max

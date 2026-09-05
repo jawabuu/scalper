@@ -219,6 +219,7 @@ class BotConfig:
     scan_min_change_pct: float = field(default_factory=lambda: _env_float("SCAN_MIN_CHANGE_PCT", 5.0))
     scan_short_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_SHORT_RSI_MIN", 70.0))
     scan_long_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MIN", 50.0))
+    scan_long_rsi_max: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MAX", 65.0))
 
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))

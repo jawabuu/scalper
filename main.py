@@ -110,6 +110,7 @@ if __name__ == "__main__":
             min_abs_change_pct=cfg.scan_min_change_pct,
             short_rsi_min=cfg.scan_short_rsi_min,
             long_rsi_min=cfg.scan_long_rsi_min,
+            long_rsi_max=cfg.scan_long_rsi_max,
         )
         runner = ScanRunner(
             scan_cfg,
