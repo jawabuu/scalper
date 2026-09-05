@@ -31,6 +31,13 @@ log = logging.getLogger("api")
 _engine = None
 _scanner = None
 _guardian = None
+_entry = None
+
+
+def set_entry_service(svc):
+    """Attach the EntryService that backs the UI entry button."""
+    global _entry
+    _entry = svc
 
 
 def set_guardian(guardian):
@@ -87,6 +94,39 @@ def create_app(engine) -> FastAPI:
 
     # ── Bot API routes (require auth) ────────────────────────────────────────
 
+    @app.post("/api/futures/entry/preview")
+    def entry_preview(payload: dict, user: dict = Depends(_require_auth)):
+        """Step 1: compute a plan and return a single-use confirm token. Sends nothing."""
+        if _entry is None:
+            raise HTTPException(status_code=400, detail="Futures entry not enabled")
+        try:
+            res = _entry.preview(
+                symbol=str(payload.get("symbol") or ""),
+                side=str(payload.get("side") or ""),
+                margin_pct=payload.get("margin_pct"),
+                callback_pct=payload.get("callback_pct"),
+            )
+        except Exception as e:
+            log.exception("entry preview failed")
+            return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+        log.info(f"Entry preview by {user['username']}: {payload} -> ok={res.get('ok')}")
+        return res
+
+    @app.post("/api/futures/entry/execute")
+    def entry_execute(payload: dict, user: dict = Depends(_require_auth)):
+        """Step 2: place the entry, but only with a valid unexpired token."""
+        if _entry is None:
+            raise HTTPException(status_code=400, detail="Futures entry not enabled")
+        token = str(payload.get("token") or "")
+        try:
+            res = _entry.execute(token)
+        except Exception as e:
+            log.exception("entry execute failed")
+            return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+        log.warning(f"Entry execute by {user['username']}: ok={res.get('ok')} "
+                    f"dry_run={res.get('dry_run')}")
+        return res
+
     @app.get("/api/guardian")
     def guardian(user: dict = Depends(_require_auth)):
         """Futures guardian state: tracked positions, stop levels, recent actions."""
@@ -94,7 +134,9 @@ def create_app(engine) -> FastAPI:
             return {"enabled": False, "states": {}, "recent_actions": [],
                     "message": "Guardian not enabled on this instance"}
         try:
-            return _guardian.snapshot()
+            snap = _guardian.snapshot()
+            snap["entry_enabled"] = _entry is not None
+            return snap
         except Exception as e:
             log.exception("guardian snapshot failed")
             return {"enabled": True, "states": {}, "recent_actions": [],

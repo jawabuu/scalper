@@ -294,3 +294,53 @@ def test_ema_gap_returns_native_float(cfg):
     g = ema_gap_pct(df.iloc[-1])
     assert type(g) is float
     assert not isinstance(g, np.generic)
+
+
+# ── 24h range position ───────────────────────────────────────────────────────
+
+from bot.scanner import range_position_24h
+
+
+def test_range_position_maths():
+    assert range_position_24h(100, 100, 90) == pytest.approx(1.0)   # at the high
+    assert range_position_24h(90, 100, 90) == pytest.approx(0.0)    # at the low
+    assert range_position_24h(95, 100, 90) == pytest.approx(0.5)
+    assert range_position_24h(95, None, 90) is None
+    assert range_position_24h(95, 90, 90) is None                   # zero range
+
+
+def test_short_near_24h_high_is_strong():
+    """A short near the 24h high has resistance overhead — the stronger case."""
+    c = Candidate("X", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=0.95)
+    assert c.range_quality == "strong"
+
+
+def test_short_near_24h_low_is_weak():
+    c = Candidate("X", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=0.08)
+    assert c.range_quality == "weak"
+
+
+def test_long_near_24h_low_is_strong():
+    c = Candidate("X", "long", 55, -0.5, 0, -15, 200e6, "", range_pos_24h=0.05)
+    assert c.range_quality == "strong"
+
+
+def test_long_near_24h_high_is_weak():
+    c = Candidate("X", "long", 55, -0.5, 0, -15, 200e6, "", range_pos_24h=0.92)
+    assert c.range_quality == "weak"
+
+
+def test_ranking_prefers_range_supported_candidate():
+    """Among equally-strong signals, the one with 24h-range support ranks higher."""
+    t = ScanTracker()
+    weak = Candidate("W/USDT", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=0.10)
+    strong = Candidate("S/USDT", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=0.95)
+    ordered = rank_with_deltas(t.annotate([weak, strong]))
+    assert [c.symbol for c, _ in ordered][0] == "S/USDT"
+
+
+def test_unknown_range_does_not_crash_ranking():
+    t = ScanTracker()
+    c = Candidate("U/USDT", "short", 75, 0.5, 0, 15, 200e6, "", range_pos_24h=None)
+    assert c.range_quality == "unknown"
+    assert len(rank_with_deltas(t.annotate([c]))) == 1

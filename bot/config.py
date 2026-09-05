@@ -199,6 +199,15 @@ class BotConfig:
     guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))
     guard_callback_roi: float = field(default_factory=lambda: _env_float("GUARD_CALLBACK_ROI", 10.0))
 
+    # ── Operator-initiated futures entry (UI button) ────────────────────
+    # The ONLY component that can OPEN a position. Off by default; honours
+    # GUARDIAN_DRY_RUN. All limits are re-checked server-side at execute time.
+    futures_entry_enabled: bool = field(default_factory=lambda: _env_bool("FUTURES_ENTRY_ENABLED", False))
+    entry_max_positions: int = field(default_factory=lambda: _env_int("ENTRY_MAX_POSITIONS", 1))
+    entry_default_margin_pct: float = field(default_factory=lambda: _env_float("ENTRY_DEFAULT_MARGIN_PCT", 10.0))
+    entry_max_margin_pct: float = field(default_factory=lambda: _env_float("ENTRY_MAX_MARGIN_PCT", 25.0))
+    entry_default_callback_pct: float = field(default_factory=lambda: _env_float("ENTRY_DEFAULT_CALLBACK_PCT", 0.1))
+
     # ── Candidate scanner (read-only futures market screen) ─────────────
     # Surfaces potential long/short candidates for operator review. Uses PUBLIC
     # futures market data only — no keys, no trading permissions.

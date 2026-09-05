@@ -107,6 +107,28 @@
   .dir-short { color: var(--red); font-weight: bold; }
   .dir-long  { color: var(--green); font-weight: bold; }
   .scan-note { font-size: 10px; color: var(--muted); }
+  .rq { font-size: 9px; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.4px; }
+  .rq-strong  { background: rgba(0,214,143,0.16); color: var(--green); }
+  .rq-good    { background: rgba(0,153,255,0.14); color: var(--accent2); }
+  .rq-neutral { background: rgba(255,255,255,0.05); color: var(--muted); }
+  .rq-weak    { background: rgba(255,170,0,0.12); color: var(--warn); }
+  .rq-unknown { background: rgba(255,255,255,0.04); color: var(--muted); }
+  .range-bar { position: relative; width: 54px; height: 5px; background: var(--bg3); border-radius: 3px; display: inline-block; vertical-align: middle; }
+  .btn-entry { background: rgba(0,153,255,0.12); color: var(--accent2); border: 1px solid rgba(0,153,255,0.4);
+    border-radius: 3px; font-size: 10px; padding: 3px 9px; cursor: pointer; font-family: var(--mono); }
+  .btn-entry:hover { background: rgba(0,153,255,0.22); }
+  .btn-entry:disabled { opacity: 0.4; cursor: not-allowed; }
+  .entry-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 900;
+    display: flex; align-items: center; justify-content: center; }
+  .entry-box { background: var(--bg2); border: 1px solid var(--border2); border-radius: 6px;
+    padding: 22px; width: 460px; max-width: 92vw; }
+  .entry-row { display: flex; justify-content: space-between; font-size: 12px; padding: 5px 0;
+    border-bottom: 1px solid var(--border); }
+  .entry-row .k { color: var(--muted); }
+  .entry-row .v { font-family: var(--mono); color: var(--text); }
+  .entry-input { width: 84px; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px;
+    color: var(--accent); font-family: var(--mono); font-size: 11px; padding: 3px 7px; text-align: right; }
+  .range-dot { position: absolute; top: -2px; width: 3px; height: 9px; background: var(--accent); border-radius: 1px; }
   .guard-panel { grid-column: 1 / -1; order: 0.6; }
   .guard-flag { font-size: 9px; padding: 2px 7px; border-radius: 3px; font-weight: bold; letter-spacing: 0.5px; }
   .gf-dry  { background: rgba(255,170,0,0.15); color: var(--warn); border: 1px solid rgba(255,170,0,0.4); }
@@ -1803,6 +1825,116 @@ function toggleScan() {
   try { localStorage.setItem('scanCollapsed', hidden ? '0' : '1'); } catch(e) {}
 }
 
+
+// ── Futures entry (two-step: preview -> confirm) ─────────────────────────────
+let _entryEnabled = false;
+let _entryPlan = null;
+
+function openEntry(symbol, side) {
+  const box = document.createElement('div');
+  box.className = 'entry-modal';
+  box.id = 'entry-modal';
+  box.innerHTML = `
+    <div class="entry-box">
+      <div class="panel-label">Open ${side.toUpperCase()} &mdash; ${symbol.replace('/USDT:USDT','')}</div>
+      <div style="margin:14px 0">
+        <div class="entry-row"><span class="k">Margin (% of wallet)</span>
+          <span><input class="entry-input" id="entry-margin" type="number" step="1" value="10"> %</span></div>
+        <div class="entry-row"><span class="k">Trailing callback</span>
+          <span><input class="entry-input" id="entry-callback" type="number" step="0.1" value="0.1"> %</span></div>
+      </div>
+      <div id="entry-detail" class="scan-note">
+        Step 1 of 2 &mdash; review the calculated position before anything is sent.
+      </div>
+      <div id="entry-error" class="err" style="margin-top:8px"></div>
+      <div class="confirm-row" style="margin-top:16px">
+        <button class="btn btn-resume" id="entry-preview-btn"
+                onclick="previewEntry('${symbol}','${side}')">Preview</button>
+        <button class="btn btn-close" onclick="closeEntry()">Cancel</button>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+}
+
+function closeEntry() {
+  const m = document.getElementById('entry-modal');
+  if (m) m.remove();
+  _entryPlan = null;
+}
+
+async function previewEntry(symbol, side) {
+  setEl('entry-error', '');
+  const margin = parseFloat(document.getElementById('entry-margin').value);
+  const cb = parseFloat(document.getElementById('entry-callback').value);
+  try {
+    const r = await fetch(API + '/api/futures/entry/preview', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, side, margin_pct: margin, callback_pct: cb }),
+    });
+    const data = await r.json();
+    if (!data.ok) {
+      setEl('entry-error', (data.errors || ['preview failed']).join(' · '));
+      return;
+    }
+    _entryPlan = data.plan;
+    const p = data.plan;
+    setEl('entry-detail', `
+      <div class="entry-row"><span class="k">Direction</span><span class="v dir-${p.side}">${p.side.toUpperCase()} (${p.order_side})</span></div>
+      <div class="entry-row"><span class="k">Reference price</span><span class="v">${p.ref_price}</span></div>
+      <div class="entry-row"><span class="k">Leverage</span><span class="v">${p.leverage}x</span></div>
+      <div class="entry-row"><span class="k">Margin</span><span class="v">$${p.margin_usdt} (${p.margin_pct}% of $${p.wallet_balance})</span></div>
+      <div class="entry-row"><span class="k">Position size</span><span class="v">$${p.notional_usdt} · ${p.qty}</span></div>
+      <div class="entry-row"><span class="k">Trailing callback</span><span class="v">${p.callback_pct}%</span></div>
+      <div class="entry-row"><span class="k">Guardian stop will sit at</span><span class="v neg">${p.projected_stop_price} (${p.projected_stop_roi}% ROI)</span></div>
+      <div style="margin-top:10px;font-size:11px;color:var(--warn)">
+        ${data.dry_run ? 'DRY RUN — confirming sends nothing.' : 'LIVE — confirming places a real order.'}
+        Fills only once price moves your way by ${p.callback_pct}%. Expires in ${p.expires_in_s}s.
+      </div>`);
+    const btn = document.getElementById('entry-preview-btn');
+    btn.textContent = data.dry_run ? 'Confirm (dry run)' : 'CONFIRM — place order';
+    btn.className = 'btn ' + (data.dry_run ? 'btn-resume' : 'btn-kill');
+    btn.onclick = confirmEntry;
+  } catch (e) {
+    setEl('entry-error', 'Preview failed: ' + e.message);
+  }
+}
+
+async function confirmEntry() {
+  if (!_entryPlan) return;
+  const btn = document.getElementById('entry-preview-btn');
+  btn.disabled = true; btn.textContent = 'Placing…';
+  try {
+    const r = await fetch(API + '/api/futures/entry/execute', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: _entryPlan.token }),
+    });
+    const data = await r.json();
+    if (!data.ok) {
+      setEl('entry-error', (data.errors || ['failed']).join(' · '));
+      btn.disabled = false; btn.textContent = 'Retry';
+      return;
+    }
+    closeEntry();
+    setEl('ctrl-msg', data.message || 'Entry placed.');
+    refreshGuardian();
+  } catch (e) {
+    setEl('entry-error', 'Execute failed: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Retry';
+  }
+}
+
+function rangeCell(c) {
+  if (c.range_pos_24h === null || c.range_pos_24h === undefined) {
+    return '<span class="rq rq-unknown">n/a</span>';
+  }
+  const pct = Math.round(c.range_pos_24h * 100);
+  // 0% = at the 24h low, 100% = at the 24h high
+  return `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`
+       + ` <span class="rq rq-${c.range_quality}">${pct}% ${c.range_quality}</span>`;
+}
+
 function renderScan(data) {
   const panel = document.getElementById('scan-panel');
   if (!panel) return;
@@ -1841,9 +1973,11 @@ function renderScan(data) {
       <td class="num">${c.rsi}</td>
       <td class="num">${dRsi}</td>
       <td class="num">${c.ema_gap_pct}%</td>
+      <td>${rangeCell(c)}</td>
       <td class="num ${c.change_24h_pct >= 0 ? 'pos' : 'neg'}">${c.change_24h_pct >= 0 ? '+' : ''}${c.change_24h_pct}%</td>
       <td class="num">$${(c.volume_24h_usdt/1e6).toFixed(0)}M</td>
       <td><span class="scan-badge sb-${c.strength}">${c.strength}${cross}</span></td>
+      <td>${_entryEnabled ? `<button class="btn-entry" onclick="openEntry('${c.symbol}','${c.direction}')">${c.direction === 'short' ? 'Short' : 'Long'}</button>` : ''}</td>
       <td class="scan-note">${c.delta_note || ''}</td>
     </tr>`;
   }).join('');
@@ -1851,8 +1985,8 @@ function renderScan(data) {
   setEl('scan-wrap', `<table>
     <thead><tr>
       <th>Pair</th><th>Dir</th><th class="num">RSI</th><th class="num">&Delta;RSI</th>
-      <th class="num">EMA gap</th><th class="num">24h</th><th class="num">Vol</th>
-      <th>Status</th><th>Change since last scan</th>
+      <th class="num">EMA gap</th><th>24h range</th><th class="num">24h</th><th class="num">Vol</th>
+      <th>Status</th><th></th><th>Change since last scan</th>
     </tr></thead><tbody>${rows}</tbody></table>`);
 }
 
@@ -1973,6 +2107,7 @@ async function refreshGuardian() {
       }
       return;
     }
+    _entryEnabled = !!(g && g.enabled && g.entry_enabled);
     renderGuardian(g);
   } catch (e) {
     if (panel) {
@@ -2061,8 +2196,10 @@ async function refresh() {
 
     // Strategy badge + strategy-specific control visibility.
     applyStrategyView(status);
-    refreshScan();
-    refreshGuardian();
+    // Guardian first: it carries entry_enabled, which decides whether the
+    // scanner rows render entry buttons. Sequenced, not concurrent.
+    await refreshGuardian();
+    await refreshScan();
     if (status.strategy === 'pullback' && summary && summary.by_regime) {
       renderRegimeStats(summary.by_regime);
     }

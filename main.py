@@ -78,6 +78,23 @@ if __name__ == "__main__":
         )
         set_guardian(guardian)
         guardian.start_background()
+
+        # Operator-initiated entry depends on the guardian (shares its exchange
+        # connection and dry-run flag), so it can only exist alongside it.
+        if cfg.futures_entry_enabled:
+            from bot.futures_entry import EntryService, EntryLimits
+            from bot.api import set_entry_service
+            set_entry_service(EntryService(guardian, EntryLimits(
+                max_positions=cfg.entry_max_positions,
+                max_margin_pct=cfg.entry_max_margin_pct,
+                default_margin_pct=cfg.entry_default_margin_pct,
+                default_callback_pct=cfg.entry_default_callback_pct,
+            )))
+            log.warning(
+                f"Futures ENTRY enabled — max {cfg.entry_max_positions} position(s), "
+                f"margin {cfg.entry_default_margin_pct}% (cap {cfg.entry_max_margin_pct}%), "
+                f"{'DRY RUN' if cfg.guardian_dry_run else 'LIVE ORDERS'}"
+            )
       except Exception as e:
         log.error(f"Guardian failed to start: {e}", exc_info=True)
 

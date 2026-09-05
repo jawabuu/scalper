@@ -70,7 +70,8 @@ class ScanRunner:
                 continue
             if abs(pct) < self.cfg.min_abs_change_pct:
                 continue
-            out.append((sym, float(qv), float(pct)))
+            out.append((sym, float(qv), float(pct),
+                        t.get("high"), t.get("low")))
         # Biggest movers first, then cap the OHLCV workload.
         out.sort(key=lambda r: abs(r[2]), reverse=True)
         return out[: self.max_symbols]
@@ -103,12 +104,16 @@ class ScanRunner:
             return self._last_results
 
         self._universe_size = len(movers)
-        for sym, qv, pct in movers:
+        for sym, qv, pct, hi, lo in movers:
             df = self._ohlcv(sym)
             if df is None:
                 continue
             try:
-                c = evaluate_symbol(sym, df, qv, pct, self.cfg)
+                c = evaluate_symbol(
+                    sym, df, qv, pct, self.cfg,
+                    high_24h=float(hi) if hi else None,
+                    low_24h=float(lo) if lo else None,
+                )
             except Exception as e:
                 log.debug(f"evaluate failed for {sym}: {e}")
                 continue

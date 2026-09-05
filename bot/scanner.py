@@ -63,6 +63,27 @@ class Candidate:
     change_24h_pct: float
     volume_24h_usdt: float
     note: str               # human-readable why-it-surfaced
+    # Where price sits in the 24h range: 0.0 = at the 24h low, 1.0 = at the high.
+    # A SHORT near the high has resistance overhead and further to fall; a LONG
+    # near the low has support beneath it. None when high/low are unavailable.
+    range_pos_24h: float | None = None
+
+    @property
+    def range_quality(self) -> str:
+        """
+        How well the 24h range position supports this direction.
+        Short wants price HIGH in the range; long wants it LOW.
+        """
+        if self.range_pos_24h is None:
+            return "unknown"
+        favourable = self.range_pos_24h if self.direction == "short" else (1 - self.range_pos_24h)
+        if favourable >= 0.80:
+            return "strong"
+        if favourable >= 0.60:
+            return "good"
+        if favourable >= 0.40:
+            return "neutral"
+        return "weak"
 
     def as_row(self) -> dict:
         # Everything cast to native Python types — the API layer must never see
@@ -138,8 +159,21 @@ def passes_market_filters(volume_24h_usdt: float, change_24h_pct: float,
     return True, "mover"
 
 
+def range_position_24h(price: float, high_24h: float | None,
+                       low_24h: float | None) -> float | None:
+    """Where `price` sits in the 24h range: 0.0 at the low, 1.0 at the high."""
+    if high_24h is None or low_24h is None:
+        return None
+    rng = high_24h - low_24h
+    if rng <= 0:
+        return None
+    return max(0.0, min(1.0, (price - low_24h) / rng))
+
+
 def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
-                    change_24h_pct: float, cfg: ScanConfig) -> Candidate | None:
+                    change_24h_pct: float, cfg: ScanConfig,
+                    high_24h: float | None = None,
+                    low_24h: float | None = None) -> Candidate | None:
     """
     Assess one symbol. Returns a Candidate if it shows POTENTIAL, else None.
 
@@ -161,6 +195,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     rsi = float(row["rsi"])
     gap = ema_gap_pct(row)
     narrowing, gap_change = is_converging(df, cfg)
+    rpos = range_position_24h(float(row["close"]), high_24h, low_24h)
 
     # NOTE: convergence is INFORMATIONAL (fade-early mode). RSI leads the screen;
     # the EMA gap and its narrowing are reported so the operator can judge how
@@ -171,7 +206,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
         return Candidate(
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
-            volume_24h_usdt=volume_24h_usdt,
+            volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             note=(f"RSI {rsi:.0f} (>={cfg.short_rsi_min:.0f}) overbought; EMA9 {gap:+.2f}% "
                   f"above EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
@@ -182,7 +217,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
         return Candidate(
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
-            volume_24h_usdt=volume_24h_usdt,
+            volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             note=(f"RSI {rsi:.0f} (>={cfg.long_rsi_min:.0f}); EMA9 {gap:+.2f}% below "
                   f"EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
@@ -306,12 +341,16 @@ class ScanTracker:
 
 
 _STRENGTH_ORDER = {"CONFIRMED": 0, "strengthening": 1, "new": 2, "weakening": 3}
+_RANGE_ORDER = {"strong": 0, "good": 1, "neutral": 2, "unknown": 3, "weak": 4}
 
 
 def rank_with_deltas(pairs: list[tuple["Candidate", Delta]]) -> list[tuple["Candidate", Delta]]:
     """Most actionable first: confirmed crosses, then strengthening, then new."""
-    return sorted(pairs, key=lambda p: (_STRENGTH_ORDER.get(p[1].strength, 9),
-                                        -abs(p[0].rsi - 50)))
+    return sorted(pairs, key=lambda p: (
+        _STRENGTH_ORDER.get(p[1].strength, 9),
+        _RANGE_ORDER.get(p[0].range_quality, 9),   # 24h-range support
+        -abs(p[0].rsi - 50),
+    ))
 
 
 def format_table_with_deltas(pairs: list[tuple["Candidate", Delta]]) -> str:
