@@ -186,6 +186,31 @@ class BotConfig:
     # Leave empty to connect directly (testnet, unrestricted regions).
     socks_proxy: str = field(default_factory=lambda: _env("SOCKS_PROXY", ""))
 
+    # ── Futures position guardian ───────────────────────────────────────
+    # Protects futures positions the OPERATOR opens. Never opens one. Every
+    # order it places is reduce-only. DRY RUN defaults to TRUE — it must be
+    # switched off deliberately before it sends a single real order.
+    guardian_enabled: bool = field(default_factory=lambda: _env_bool("GUARDIAN_ENABLED", False))
+    guardian_dry_run: bool = field(default_factory=lambda: _env_bool("GUARDIAN_DRY_RUN", True))
+    guardian_testnet: bool = field(default_factory=lambda: _env_bool("GUARDIAN_TESTNET", True))
+    guardian_poll_interval: float = field(default_factory=lambda: _env_float("GUARDIAN_POLL_INTERVAL", 5.0))
+    # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
+    guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
+    guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))
+    guard_callback_roi: float = field(default_factory=lambda: _env_float("GUARD_CALLBACK_ROI", 10.0))
+
+    # ── Candidate scanner (read-only futures market screen) ─────────────
+    # Surfaces potential long/short candidates for operator review. Uses PUBLIC
+    # futures market data only — no keys, no trading permissions.
+    scanner_enabled: bool = field(default_factory=lambda: _env_bool("SCANNER_ENABLED", False))
+    scanner_interval: int = field(default_factory=lambda: _env_int("SCANNER_INTERVAL", 120))
+    scanner_timeframe: str = field(default_factory=lambda: _env("SCANNER_TIMEFRAME", "5m"))
+    scanner_max_symbols: int = field(default_factory=lambda: _env_int("SCANNER_MAX_SYMBOLS", 40))
+    scan_min_vol_usdt: float = field(default_factory=lambda: _env_float("SCAN_MIN_VOL_USDT", 50_000_000))
+    scan_min_change_pct: float = field(default_factory=lambda: _env_float("SCAN_MIN_CHANGE_PCT", 5.0))
+    scan_short_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_SHORT_RSI_MIN", 70.0))
+    scan_long_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MIN", 50.0))
+
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))
     # Drop the still-forming last candle from OHLCV so entry/confirmation logic

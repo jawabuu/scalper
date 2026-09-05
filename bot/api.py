@@ -29,6 +29,20 @@ log = logging.getLogger("api")
 
 # Engine is injected at startup — see main.py
 _engine = None
+_scanner = None
+_guardian = None
+
+
+def set_guardian(guardian):
+    """Attach a FuturesGuardian so the dashboard can display its state."""
+    global _guardian
+    _guardian = guardian
+
+
+def set_scanner(runner):
+    """Attach a ScanRunner so the dashboard can display its candidates."""
+    global _scanner
+    _scanner = runner
 
 
 def _require_auth(request: Request) -> dict:
@@ -72,6 +86,29 @@ def create_app(engine) -> FastAPI:
         return logout_route(request)
 
     # ── Bot API routes (require auth) ────────────────────────────────────────
+
+    @app.get("/api/guardian")
+    def guardian(user: dict = Depends(_require_auth)):
+        """Futures guardian state: tracked positions, stop levels, recent actions."""
+        if _guardian is None:
+            return {"enabled": False, "states": {}, "recent_actions": [],
+                    "message": "Guardian not enabled on this instance"}
+        return _guardian.snapshot()
+
+    @app.get("/api/scan")
+    def scan(user: dict = Depends(_require_auth)):
+        """
+        Current candidate list from the read-only market screen.
+
+        These are INDICATORS OF POTENTIAL for operator review — the scanner
+        holds no keys and never trades.
+        """
+        if _scanner is None:
+            return {"enabled": False, "candidates": [],
+                    "message": "Scanner not enabled on this instance"}
+        snap = _scanner.snapshot()
+        snap["enabled"] = True
+        return snap
 
     @app.get("/api/status")
     def status(user: dict = Depends(_require_auth)):
