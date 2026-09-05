@@ -1811,11 +1811,14 @@ function renderScan(data) {
 
   const meta = document.getElementById('scan-meta');
   if (meta) {
-    const ago = data.last_scan_ago_s == null ? '—' : Math.round(data.last_scan_ago_s) + 's ago';
+    const ago = data.last_scan_ago_s == null ? 'never' : Math.round(data.last_scan_ago_s) + 's ago';
+    const dur = data.scan_duration_s ? ` · took ${data.scan_duration_s}s` : '';
+    const every = data.interval_s ? ` · every ${data.interval_s}s` : '';
     const c = data.config || {};
     meta.textContent = `(${data.candidates.length} of ${data.universe_size} movers · `
       + `vol>${(c.min_24h_vol_usdt/1e6).toFixed(0)}M · move>${c.min_abs_change_pct}% · `
-      + `short RSI>${c.short_rsi_min} · long RSI>${c.long_rsi_min} · ${c.timeframe} · updated ${ago})`;
+      + `short RSI>${c.short_rsi_min} · long RSI>${c.long_rsi_min} · ${c.timeframe}`
+      + `${every} · updated ${ago}${dur})`;
   }
 
   if (data.error) {

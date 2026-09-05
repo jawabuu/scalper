@@ -236,3 +236,61 @@ def test_delta_table_renders():
     pairs = t.annotate([_cand("A/USDT", "short", 80, -0.2)])
     out = format_table_with_deltas(pairs)
     assert "CONFIRMED" in out and "POTENTIAL" in out
+
+
+# ── Regression: the API payload must be JSON-serialisable ───────────────────
+
+def test_no_numpy_types_leak_into_api_payload(cfg):
+    """
+    numpy scalars from pandas leaked into the snapshot. np.bool_ is NOT a bool
+    subclass and cannot be JSON encoded, so /api/scan returned 500. Every value
+    crossing the API boundary must be a native Python type.
+    """
+    import json
+    import numpy as np
+
+    df = _rising_then_stalling()
+    c = evaluate_symbol("AAA/USDT:USDT", df, 200e6, 15.0, cfg)
+    if c is None:                      # ensure we exercise a real candidate
+        c = Candidate("AAA/USDT:USDT", "short", 72.0,
+                      float(ema_gap_pct(prepare(df, cfg).iloc[-1])),
+                      -0.6, 15.0, 200e6, "note")
+
+    t = ScanTracker()
+    t.commit([c])
+    # Force a cross so crossed_down/up are exercised
+    c2 = Candidate(c.symbol, c.direction, c.rsi + 3, -abs(c.ema_gap_pct) - 0.1,
+                   c.gap_change_pct, c.change_24h_pct, c.volume_24h_usdt, c.note)
+    _, d = t.annotate([c2])[0]
+
+    row = c2.as_row()
+    row.update({
+        "strength": str(d.strength),
+        "rsi_change": None if d.is_new else round(float(d.rsi_change), 1),
+        "crossed_down": bool(d.crossed_down),
+        "crossed_up": bool(d.crossed_up),
+        "delta_note": str(d.note),
+    })
+
+    json.dumps(row)                    # must not raise
+
+    for k, v in row.items():
+        assert not isinstance(v, (np.generic,)), f"{k} is a numpy type: {type(v)}"
+
+
+def test_cross_flags_are_native_bools():
+    import numpy as np
+    t = ScanTracker()
+    t.commit([_cand("A/USDT", "short", 75, +0.40)])
+    d = t.diff(_cand("A/USDT", "short", 78, -0.10))
+    assert type(d.crossed_down) is bool
+    assert type(d.crossed_up) is bool
+    assert not isinstance(d.crossed_down, np.generic)
+
+
+def test_ema_gap_returns_native_float(cfg):
+    import numpy as np
+    df = prepare(_rising_then_stalling(), cfg)
+    g = ema_gap_pct(df.iloc[-1])
+    assert type(g) is float
+    assert not isinstance(g, np.generic)

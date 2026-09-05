@@ -93,7 +93,12 @@ def create_app(engine) -> FastAPI:
         if _guardian is None:
             return {"enabled": False, "states": {}, "recent_actions": [],
                     "message": "Guardian not enabled on this instance"}
-        return _guardian.snapshot()
+        try:
+            return _guardian.snapshot()
+        except Exception as e:
+            log.exception("guardian snapshot failed")
+            return {"enabled": True, "states": {}, "recent_actions": [],
+                    "config": {}, "error": f"{type(e).__name__}: {e}"}
 
     @app.get("/api/scan")
     def scan(user: dict = Depends(_require_auth)):
@@ -106,7 +111,14 @@ def create_app(engine) -> FastAPI:
         if _scanner is None:
             return {"enabled": False, "candidates": [],
                     "message": "Scanner not enabled on this instance"}
-        snap = _scanner.snapshot()
+        # Never let a snapshot fault become an opaque 500 — return the error so
+        # it is visible in the dashboard and diagnosable without server logs.
+        try:
+            snap = _scanner.snapshot()
+        except Exception as e:
+            log.exception("scanner snapshot failed")
+            return {"enabled": True, "candidates": [], "config": {},
+                    "error": f"{type(e).__name__}: {e}"}
         snap["enabled"] = True
         return snap
 

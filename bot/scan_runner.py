@@ -50,6 +50,7 @@ class ScanRunner:
         self._last_scan_ts: float = 0.0
         self._last_error: str | None = None
         self._universe_size: int = 0
+        self._last_duration_s: float = 0.0
 
     # ── data ────────────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ class ScanRunner:
     # ── scan ────────────────────────────────────────────────────────────────
 
     def scan_once(self) -> list[tuple[Candidate, Delta]]:
+        started = time.time()
         candidates: list[Candidate] = []
         try:
             movers = self._prefilter()
@@ -119,8 +121,10 @@ class ScanRunner:
         with self._lock:
             self._last_results = pairs
             self._last_scan_ts = time.time()
+            self._last_duration_s = self._last_scan_ts - started
             self._last_error = None
-        log.info(f"Scan: {len(candidates)} candidate(s) from {len(movers)} movers")
+        log.info(f"Scan: {len(candidates)} candidate(s) from {len(movers)} movers "
+                 f"in {self._last_duration_s:.1f}s")
         return pairs
 
     def run_forever(self):
@@ -145,11 +149,11 @@ class ScanRunner:
             for c, d in self._last_results:
                 row = c.as_row()
                 row.update({
-                    "strength": d.strength,
-                    "rsi_change": None if d.is_new else round(d.rsi_change, 1),
-                    "crossed_down": d.crossed_down,
-                    "crossed_up": d.crossed_up,
-                    "delta_note": d.note,
+                    "strength": str(d.strength),
+                    "rsi_change": None if d.is_new else round(float(d.rsi_change), 1),
+                    "crossed_down": bool(d.crossed_down),
+                    "crossed_up": bool(d.crossed_up),
+                    "delta_note": str(d.note),
                 })
                 rows.append(row)
             return {
@@ -157,6 +161,8 @@ class ScanRunner:
                 "last_scan_ts": self._last_scan_ts,
                 "last_scan_ago_s": (time.time() - self._last_scan_ts) if self._last_scan_ts else None,
                 "universe_size": self._universe_size,
+                "scan_duration_s": round(self._last_duration_s, 1),
+                "interval_s": self.interval,
                 "error": self._last_error,
                 "config": {
                     "min_24h_vol_usdt": self.cfg.min_24h_vol_usdt,

@@ -65,15 +65,17 @@ class Candidate:
     note: str               # human-readable why-it-surfaced
 
     def as_row(self) -> dict:
+        # Everything cast to native Python types — the API layer must never see
+        # a numpy scalar (np.bool_ in particular is not JSON serialisable).
         return {
-            "symbol": self.symbol,
-            "direction": self.direction,
-            "rsi": round(self.rsi, 1),
-            "ema_gap_pct": round(self.ema_gap_pct, 3),
-            "gap_narrowing_pct": round(self.gap_change_pct, 3),
-            "change_24h_pct": round(self.change_24h_pct, 2),
-            "volume_24h_usdt": round(self.volume_24h_usdt, 0),
-            "note": self.note,
+            "symbol": str(self.symbol),
+            "direction": str(self.direction),
+            "rsi": round(float(self.rsi), 1),
+            "ema_gap_pct": round(float(self.ema_gap_pct), 3),
+            "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
+            "change_24h_pct": round(float(self.change_24h_pct), 2),
+            "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
+            "note": str(self.note),
         }
 
 
@@ -94,7 +96,10 @@ def ema_gap_pct(row) -> float:
     """
     if pd.isna(row["ema_fast"]) or pd.isna(row["ema_slow"]) or row["ema_slow"] == 0:
         return 0.0
-    return (row["ema_fast"] - row["ema_slow"]) / row["ema_slow"] * 100
+    # float() is required, not cosmetic: numpy scalars leak into comparisons and
+    # produce np.bool_, which is NOT a bool subclass and cannot be JSON encoded
+    # (it surfaces as a 500 from the API).
+    return float((row["ema_fast"] - row["ema_slow"]) / row["ema_slow"] * 100)
 
 
 def gap_series(df: pd.DataFrame) -> pd.Series:
@@ -118,8 +123,8 @@ def is_converging(df: pd.DataFrame, cfg: ScanConfig) -> tuple[bool, float]:
     now, before = gaps.iloc[-1], gaps.iloc[-1 - lb]
     if pd.isna(now) or pd.isna(before):
         return False, 0.0
-    change = abs(now) - abs(before)
-    return change <= -cfg.min_convergence_pct, change
+    change = float(abs(now) - abs(before))
+    return bool(change <= -cfg.min_convergence_pct), change
 
 
 def passes_market_filters(volume_24h_usdt: float, change_24h_pct: float,
@@ -261,8 +266,8 @@ class ScanTracker:
             is_new=False,
         )
         # Cross detection: sign flip of the EMA gap between scans.
-        d.crossed_down = prev.ema_gap_pct > 0 >= c.ema_gap_pct
-        d.crossed_up = prev.ema_gap_pct < 0 <= c.ema_gap_pct
+        d.crossed_down = bool(prev.ema_gap_pct > 0 >= c.ema_gap_pct)
+        d.crossed_up = bool(prev.ema_gap_pct < 0 <= c.ema_gap_pct)
 
         if c.direction == "short":
             if d.crossed_down:
