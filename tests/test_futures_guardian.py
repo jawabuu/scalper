@@ -36,7 +36,9 @@ class FakeExchange:
 
     # -- precision helpers
     def price_to_precision(self, symbol, price):
-        return f"{float(price):.4f}"
+        # Realistic tick precision — 4dp is far too coarse for sub-dollar coins
+        # and introduces rounding error larger than the values under test.
+        return f"{float(price):.8f}"
 
     def amount_to_precision(self, symbol, amount):
         return f"{float(amount):.3f}"
@@ -249,3 +251,54 @@ def test_long_position_stop_below_entry():
     stop = float(fake.created[0]["params"]["stopPrice"])
     assert stop < 100.0
     assert fake.created[0]["side"] == "sell"   # sell closes a long
+
+
+# ── Regression: leverage must be derived, not trusted ────────────────────────
+
+def test_leverage_derived_when_field_reports_one():
+    """
+    Binance returned leverage=1 on an isolated 10x position, which made every
+    ROI 10x too small and every stop 10x too far away (a -7% ROI stop became a
+    -7% PRICE move = -70% of margin). Leverage must be derived from
+    notional/margin, not taken from the field.
+    """
+    raw = {"symbol": "X/USDT:USDT", "side": "long", "entryPrice": 0.1189,
+           "contracts": 420.5, "leverage": 1,          # ← wrong, as observed
+           "initialMargin": 5.0}                        # 50 notional / 5 = 10x
+    g = _guardian(FakeExchange(positions=[raw]))
+    pos = g.fetch_positions()[0]
+    assert pos.effective_leverage == pytest.approx(10.0, rel=1e-3)
+
+
+def test_stop_is_proportionate_to_margin_not_size():
+    """-7% ROI must risk 7% of MARGIN, not 7% of position size."""
+    raw = {"symbol": "X/USDT:USDT", "side": "long", "entryPrice": 0.1189,
+           "contracts": 420.5, "leverage": 1, "initialMargin": 5.0}
+    fake = FakeExchange(positions=[raw], price=0.1189)
+    g = _guardian(fake)
+    g.run_cycle()
+    stop = float(fake.created[0]["params"]["stopPrice"])
+    pos = g.fetch_positions()[0]
+    loss = (stop - pos.entry_price) / pos.entry_price * pos.notional
+    assert loss == pytest.approx(-0.07 * pos.margin, rel=1e-2)   # 7% of margin
+    # and NOT 7% of the price / notional
+    assert abs(loss) < 0.1 * pos.margin
+
+
+def test_roi_matches_binance_convention():
+    """A 2% price move at 10x must read as 20% ROI, not 2%."""
+    from bot.futures_guard import roi_pct
+    raw = {"symbol": "X/USDT:USDT", "side": "long", "entryPrice": 100.0,
+           "contracts": 0.5, "leverage": 1, "initialMargin": 5.0}  # 50/5 = 10x
+    g = _guardian(FakeExchange(positions=[raw]))
+    pos = g.fetch_positions()[0]
+    assert roi_pct(pos, 102.0) == pytest.approx(20.0)
+
+
+def test_margin_reconstructed_when_missing():
+    raw = {"symbol": "X/USDT:USDT", "side": "short", "entryPrice": 100.0,
+           "contracts": 1.0, "leverage": 10}          # no margin field
+    g = _guardian(FakeExchange(positions=[raw]))
+    pos = g.fetch_positions()[0]
+    assert pos.margin == pytest.approx(10.0)          # 100 notional / 10x
+    assert pos.effective_leverage == pytest.approx(10.0)

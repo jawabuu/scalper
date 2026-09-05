@@ -1854,11 +1854,30 @@ function renderScan(data) {
 }
 
 async function refreshScan() {
+  const panel = document.getElementById('scan-panel');
   try {
     const data = await api('/api/scan');
+    if (data && data.enabled === false) {
+      // Explicitly disabled: show a one-line hint rather than hiding silently,
+      // so "off" is distinguishable from "broken".
+      if (panel) {
+        panel.style.display = '';
+        setEl('scan-meta', '(disabled)');
+        setEl('scan-wrap',
+          '<div class="empty">Scanner is not enabled on this instance &mdash; '
+          + 'set <code>SCANNER_ENABLED=true</code> in the environment and restart.</div>');
+        setEl('scan-actions', '');
+      }
+      return;
+    }
     renderScan(data);
   } catch (e) {
-    // scanner not enabled or endpoint unavailable — leave the panel hidden
+    if (panel) {
+      panel.style.display = '';
+      setEl('scan-meta', '(unavailable)');
+      setEl('scan-wrap',
+        `<div class="empty" style="color:var(--warn)">Scanner endpoint unavailable: ${e.message}</div>`);
+    }
   }
 }
 
@@ -1937,7 +1956,29 @@ function renderGuardian(g) {
 }
 
 async function refreshGuardian() {
-  try { renderGuardian(await api('/api/guardian')); } catch (e) {}
+  const panel = document.getElementById('guard-panel');
+  try {
+    const g = await api('/api/guardian');
+    if (g && g.enabled === false) {
+      if (panel) {
+        panel.style.display = '';
+        setEl('guard-meta', '(disabled)');
+        setEl('guard-wrap',
+          '<div class="empty">Guardian is not enabled on this instance &mdash; '
+          + 'set <code>GUARDIAN_ENABLED=true</code> in the environment and restart.</div>');
+        setEl('guard-actions', '');
+      }
+      return;
+    }
+    renderGuardian(g);
+  } catch (e) {
+    if (panel) {
+      panel.style.display = '';
+      setEl('guard-meta', '(unavailable)');
+      setEl('guard-wrap',
+        `<div class="empty" style="color:var(--warn)">Guardian endpoint unavailable: ${e.message}</div>`);
+    }
+  }
 }
 
 function renderPositionsTable(positions) {

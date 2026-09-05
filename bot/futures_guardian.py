@@ -92,16 +92,46 @@ class FuturesGuardian:
                 entry = float(p.get("entryPrice") or 0)
                 if entry <= 0:
                     continue
-                lev = int(float(p.get("leverage") or 1))
-                margin = float(
-                    p.get("initialMargin")
-                    or p.get("collateral")
-                    or (entry * contracts / max(lev, 1))
-                )
-                out.append(FuturesPosition(
+                info = p.get("info") or {}
+                # The `leverage` field has been observed to come back as 1 on
+                # isolated positions, which silently scales every ROI and stop
+                # distance by the leverage factor. Try several sources, but the
+                # authoritative value is derived from notional/margin below.
+                lev_raw = (p.get("leverage") or info.get("leverage")
+                           or info.get("marginRatio") and None)
+                try:
+                    lev = int(float(lev_raw)) if lev_raw else 1
+                except (TypeError, ValueError):
+                    lev = 1
+
+                notional = entry * abs(contracts)
+                margin_raw = (p.get("initialMargin") or info.get("initialMargin")
+                              or p.get("collateral") or info.get("isolatedMargin"))
+                try:
+                    margin = float(margin_raw) if margin_raw else 0.0
+                except (TypeError, ValueError):
+                    margin = 0.0
+                if margin <= 0:
+                    # Last resort: reconstruct from the reported leverage.
+                    margin = notional / max(lev, 1)
+                    log.warning(
+                        f"{p.get('symbol')}: no usable margin field; reconstructed "
+                        f"{margin:.4f} from leverage={lev}. ROI figures depend on "
+                        f"this — verify against the Binance UI."
+                    )
+
+                pos = FuturesPosition(
                     symbol=p["symbol"], side=side, entry_price=entry,
                     qty=abs(contracts), leverage=max(lev, 1), margin=margin,
-                ))
+                )
+                # Sanity-check the derived leverage against the reported one.
+                eff = pos.effective_leverage
+                if lev > 1 and abs(eff - lev) / lev > 0.2:
+                    log.warning(
+                        f"{pos.symbol}: derived leverage {eff:.1f}x differs from "
+                        f"reported {lev}x — using derived (notional/margin)."
+                    )
+                out.append(pos)
             except Exception as e:
                 log.debug(f"skipping unparseable position {p.get('symbol')}: {e}")
         return out

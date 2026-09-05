@@ -47,10 +47,19 @@ if __name__ == "__main__":
 
     engine = ScalpingEngine(cfg)
 
+    # Explicit feature banner — makes it unambiguous from the logs whether the
+    # optional subsystems are on, instead of silence when they are off.
+    log.info(
+        f"Features: guardian={'ON' if cfg.guardian_enabled else 'off'}"
+        f"{' (DRY RUN)' if cfg.guardian_enabled and cfg.guardian_dry_run else ''} | "
+        f"scanner={'ON' if cfg.scanner_enabled else 'off'}"
+    )
+
     # Start API server in background (daemon thread — dies with main process)
     # Optional futures position guardian. Protects positions the operator opens
     # on futures; never opens one. Defaults to DRY RUN.
     if cfg.guardian_enabled:
+      try:
         from bot.futures_guard import GuardConfig
         from bot.futures_guardian import FuturesGuardian
         from bot.api import set_guardian
@@ -69,10 +78,13 @@ if __name__ == "__main__":
         )
         set_guardian(guardian)
         guardian.start_background()
+      except Exception as e:
+        log.error(f"Guardian failed to start: {e}", exc_info=True)
 
     # Optional read-only candidate scanner (public futures market data only —
     # no keys, cannot trade). Surfaces potential setups for operator review.
     if cfg.scanner_enabled:
+      try:
         from bot.scanner import ScanConfig
         from bot.scan_runner import ScanRunner
         from bot.api import set_scanner
@@ -91,6 +103,8 @@ if __name__ == "__main__":
         )
         set_scanner(runner)
         runner.start_background()
+      except Exception as e:
+        log.error(f"Scanner failed to start: {e}", exc_info=True)
 
     run_api(engine, host="0.0.0.0", port=8000)
 

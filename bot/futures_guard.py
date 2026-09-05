@@ -40,6 +40,25 @@ class FuturesPosition:
         if self.side not in ("long", "short"):
             raise ValueError(f"side must be long|short, got {self.side!r}")
 
+    @property
+    def notional(self) -> float:
+        """Position size in quote terms: entry price x contracts."""
+        return self.entry_price * self.qty
+
+    @property
+    def effective_leverage(self) -> float:
+        """
+        Leverage DERIVED from notional / margin rather than trusting the
+        exchange's `leverage` field, which has been observed to come back as 1
+        on isolated-margin positions. Getting this wrong scales every ROI figure
+        and every stop distance by the leverage factor, so it is derived from
+        two values that are reliably reported (size and margin) and only falls
+        back to the reported field if margin is unusable.
+        """
+        if self.margin > 0 and self.notional > 0:
+            return self.notional / self.margin
+        return float(self.leverage or 1)
+
 
 @dataclass
 class GuardState:
@@ -102,7 +121,8 @@ def roi_pct(pos: FuturesPosition, price: float) -> float:
         price_move = (price - pos.entry_price) / pos.entry_price
     else:  # short profits when price falls
         price_move = (pos.entry_price - price) / pos.entry_price
-    return price_move * pos.leverage * 100
+    # ROI% = PnL / margin * 100, which equals price_move * leverage * 100.
+    return price_move * pos.effective_leverage * 100
 
 
 def price_for_roi(pos: FuturesPosition, target_roi: float) -> float:
@@ -112,7 +132,7 @@ def price_for_roi(pos: FuturesPosition, target_roi: float) -> float:
     Inverse of roi_pct(). For a long, higher ROI = higher price; for a short,
     higher ROI = lower price.
     """
-    price_move = (target_roi / 100.0) / pos.leverage
+    price_move = (target_roi / 100.0) / pos.effective_leverage
     if pos.side == "long":
         return pos.entry_price * (1 + price_move)
     return pos.entry_price * (1 - price_move)

@@ -156,10 +156,14 @@ def test_roi_thresholds_scale_with_margin(cfg):
     -7% ROI is 7 USDT on 100 margin and 0.70 USDT on 10 margin — the ROI figure
     is margin-relative, so the same config scales automatically.
     """
+    lev = 10
     for margin in (10.0, 100.0, 1000.0):
-        pos = FuturesPosition("X/USDT", "long", 100.0, 1.0, 10, margin)
+        # Keep the position internally consistent: notional = margin x leverage
+        entry, qty = 100.0, (margin * lev) / 100.0
+        pos = FuturesPosition("X/USDT", "long", entry, qty, lev, margin)
+        assert pos.effective_leverage == pytest.approx(lev)
         stop_price = price_for_roi(pos, -7.0)
-        pnl = (stop_price - pos.entry_price) / pos.entry_price * margin * pos.leverage
+        pnl = (stop_price - entry) / entry * pos.notional
         assert pnl == pytest.approx(-0.07 * margin)
 
 
