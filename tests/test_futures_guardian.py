@@ -912,3 +912,141 @@ def test_short_win_reports_positive_realised():
     rec = _record_trade(g, "UAI/USDT:USDT", "short", 0.6845, 0.6682,
                         notional=59.35, opened_at=now - 100)
     assert rec["realised_pnl_usdt"] == pytest.approx(1.4133, abs=1e-3)
+
+
+# ── A position discovered already in profit must be protected ────────────────
+
+def test_position_born_armed_gets_a_trailing_stop():
+    """
+    A trailing-stop ENTRY can fill after a large move, so the position is
+    already past the arm level the first time the guardian sees it. It is then
+    born armed, the transition never fires, and it used to fall through to the
+    fixed stop — which the exchange rejects, leaving it UNPROTECTED.
+    """
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    # First sight is already +25% ROI (price well below entry for a short).
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)
+    g.run_cycle()
+
+    trail = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert trail, "a position discovered in profit must get a trailing stop"
+    assert trail[0]["params"]["reduceOnly"] is True
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.native_trail_id is not None
+    assert st.armed is True
+
+
+def test_no_fixed_stop_attempted_when_already_past_it():
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)
+    g.run_cycle()
+    kinds = [o["type"] for o in fake.created]
+    assert "TRAILING_STOP_MARKET" in kinds
+    assert kinds.count("STOP_MARKET") == 0
+
+
+def test_rejected_fixed_stop_falls_back_to_trailing():
+    """If the fixed stop is refused, protect with a trail rather than nothing."""
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+
+    original = fake.create_order
+    def reject_stop_market(**kw):
+        if kw.get("type") == "STOP_MARKET":
+            raise RuntimeError("Order would immediately trigger")
+        return original(**kw)
+    fake.create_order = reject_stop_market
+
+    g = _guardian(fake)
+    g.run_cycle()
+
+    trail = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert trail, "must fall back to a trailing stop when the fixed stop is rejected"
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.native_trail_id is not None
+
+
+def test_armed_position_is_not_re_armed_every_cycle():
+    """Once a trail is resting, further cycles must not place more orders."""
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)
+    g.run_cycle()
+    n = len(fake.created)
+    for _ in range(3):
+        g.run_cycle()
+    assert len(fake.created) == n
+
+
+# ── Stops that fill between polls must not report a stale ROI ────────────────
+
+def test_final_roi_derived_from_realised_when_stop_fills_between_polls():
+    """
+    The guardian polls, so a stop triggering between cycles fills at a price it
+    never saw. Reporting the last observed price showed -3.4% ROI on a trade
+    the money said was -10.4%.
+    """
+    import time
+    now = time.time()
+
+    class Ex(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return [{"timestamp": int((now - 10) * 1000),
+                     "info": {"realizedPnl": "-1.1457"}}]
+
+    g = _guardian(Ex())
+    from bot.futures_guard import GuardState
+    meta = {"entry_price": 0.07068951, "current_price": 0.070452, "side": "long",
+            "notional": 110.0, "margin": 11.0, "leverage": 10.0,
+            "current_roi": -3.36, "opened_seen_at": now - 600}
+    g._closed_trades = []
+    g._record_closed_trade("BULLA/USDT:USDT", GuardState(peak_roi=0.7), meta)
+    rec = g._closed_trades[0]
+
+    assert rec["final_roi"] == pytest.approx(-10.42, abs=0.05)
+    assert rec["observed_roi"] == pytest.approx(-3.36, abs=0.05)
+    assert rec["exit_from_exchange"] is True
+    assert rec["exit_price"] < 0.070452        # the real fill was worse
+
+
+def test_final_roi_and_realised_are_consistent():
+    """final_roi x margin must reconcile with the realised figure."""
+    import time
+    now = time.time()
+
+    class Ex(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return [{"timestamp": int((now - 10) * 1000),
+                     "info": {"realizedPnl": "2.5972"}}]
+
+    g = _guardian(Ex())
+    from bot.futures_guard import GuardState
+    meta = {"entry_price": 0.09731, "current_price": 0.09957, "side": "long",
+            "notional": 114.3, "margin": 11.43, "leverage": 10.0,
+            "current_roi": 22.72, "opened_seen_at": now - 600}
+    g._closed_trades = []
+    g._record_closed_trade("X/USDT:USDT", GuardState(peak_roi=43.98), meta)
+    rec = g._closed_trades[0]
+    implied = rec["final_roi"] / 100 * meta["margin"]
+    assert implied == pytest.approx(rec["realised_pnl_usdt"], rel=0.01)
+
+
+def test_computed_fallback_is_flagged_as_estimate():
+    class Ex(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return []        # no exchange figure
+    import time
+    g = _guardian(Ex())
+    from bot.futures_guard import GuardState
+    meta = {"entry_price": 100.0, "current_price": 101.0, "side": "long",
+            "notional": 100.0, "margin": 10.0, "leverage": 10.0,
+            "current_roi": 10.0, "opened_seen_at": time.time() - 60}
+    g._closed_trades = []
+    g._record_closed_trade("X/USDT:USDT", GuardState(peak_roi=10.0), meta)
+    rec = g._closed_trades[0]
+    assert rec["exit_is_estimate"] is True
+    assert rec["exit_from_exchange"] is False

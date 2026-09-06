@@ -97,6 +97,16 @@ class GuardConfig:
     # leverage and cannot be validated at startup — it is checked at arm time.
     trail_callback_pct: float = 1.0
     use_native_trail: bool = True
+    # ── Volatility-scaled initial stop ──────────────────────────────────
+    # 0 disables (fixed initial_stop_roi is used). When set, the initial stop
+    # sits atr_stop_mult x ATR away from entry, so a volatile coin gets room to
+    # breathe and a calm one is not given a stop far outside its normal range.
+    # The result is clamped so it can never be absurdly tight or wide.
+    atr_stop_mult: float = 0.0
+    atr_stop_min_roi: float = 4.0
+    atr_stop_max_roi: float = 30.0
+
+
     # Only move a resting stop if the new level differs by at least this much
     # ROI, to avoid spamming cancel/replace on every tick.
     min_stop_move_roi: float = 1.0
@@ -121,6 +131,22 @@ class GuardConfig:
         )
         return self
 
+
+
+def atr_stop_roi(atr_pct: float, leverage: float, cfg) -> float | None:
+    """
+    Initial stop distance in ROI%, derived from volatility.
+
+    atr_pct is ATR as a percentage of price. Multiplying by leverage converts a
+    price move to an ROI move. Clamped to [atr_stop_min_roi, atr_stop_max_roi]
+    so a freak ATR reading cannot produce a stop that is either inside the
+    spread or wide enough to threaten the whole margin.
+    """
+    if not cfg.atr_stop_mult or atr_pct is None or atr_pct <= 0 or leverage <= 0:
+        return None
+    roi = cfg.atr_stop_mult * atr_pct * leverage
+    return max(cfg.atr_stop_min_roi, min(cfg.atr_stop_max_roi, roi))
+    # Only move a resting stop if the new level differs by at least this much
 
 # ── Direction-aware maths (the only place long/short differ) ─────────────────
 
@@ -256,7 +282,8 @@ def trail_locks_in(leverage: float, cfg: GuardConfig) -> float:
     return cfg.arm_roi - callback_roi_at(leverage, cfg)
 
 
-def desired_stop_roi(state: GuardState, cfg: GuardConfig) -> float:
+def desired_stop_roi(state: GuardState, cfg: GuardConfig,
+                     initial_stop_override: float | None = None) -> float:
     """
     The ROI level the protective stop should sit at, given the peak seen so far.
 
@@ -268,7 +295,8 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig) -> float:
     """
     if is_armed(state, cfg):
         return state.peak_roi - cfg.callback_roi
-    return -cfg.initial_stop_roi
+    initial = initial_stop_override if initial_stop_override else cfg.initial_stop_roi
+    return -initial
 
 
 def update_peak(state: GuardState, current_roi: float) -> GuardState:
@@ -295,7 +323,9 @@ def should_replace_stop(state: GuardState, new_stop_roi: float,
 
 
 def evaluate(pos: FuturesPosition, price: float, state: GuardState,
-             cfg: GuardConfig) -> tuple[GuardState, float | None, str]:
+             cfg: GuardConfig,
+             initial_stop_override: float | None = None
+             ) -> tuple[GuardState, float | None, str]:
     """
     Full per-tick decision for one position (pure — no exchange calls).
 
@@ -304,7 +334,7 @@ def evaluate(pos: FuturesPosition, price: float, state: GuardState,
     current_roi = roi_pct(pos, price)
     state = update_peak(state, current_roi)
 
-    new_stop_roi = desired_stop_roi(state, cfg)
+    new_stop_roi = desired_stop_roi(state, cfg, initial_stop_override)
     newly_armed = (not state.armed) and is_armed(state, cfg)
     if newly_armed:
         state.armed = True

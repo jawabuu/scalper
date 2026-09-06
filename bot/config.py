@@ -213,6 +213,13 @@ class BotConfig:
     # would engage the trail at/below entry — checked per position at arm time.
     guard_trail_callback_pct: float = field(default_factory=lambda: _env_float("GUARD_TRAIL_CALLBACK_PCT", 1.0))
     guard_use_native_trail: bool = field(default_factory=lambda: _env_bool("GUARD_USE_NATIVE_TRAIL", True))
+    # Volatility-scaled stop + sizing. 0 disables (fixed stop, flat % margin).
+    # When set, stop = mult x ATR and the position is sized so the loss at that
+    # stop equals ENTRY_RISK_PCT of the wallet — constant risk across coins.
+    atr_stop_mult: float = field(default_factory=lambda: _env_float("ATR_STOP_MULT", 0.0))
+    atr_stop_min_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MIN_ROI", 4.0))
+    atr_stop_max_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MAX_ROI", 30.0))
+    entry_risk_pct: float = field(default_factory=lambda: _env_float("ENTRY_RISK_PCT", 1.0))
 
     # ── Operator-initiated futures entry (UI button) ────────────────────
     # The ONLY component that can OPEN a position. Off by default; honours
@@ -247,6 +254,11 @@ class BotConfig:
     # absolute floor inert — percentile mode stays meaningful in both.
     scan_volume_mode: str = field(default_factory=lambda: _env("SCAN_VOLUME_MODE", "absolute").lower())
     scan_vol_percentile: float = field(default_factory=lambda: _env_float("SCAN_VOL_PERCENTILE", 60.0))
+    # Volatility band, ATR as % of price. 0 disables. A coin below the floor is
+    # too quiet for the stop to survive noise-free; above the ceiling a fixed
+    # stop sits inside normal swings.
+    scan_min_atr_pct: float = field(default_factory=lambda: _env_float("SCAN_MIN_ATR_PCT", 0.0))
+    scan_max_atr_pct: float = field(default_factory=lambda: _env_float("SCAN_MAX_ATR_PCT", 0.0))
     scan_min_change_pct: float = field(default_factory=lambda: _env_float("SCAN_MIN_CHANGE_PCT", 5.0))
     scan_short_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_SHORT_RSI_MIN", 70.0))
     scan_long_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MIN", 50.0))

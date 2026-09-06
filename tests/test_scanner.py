@@ -577,3 +577,69 @@ def test_distances_absent_without_extremes():
     if c is not None:
         assert c.pct_above_24h_low is None
         assert c.pct_below_24h_high is None
+
+
+# ── ATR / volatility ─────────────────────────────────────────────────────────
+
+def _vol_frame(vol):
+    cl = [100 + i * 0.5 for i in range(48)]
+    last = cl[-1]
+    cl += [last - i * 0.35 for i in range(1, 7)]
+    return pd.DataFrame({
+        "open": [cl[0]] + cl[:-1],
+        "high": [c * (1 + vol) for c in cl],
+        "low": [c * (1 - vol) for c in cl],
+        "close": cl, "volume": [1000.0] * len(cl),
+    })
+
+
+def test_atr_pct_scales_with_volatility():
+    cfg = ScanConfig(long_rsi_min=38.0, stop_pct_for_ratio=1.0)
+    calm = evaluate_symbol("X/USDT", _vol_frame(0.0008), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0)
+    wild = evaluate_symbol("X/USDT", _vol_frame(0.01), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0)
+    assert calm.atr_pct < wild.atr_pct
+
+
+def test_stop_expressed_in_atrs():
+    """
+    The useful number: how many typical candle-ranges the stop sits away. Under
+    ~1 ATR it is inside normal noise and gets hit regardless of the thesis.
+    """
+    cfg = ScanConfig(long_rsi_min=38.0, stop_pct_for_ratio=1.0)
+    calm = evaluate_symbol("X/USDT", _vol_frame(0.0008), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0)
+    wild = evaluate_symbol("X/USDT", _vol_frame(0.01), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0)
+    assert calm.stop_vs_atr > 1.5      # comfortable room
+    assert wild.stop_vs_atr < 1.0      # stop sits inside the noise
+
+
+def test_volatility_band_excludes_too_quiet():
+    cfg = ScanConfig(long_rsi_min=38.0, min_atr_pct=1.0)
+    assert evaluate_symbol("X/USDT", _vol_frame(0.0008), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0) is None
+
+
+def test_volatility_band_excludes_too_wild():
+    cfg = ScanConfig(long_rsi_min=38.0, max_atr_pct=1.0)
+    assert evaluate_symbol("X/USDT", _vol_frame(0.01), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0) is None
+
+
+def test_volatility_band_disabled_by_default():
+    cfg = ScanConfig(long_rsi_min=38.0)
+    assert cfg.min_atr_pct == 0.0 and cfg.max_atr_pct == 0.0
+    assert evaluate_symbol("X/USDT", _vol_frame(0.01), 200e6, 15.0, cfg,
+                           high_24h=125.0, low_24h=100.0) is not None
+
+
+def test_atr_in_as_row_and_serialisable():
+    import json
+    cfg = ScanConfig(long_rsi_min=38.0, stop_pct_for_ratio=1.0)
+    c = evaluate_symbol("X/USDT", _vol_frame(0.002), 200e6, 15.0, cfg,
+                        high_24h=125.0, low_24h=100.0)
+    row = c.as_row()
+    assert "atr_pct" in row and "stop_vs_atr" in row
+    json.dumps(row)

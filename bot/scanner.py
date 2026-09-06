@@ -56,6 +56,15 @@ class ScanConfig:
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_len: int = 14
+    atr_len: int = 14
+    # Volatility band as ATR% of price. A coin below the floor barely moves —
+    # the stop gets hit by noise before the move pays. Above the ceiling it
+    # moves too erratically for a fixed-ROI stop to survive. 0 disables either.
+    min_atr_pct: float = 0.0
+    max_atr_pct: float = 0.0
+    # The stop distance in PRICE % that the guardian will use, so the scanner
+    # can express it in ATRs. At 10x, a -10% ROI stop is a 1.0% price move.
+    stop_pct_for_ratio: float = 1.0
     # How many candles back to measure whether the EMA gap is narrowing.
     convergence_lookback: int = 3
     # Ignore a gap this small as "already crossed / too close to call".
@@ -85,6 +94,13 @@ class Candidate:
     # candidate list rather than only after a position is open.
     pct_above_24h_low: float | None = None
     pct_below_24h_high: float | None = None
+    # Average True Range as a % of price — how much this coin actually moves
+    # per candle. Used to judge whether a fixed stop distance is realistic.
+    atr_pct: float | None = None
+    # Stop distance expressed in ATRs: how many typical candle-ranges the stop
+    # sits away. Below ~1 the stop is inside normal noise and likely to be hit
+    # for reasons unrelated to the thesis.
+    stop_vs_atr: float | None = None
 
     @property
     def range_quality(self) -> str:
@@ -124,6 +140,9 @@ class Candidate:
                                   else round(float(self.pct_above_24h_low), 2)),
             "pct_below_24h_high": (None if self.pct_below_24h_high is None
                                    else round(float(self.pct_below_24h_high), 2)),
+            "atr_pct": None if self.atr_pct is None else round(float(self.atr_pct), 3),
+            "stop_vs_atr": (None if self.stop_vs_atr is None
+                            else round(float(self.stop_vs_atr), 2)),
             "note": str(self.note),
         }
 
@@ -134,6 +153,7 @@ def prepare(df: pd.DataFrame, cfg: ScanConfig) -> pd.DataFrame:
     df["ema_fast"] = ta.ema(df["close"], length=cfg.ema_fast)
     df["ema_slow"] = ta.ema(df["close"], length=cfg.ema_slow)
     df["rsi"] = ta.rsi(df["close"], length=cfg.rsi_len)
+    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg.atr_len)
     return df
 
 
@@ -224,6 +244,16 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     gap = ema_gap_pct(row)
     narrowing, gap_change = is_converging(df, cfg)
     close_px = float(row["close"])
+    atr_pct = None
+    if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
+        atr_pct = float(row["atr"]) / close_px * 100
+    # Volatility band. Too quiet and the stop is hit by noise before the move
+    # pays; too wild and a fixed-ROI stop cannot survive normal swings.
+    if atr_pct is not None:
+        if cfg.min_atr_pct and atr_pct < cfg.min_atr_pct:
+            return None
+        if cfg.max_atr_pct and atr_pct > cfg.max_atr_pct:
+            return None
     rpos = range_position_24h(close_px, high_24h, low_24h)
     above_low = below_high = None
     if high_24h and low_24h and float(high_24h) > float(low_24h):
@@ -241,6 +271,9 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
+            atr_pct=atr_pct,
+            stop_vs_atr=(None if not atr_pct else
+                         (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(f"RSI {rsi:.0f} (>={cfg.short_rsi_min:.0f}) overbought; EMA9 {gap:+.2f}% "
                   f"above EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
@@ -253,6 +286,9 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
+            atr_pct=atr_pct,
+            stop_vs_atr=(None if not atr_pct else
+                         (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(f"RSI {rsi:.0f} (in {cfg.long_rsi_min:.0f}-{cfg.long_rsi_max:.0f}); EMA9 {gap:+.2f}% below "
                   f"EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),

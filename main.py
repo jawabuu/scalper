@@ -72,6 +72,9 @@ if __name__ == "__main__":
             callback_roi=cfg.guard_callback_roi,
             trail_callback_pct=cfg.guard_trail_callback_pct,
             use_native_trail=cfg.guard_use_native_trail,
+            atr_stop_mult=cfg.atr_stop_mult,
+            atr_stop_min_roi=cfg.atr_stop_min_roi,
+            atr_stop_max_roi=cfg.atr_stop_max_roi,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,
@@ -95,6 +98,10 @@ if __name__ == "__main__":
                 default_margin_pct=cfg.entry_default_margin_pct,
                 default_callback_pct=cfg.entry_default_callback_pct,
                 assumed_leverage=cfg.entry_assumed_leverage,
+                atr_stop_mult=cfg.atr_stop_mult,
+                atr_stop_min_roi=cfg.atr_stop_min_roi,
+                atr_stop_max_roi=cfg.atr_stop_max_roi,
+                risk_pct=cfg.entry_risk_pct,
             )))
             log.warning(
                 f"Futures ENTRY enabled — max {cfg.entry_max_positions} position(s), "
@@ -119,6 +126,12 @@ if __name__ == "__main__":
             long_rsi_max=cfg.scan_long_rsi_max,
             volume_mode=cfg.scan_volume_mode,
             vol_percentile=cfg.scan_vol_percentile,
+            min_atr_pct=cfg.scan_min_atr_pct,
+            max_atr_pct=cfg.scan_max_atr_pct,
+            # Express the guardian's stop in ATRs: at L leverage a -R% ROI stop
+            # is an R/L % price move.
+            stop_pct_for_ratio=(cfg.guard_initial_stop_roi /
+                                max(cfg.entry_assumed_leverage, 1.0)),
         )
         runner = ScanRunner(
             scan_cfg,

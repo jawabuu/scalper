@@ -35,7 +35,7 @@ from .futures_guard import (
     FuturesPosition, GuardState, GuardConfig,
     roi_pct, price_for_roi, stop_side,
     adopt_state, is_protective_stop, evaluate,
-    callback_roi_at, trail_locks_in, is_armed,
+    callback_roi_at, trail_locks_in, is_armed, atr_stop_roi,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -210,6 +210,7 @@ class FuturesGuardian:
         # symbol -> where the 24h range came from, or why it is missing. Shown
         # in the snapshot so an "n/a" is diagnosable without server logs.
         self._range_source: dict[str, str] = {}
+        self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -346,6 +347,59 @@ class FuturesGuardian:
             self._range_source[symbol] = f"{type(e).__name__}: {e}"
             log.warning(f"{symbol}: 24h range fallback failed: {type(e).__name__}: {e}")
         return None, None
+
+    def atr_pct(self, symbol: str) -> float | None:
+        """
+        ATR as a % of price, from the same cached candle window used for the
+        24h range. Cached because the guardian polls every few seconds and this
+        needs a klines call.
+        """
+        now = time.time()
+        cached = self._atr_cache.get(symbol)
+        if cached and (now - cached[1]) < self.RANGE_CACHE_TTL_S:
+            return cached[0]
+        try:
+            raw = self.exchange.fetch_ohlcv(symbol, "15m", limit=96)
+            if not raw or len(raw) < 15:
+                return None
+            trs = []
+            prev_close = None
+            for _ts, _o, h, l, c, _v in raw:
+                if None in (h, l, c):
+                    continue
+                tr = h - l
+                if prev_close is not None:
+                    tr = max(tr, abs(h - prev_close), abs(l - prev_close))
+                trs.append(tr)
+                prev_close = c
+            if not trs or not prev_close:
+                return None
+            atr = sum(trs[-14:]) / min(len(trs), 14)
+            pct = atr / prev_close * 100
+            self._atr_cache[symbol] = (pct, now)
+            return pct
+        except Exception as e:
+            log.warning(f"{symbol}: ATR lookup failed: {type(e).__name__}: {e}")
+            return None
+
+    def effective_stop_roi(self, pos: FuturesPosition) -> float:
+        """
+        The initial stop distance to use for this position.
+
+        With atr_stop_mult set, the stop scales with the coin's own volatility
+        rather than being a constant — a fixed stop sits inside the noise on a
+        volatile coin and needlessly far away on a calm one.
+        """
+        if not self.cfg.atr_stop_mult:
+            return self.cfg.initial_stop_roi
+        a = self.atr_pct(pos.symbol)
+        roi = atr_stop_roi(a, pos.effective_leverage, self.cfg)
+        if roi is None:
+            return self.cfg.initial_stop_roi
+        if abs(roi - self.cfg.initial_stop_roi) > 0.5:
+            log.info(f"{pos.symbol}: ATR {a:.2f}% -> initial stop {roi:.0f}% ROI "
+                     f"(fixed default would be {self.cfg.initial_stop_roi:.0f}%)")
+        return roi
 
     def _ticker(self, symbol: str) -> dict | None:
         try:
@@ -503,7 +557,9 @@ class FuturesGuardian:
         prev_order_id = state.stop_order_id
         prev_stop_roi = state.stop_roi
         was_armed = state.armed
-        state, stop_price, reason = evaluate(pos, price, state, self.cfg)
+        state, stop_price, reason = evaluate(
+            pos, price, state, self.cfg,
+            initial_stop_override=self.effective_stop_roi(pos))
 
         # ── Armed phase: Binance owns the trail ──────────────────────────────
         # Once a native trailing stop is resting the exchange tracks the peak
@@ -515,7 +571,13 @@ class FuturesGuardian:
             return
 
         # ── Transition: arm the native trail, replacing the fixed stop ───────
-        if self.cfg.use_native_trail and state.armed and not was_armed:
+        # Arm whenever the position IS armed and no trail is resting yet — not
+        # only on the transition. A position opened by a trailing-stop ENTRY can
+        # be deep in profit the first time the guardian sees it, in which case
+        # it is born armed and the transition never fires. That left it falling
+        # through to the fixed stop, which the exchange rejects as "would
+        # trigger immediately", looping UNPROTECTED.
+        if self.cfg.use_native_trail and state.armed and not state.native_trail_id:
             trail_id = None
             try:
                 trail_id = self._place_native_trail(pos)
@@ -555,10 +617,36 @@ class FuturesGuardian:
                     # error: the position is unprotected until the operator acts.
                     # Deliberately not auto-closing — that is the operator's call.
                     cur = roi_pct(pos, price)
+                    # The fixed stop cannot be placed because the position has
+                    # already moved past it — which means it is IN PROFIT and
+                    # its gains are exactly what needs protecting. Fall back to
+                    # a trailing stop rather than leaving it naked.
+                    trail_id = None
+                    if self.cfg.use_native_trail and not state.native_trail_id:
+                        try:
+                            trail_id = self._place_native_trail(pos)
+                        except Exception as te:
+                            log.error(f"{pos.symbol}: trailing fallback failed: {te}")
+                    if trail_id:
+                        state.native_trail_id = trail_id
+                        state.stop_order_id = None
+                        state.armed = True
+                        state.unprotected_reason = None
+                        log.warning(
+                            f"{pos.symbol}: fixed stop rejected at {cur:+.1f}% ROI "
+                            f"— protected with a trailing stop instead."
+                        )
+                        self._record(pos.symbol, "trail_fallback",
+                                     f"fixed stop rejected at {cur:+.1f}% ROI; "
+                                     f"trailing stop placed")
+                        with self._lock:
+                            self._states[pos.symbol] = state
+                        return
+
                     state.unprotected_reason = (
                         f"already at {cur:+.1f}% ROI, past the "
                         f"{-self.cfg.initial_stop_roi:+.0f}% stop — exchange "
-                        f"rejected the stop (would trigger immediately)"
+                        f"rejected the stop, and the trailing fallback also failed"
                     )
                     log.error(
                         f"{pos.symbol}: UNPROTECTED — {state.unprotected_reason}. "
@@ -709,19 +797,48 @@ class FuturesGuardian:
         if realised is None and computed is not None:
             realised = computed
 
+        # When the exchange reports realised PnL it reflects the ACTUAL fill.
+        # The guardian polls, so a stop that triggered between cycles filled at
+        # a price it never observed — final_roi and exit_price computed from the
+        # last observed price then understate the move. Derive both from the
+        # realised figure instead, which is why a stopped-out trade could show
+        # -3% ROI while the money said -10%.
+        margin = meta.get("margin") or 0.0
+        leverage = meta.get("leverage") or 0.0
+        final_roi = _r2(meta.get("current_roi"))
+        exit_price = last
+        exit_from_exchange = False
+
+        if realised is not None and realised != computed and margin > 0:
+            final_roi = round(realised / margin * 100.0, 2)
+            if entry and leverage > 0:
+                move = (final_roi / 100.0) / leverage
+                exit_price = (entry * (1 + move) if side == "long"
+                              else entry * (1 - move))
+            exit_from_exchange = True
+            observed = _r2(meta.get("current_roi"))
+            if observed is not None and abs(final_roi - observed) > 1.0:
+                log.info(
+                    f"{symbol}: exit reconstructed from realised PnL — "
+                    f"{final_roi:+.2f}% ROI (last observed was {observed:+.2f}%, "
+                    f"the stop filled between polls)"
+                )
+
         rec = {
             "symbol": symbol,
             "side": meta.get("side"),
             "entry_price": entry,
-            "exit_price": last,
+            "exit_price": exit_price,
             "margin_usdt": meta.get("margin"),
             "leverage": meta.get("leverage"),
             "peak_roi": round(state.peak_roi, 2),
-            "final_roi": _r2(meta.get("current_roi")),
+            "final_roi": final_roi,
+            "observed_roi": _r2(meta.get("current_roi")),
+            "exit_from_exchange": exit_from_exchange,
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
             "armed": state.armed,
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
-            "exit_is_estimate": realised is None or realised == computed,
+            "exit_is_estimate": not exit_from_exchange,
             "opened_at": meta.get("opened_seen_at"),
             "closed_at": time.time(),
         }

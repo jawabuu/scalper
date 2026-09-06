@@ -46,6 +46,15 @@ class EntryLimits:
     # (seen on demo for symbols with no open position). Zero means "not
     # declared" and the entry is refused rather than sized on a guess.
     assumed_leverage: float = 0.0
+    # ── Volatility-scaled sizing ────────────────────────────────────────
+    # 0 disables (margin stays a flat % of wallet). When set, the stop sits
+    # atr_stop_mult x ATR away and the position is sized so the loss at that
+    # stop equals risk_pct of the wallet — so a volatile coin gets a wider stop
+    # and a SMALLER position, keeping the money at risk constant.
+    atr_stop_mult: float = 0.0
+    risk_pct: float = 1.0
+    atr_stop_min_roi: float = 4.0
+    atr_stop_max_roi: float = 30.0
 
 
 @dataclass
@@ -63,6 +72,8 @@ class EntryPlan:
     margin_pct: float
     projected_stop_price: float | None = None
     projected_stop_roi: float | None = None
+    projected_stop_loss_usdt: float | None = None
+    atr_pct: float | None = None
     leverage_source: str = ""      # "info.leverage" | "assumed" | ...
     token: str = ""
     created_at: float = field(default_factory=time.time)
@@ -84,6 +95,8 @@ class EntryPlan:
             "margin_pct": round(self.margin_pct, 2),
             "projected_stop_price": self.projected_stop_price,
             "projected_stop_roi": self.projected_stop_roi,
+            "projected_stop_loss_usdt": self.projected_stop_loss_usdt,
+            "atr_pct": self.atr_pct,
             "token": self.token,
             "expires_in_s": max(0, round(CONFIRM_TTL_S - (time.time() - self.created_at))),
         }
@@ -168,6 +181,28 @@ class EntryService:
         else:
             log.warning("Could not resolve a positive USDT wallet balance")
         return val
+
+    def _atr_pct(self, symbol: str) -> float | None:
+        """ATR as a % of price, for volatility-scaled sizing."""
+        try:
+            raw = self.guardian.exchange.fetch_ohlcv(symbol, "15m", limit=96)
+            if not raw or len(raw) < 15:
+                return None
+            trs, prev_close = [], None
+            for _ts, _o, h, l, c, _v in raw:
+                if None in (h, l, c):
+                    continue
+                tr = h - l
+                if prev_close is not None:
+                    tr = max(tr, abs(h - prev_close), abs(l - prev_close))
+                trs.append(tr)
+                prev_close = c
+            if not trs or not prev_close:
+                return None
+            return (sum(trs[-14:]) / min(len(trs), 14)) / prev_close * 100
+        except Exception as e:
+            log.warning(f"{symbol}: ATR lookup failed: {type(e).__name__}: {e}")
+            return None
 
     def _resolve_symbol(self, symbol: str) -> tuple[bool, str, str]:
         """
@@ -339,7 +374,30 @@ class EntryService:
                 "could not read this symbol's leverage from Binance — refusing "
                 "to size an entry. Set leverage for the symbol first."]}
 
-        margin, notional, qty_raw = compute_size(balance, margin_pct, leverage, price)
+        # Volatility-scaled sizing, when enabled: derive the stop from ATR and
+        # size the position so the loss at that stop is a fixed % of the wallet.
+        atr_pct = None
+        stop_roi_override = None
+        if getattr(self.limits, "atr_stop_mult", 0):
+            atr_pct = self._atr_pct(symbol)
+            if atr_pct:
+                raw_roi = self.limits.atr_stop_mult * atr_pct * leverage
+                stop_roi_override = max(self.limits.atr_stop_min_roi,
+                                        min(self.limits.atr_stop_max_roi, raw_roi))
+
+        if stop_roi_override:
+            stop_move_pct = stop_roi_override / leverage      # price % to the stop
+            risk_usdt = balance * (self.limits.risk_pct / 100.0)
+            notional = risk_usdt / (stop_move_pct / 100.0)
+            margin = notional / leverage
+            # Never exceed the wallet ceiling regardless of what ATR suggests.
+            cap = balance * (self.limits.max_margin_pct / 100.0)
+            if margin > cap:
+                margin = cap
+                notional = margin * leverage
+            qty_raw = notional / price
+        else:
+            margin, notional, qty_raw = compute_size(balance, margin_pct, leverage, price)
         qty = float(self.guardian.exchange.amount_to_precision(symbol, qty_raw))
         if qty <= 0:
             return {"ok": False, "errors": ["computed quantity rounds to zero — margin too small"]}
@@ -365,8 +423,12 @@ class EntryService:
         # the downside before confirming rather than after the fill.
         from .futures_guard import FuturesPosition, price_for_roi
         provisional = FuturesPosition(symbol, side, price, qty, int(leverage), margin)
-        stop_roi = -self.guardian.cfg.initial_stop_roi
+        # Use the SAME stop the guardian will place. With volatility scaling on,
+        # that is the ATR-derived level, not the fixed default — reporting the
+        # fixed one would understate or overstate the real downside.
+        stop_roi = -(stop_roi_override or self.guardian.cfg.initial_stop_roi)
         stop_price = price_for_roi(provisional, stop_roi)
+        risk_usdt_at_stop = margin * abs(stop_roi) / 100.0
 
         plan = EntryPlan(
             symbol=symbol, side=side, order_side=order_side_for(side),
@@ -376,6 +438,8 @@ class EntryService:
             wallet_balance=balance, margin_pct=margin_pct,
             projected_stop_price=float(self.guardian.exchange.price_to_precision(symbol, stop_price)),
             projected_stop_roi=stop_roi,
+            projected_stop_loss_usdt=round(risk_usdt_at_stop, 2),
+            atr_pct=(None if atr_pct is None else round(atr_pct, 3)),
             token=secrets.token_urlsafe(12),
         )
         self._pending[plan.token] = plan

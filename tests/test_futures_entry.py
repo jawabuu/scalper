@@ -474,3 +474,72 @@ def test_assumption_only_used_when_raw_endpoint_also_fails():
         default_callback_pct=0.1, assumed_leverage=10.0))
     lev, src = svc.symbol_leverage_detail("UNI/USDT:USDT")
     assert lev == pytest.approx(10.0) and src == "assumed"
+
+
+# ── Volatility-scaled stops and sizing ───────────────────────────────────────
+
+def _atr_ex(half_range, price=100.0, balance=107.0, lev="10"):
+    class Ex(_LevEx):
+        markets = {"X/USDT:USDT": {}}
+        def __init__(self):
+            super().__init__(lev_field=None, info_lev=lev)
+        def load_markets(self): return self.markets
+        def market_id(self, s): return "XUSDT"
+        def fetch_balance(self): return {"info": {"totalWalletBalance": str(balance)}}
+        def fetch_ticker(self, s): return {"last": price}
+        def amount_to_precision(self, s, a): return f"{float(a):.4f}"
+        def fetch_ohlcv(self, s, tf, limit=96):
+            return [[0, price, price * (1 + half_range), price * (1 - half_range),
+                     price, 10.0] for _ in range(limit)]
+    return Ex()
+
+
+def _atr_svc(ex, mult=1.5, risk_pct=1.0):
+    from bot.futures_entry import EntryService, EntryLimits
+    return EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0,
+        atr_stop_mult=mult, risk_pct=risk_pct))
+
+
+def test_volatile_coin_gets_wider_stop_and_smaller_position():
+    calm = _atr_svc(_atr_ex(0.00175)).preview(symbol="X/USDT:USDT", side="long")["plan"]
+    wild = _atr_svc(_atr_ex(0.01)).preview(symbol="X/USDT:USDT", side="long")["plan"]
+    assert abs(wild["projected_stop_roi"]) > abs(calm["projected_stop_roi"])
+    assert wild["margin_usdt"] < calm["margin_usdt"]
+
+
+def test_dollar_risk_is_constant_across_volatility():
+    """The point of ATR sizing: the money at risk does not change with the coin."""
+    plans = [_atr_svc(_atr_ex(h)).preview(symbol="X/USDT:USDT", side="long")["plan"]
+             for h in (0.00175, 0.0035, 0.01)]
+    losses = [p["projected_stop_loss_usdt"] for p in plans]
+    for l in losses:
+        assert l == pytest.approx(losses[0], rel=0.02)
+
+
+def test_atr_sizing_respects_the_margin_cap():
+    """A very calm coin would want a huge position — the wallet cap still binds."""
+    plan = _atr_svc(_atr_ex(0.00005)).preview(symbol="X/USDT:USDT", side="long")["plan"]
+    assert plan["margin_usdt"] <= 107.0 * 0.25 + 0.01
+
+
+def test_disabled_by_default_keeps_flat_margin():
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(_LevGuardian(_atr_ex(0.01)), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))   # atr_stop_mult = 0
+    plan = svc.preview(symbol="X/USDT:USDT", side="long")["plan"]
+    assert plan["margin_usdt"] == pytest.approx(10.7, rel=0.02)   # flat 10%
+
+
+def test_stop_roi_is_clamped():
+    """A freak ATR must not produce an absurd stop in either direction."""
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(_LevGuardian(_atr_ex(0.05)), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0,
+        atr_stop_mult=1.5, risk_pct=1.0,
+        atr_stop_min_roi=4.0, atr_stop_max_roi=30.0))
+    plan = svc.preview(symbol="X/USDT:USDT", side="long")["plan"]
+    assert 4.0 <= abs(plan["projected_stop_roi"]) <= 30.0
