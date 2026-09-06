@@ -341,6 +341,61 @@ class AutoTrader:
         self._record("toggle", "enabled" if on else "disabled")
         return self.snapshot()
 
+    # Entry rules are live-tunable; SAFETY limits are deliberately not.
+    # The daily loss stop, per-symbol cooldown and trade-rate cap exist to
+    # bound a bad run, and the moment you most want to relax them from a
+    # dashboard — right after a halt fires — is exactly when you should not.
+    # Those stay env-only so changing them is a conscious redeploy.
+    TUNABLE = {
+        "max_dist_to_extreme_pct": (float, 0.1, 50.0),
+        "required_strength_sweeps": (int, 1, 10),
+        "long_rsi_min": (float, 0.0, 100.0),
+        "short_rsi_min": (float, 0.0, 100.0),
+        "callback_ratio": (float, 0.05, 2.0),
+        "callback_atr_mult": (float, 0.0, 5.0),
+    }
+    SAFETY_ONLY = {"daily_loss_limit_pct", "symbol_cooldown_s",
+                   "max_trades_per_hour", "max_open_positions"}
+
+    def update_rules(self, payload: dict) -> tuple[dict, list[str]]:
+        """
+        Apply live edits to the entry rules. Returns (applied, errors).
+
+        Nothing is applied if any value is invalid, so a bad edit cannot leave
+        the rules half-changed while the bot is trading on them.
+        """
+        applied: dict = {}
+        errors: list[str] = []
+
+        for key, raw in (payload or {}).items():
+            if key in self.SAFETY_ONLY:
+                errors.append(
+                    f"{key} is a safety limit and can only be changed via the "
+                    f"environment, not from the dashboard")
+                continue
+            if key not in self.TUNABLE:
+                continue
+            typ, lo, hi = self.TUNABLE[key]
+            try:
+                val = typ(raw)
+            except (TypeError, ValueError):
+                errors.append(f"{key} must be a {typ.__name__}")
+                continue
+            if not (lo <= val <= hi):
+                errors.append(f"{key} must be between {lo} and {hi}")
+                continue
+            applied[key] = val
+
+        if errors:
+            return {}, errors
+
+        for key, val in applied.items():
+            setattr(self.cfg, key, val)
+        if applied:
+            _log.warning(f"Auto-trade rules updated: {applied}")
+            self._record("rules_updated", ", ".join(f"{k}={v}" for k, v in applied.items()))
+        return applied, []
+
     def reset_halt(self) -> dict:
         self.state.halted_reason = None
         self._record("reset", "halt cleared by operator")

@@ -191,6 +191,17 @@ def create_app(engine) -> FastAPI:
         """Toggle unattended trading, or clear a daily-loss halt."""
         if _auto is None:
             raise HTTPException(status_code=400, detail="Auto-trade not configured")
+        rules = payload.get("rules")
+        if rules:
+            applied, errors = _auto.update_rules(rules)
+            if errors:
+                raise HTTPException(status_code=400, detail="; ".join(errors))
+            log.warning(f"Auto-trade rules changed by {user['username']}: {applied}")
+            snap = _auto.snapshot()
+            snap["available"] = True
+            snap["applied"] = applied
+            return snap
+
         if payload.get("reset_halt"):
             log.warning(f"Auto-trade halt cleared by {user['username']}")
             snap = _auto.reset_halt()

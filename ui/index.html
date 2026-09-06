@@ -825,6 +825,20 @@
           <span class="scan-note" id="auto-meta"></span>
           <button class="btn-row-close" id="auto-reset" style="display:none" onclick="resetAutoHalt()">Clear halt</button>
         </div>
+        <div class="auto-bar" id="auto-rules" style="display:none">
+          <span class="scan-note">Entry rules</span>
+          <span class="pb-setting" style="border:none"><span class="k">within&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-dist" step="0.5" onchange="onAutoRule('max_dist_to_extreme_pct','ar-dist')"><span class="k">% of extreme</span></span>
+          <span class="pb-setting" style="border:none"><span class="k">sweeps&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-sweeps" step="1" onchange="onAutoRule('required_strength_sweeps','ar-sweeps')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">long RSI&gt;&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-lrsi" step="1" onchange="onAutoRule('long_rsi_min','ar-lrsi')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">short RSI&gt;&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-srsi" step="1" onchange="onAutoRule('short_rsi_min','ar-srsi')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">callback&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-ratio" step="0.05" onchange="onAutoRule('callback_ratio','ar-ratio')"><span class="k">x dist</span></span>
+          <span class="scan-note" id="auto-rule-msg"></span>
+        </div>
         <div id="scan-wrap"><div class="empty">Scanning&hellip;</div></div>
         <div class="scan-note" style="margin-top:10px">
           Indicators of <strong>potential</strong> only — the scanner is read-only and never trades. Review each before acting.
@@ -2323,6 +2337,44 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── Auto-trade toggle ────────────────────────────────────────────────────────
 // Unattended entries. Deliberately prominent and red when live: this is the one
 // control that opens leveraged positions with nobody watching.
+
+let _autoEditing = false;
+
+async function onAutoRule(key, elId) {
+  const el = document.getElementById(elId);
+  const v = parseFloat(el.value);
+  if (isNaN(v)) return;
+  _autoEditing = true;
+  try {
+    const r = await fetch(API + '/api/auto-trade', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules: { [key]: v } }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      setEl('auto-rule-msg', `<span style="color:var(--warn)">${e.detail || r.status}</span>`);
+    } else {
+      setEl('auto-rule-msg', 'saved');
+      setTimeout(() => setEl('auto-rule-msg', ''), 2000);
+    }
+  } catch (e) {
+    setEl('auto-rule-msg', `<span style="color:var(--warn)">${e.message}</span>`);
+  }
+  setTimeout(() => { _autoEditing = false; }, 1500);
+  refreshAuto();
+}
+
+function fillAutoRules(c) {
+  if (_autoEditing) return;   // don't clobber a value being typed
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+  set('ar-dist', c.max_dist_to_extreme_pct);
+  set('ar-sweeps', c.required_strength_sweeps);
+  set('ar-lrsi', c.long_rsi_min);
+  set('ar-srsi', c.short_rsi_min);
+  set('ar-ratio', c.callback_ratio);
+}
+
 async function refreshAuto() {
   const bar = document.getElementById('auto-bar');
   if (!bar) return;
@@ -2352,6 +2404,10 @@ async function refreshAuto() {
       + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${c.max_trades_per_hour} trades/h · `
       + `daily stop ${c.daily_loss_limit_pct}%`
       + (cool ? ` · ${cool} on cooldown` : ''));
+
+    const rules = document.getElementById('auto-rules');
+    if (rules) rules.style.display = '';
+    fillAutoRules(c);
 
     const rst = document.getElementById('auto-reset');
     if (rst) rst.style.display = a.halted_reason ? '' : 'none';

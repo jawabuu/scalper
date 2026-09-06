@@ -192,3 +192,67 @@ def test_new_utc_day_resets_the_halt(cfg):
 
 def test_disabled_by_default():
     assert AutoTradeConfig().enabled is False
+
+
+# ── Live rule editing ────────────────────────────────────────────────────────
+
+def _trader():
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.cfg = AutoTradeConfig()
+    a._log = []
+    return a
+
+
+def test_entry_rules_are_live_editable():
+    a = _trader()
+    applied, errors = a.update_rules({
+        "short_rsi_min": 75, "long_rsi_min": 52,
+        "required_strength_sweeps": 3, "max_dist_to_extreme_pct": 2.0,
+        "callback_ratio": 0.4,
+    })
+    assert not errors
+    assert a.cfg.short_rsi_min == 75
+    assert a.cfg.required_strength_sweeps == 3
+    assert a.cfg.callback_ratio == pytest.approx(0.4)
+
+
+def test_safety_limits_cannot_be_changed_from_the_dashboard():
+    """
+    The daily stop, cooldown and rate cap bound a bad run. The moment you most
+    want to relax them from a dashboard is right after a halt fires — so they
+    stay env-only.
+    """
+    a = _trader()
+    for key in ("daily_loss_limit_pct", "symbol_cooldown_s",
+                "max_trades_per_hour", "max_open_positions"):
+        applied, errors = a.update_rules({key: 999})
+        assert applied == {}
+        assert any("safety limit" in e for e in errors)
+    assert a.cfg.daily_loss_limit_pct == 5.0
+
+
+def test_out_of_range_values_are_rejected():
+    a = _trader()
+    for bad in ({"short_rsi_min": 150}, {"required_strength_sweeps": 0},
+                {"callback_ratio": 5.0}, {"max_dist_to_extreme_pct": 0.0}):
+        applied, errors = a.update_rules(bad)
+        assert applied == {} and errors
+
+
+def test_a_bad_value_leaves_all_rules_unchanged():
+    """Nothing is applied if any value is invalid — no half-changed ruleset."""
+    a = _trader()
+    before = (a.cfg.short_rsi_min, a.cfg.long_rsi_min)
+    applied, errors = a.update_rules({"short_rsi_min": 75, "long_rsi_min": 999})
+    assert applied == {} and errors
+    assert (a.cfg.short_rsi_min, a.cfg.long_rsi_min) == before
+
+
+def test_edited_rules_take_effect_on_the_next_decision():
+    a = _trader()
+    row = {"symbol": "X/USDT:USDT", "direction": "short", "rsi": 76.0,
+           "pct_below_24h_high": -2.0, "strength": "strengthening"}
+    assert not evaluate_candidate(row, streak=2, cfg=a.cfg).enter    # 76 < 78
+    a.update_rules({"short_rsi_min": 75})
+    assert evaluate_candidate(row, streak=2, cfg=a.cfg, atr_pct=0.5).enter
