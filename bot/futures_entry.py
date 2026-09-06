@@ -348,6 +348,18 @@ class EntryService:
         self._recent_entries[symbol] = time.time()
 
     def _recently_placed(self, symbol: str) -> bool:
+        """
+        Does this bot believe it has an entry order resting on this symbol?
+
+        Tied to the tracked order, NOT to a timer. A timer-based guard expired
+        after 15 minutes and let a second order onto TRIA and VELVET while the
+        first was still resting on the exchange. The block is now released by
+        the reaper (which cancels the order) or by the order filling — the same
+        events that actually make the symbol free again.
+        """
+        if self._placed_orders.get(symbol):
+            return True
+        # Fallback for the brief moment between placing and recording.
         ts = self._recent_entries.get(symbol)
         if ts is None:
             return False
@@ -401,6 +413,10 @@ class EntryService:
 
             for row in list(rows):
                 oid = str(row.get("id"))
+                if row.get("dry_run"):
+                    if now - float(row.get("placed_at") or now) >= ttl_s:
+                        self.forget_order(symbol, oid)  # placeholder expired
+                    continue
                 if oid not in resting:
                     self.forget_order(symbol, oid)      # filled or already gone
                     continue
@@ -436,6 +452,7 @@ class EntryService:
             log.warning(f"{symbol}: could not read open orders: {e}")
             return []
         pending = []
+        total = len(orders or [])
         for o in orders or []:
             info = o.get("info") or {}
             reduce_only = o.get("reduceOnly")
@@ -443,6 +460,12 @@ class EntryService:
                 reduce_only = str(info.get("reduceOnly", "")).lower() == "true"
             if not reduce_only:
                 pending.append(o)
+        if total and not pending:
+            log.debug(f"{symbol}: {total} open order(s), none of them entries")
+        elif not total:
+            # Worth noticing: conditional orders not appearing here would make
+            # this guard blind, which is how duplicates got through before.
+            log.debug(f"{symbol}: exchange reports no open orders")
         return pending
 
     def _account_state(self, symbol: str) -> tuple[int, bool]:
@@ -637,7 +660,14 @@ class EntryService:
             # Record it in dry run too: dry run exists to mirror live
             # behaviour, and without this the duplicate guard would be
             # exercised only on the live path.
+            # Record a placeholder so the duplicate guard and the reaper behave
+            # identically in dry run. Without it, dry run falls back to the
+            # timer-based guard and would allow the very duplicates this is
+            # meant to prevent.
             self._note_pending(plan.symbol)
+            self._placed_orders.setdefault(plan.symbol, []).append(
+                {"id": f"dry-{int(time.time()*1000)}", "placed_at": time.time(),
+                 "qty": plan.qty, "side": plan.order_side, "dry_run": True})
             return {"ok": True, "dry_run": True, "plan": plan.as_dict(),
                     "message": "Dry run — no order sent."}
 

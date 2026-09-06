@@ -940,3 +940,52 @@ def test_unset_uses_the_default():
 
 def test_inline_comment_is_stripped():
     assert _ttl_with("600   # 10 minutes") == pytest.approx(600.0)
+
+
+# ── The duplicate guard must not expire on a timer ───────────────────────────
+
+def test_guard_holds_beyond_the_old_timer_window():
+    """
+    TRIA and VELVET each received a second entry order ~35 minutes after the
+    first, matching the old 15-minute guard expiry. The block must last as long
+    as the bot believes an order is resting, not for a fixed period.
+    """
+    import time
+    ex = _PendingEx()
+    ex.fetch_open_orders = lambda s: []          # exchange query blind
+    svc = _pending_svc(ex)
+    first = svc.preview(symbol="BR/USDT:USDT", side="long")
+    svc.execute(first["plan"]["token"])
+
+    # advance well past the old TTL
+    svc._recent_entries["BR/USDT:USDT"] -= svc.RECENT_ENTRY_TTL_S + 1
+    assert svc.preview(symbol="BR/USDT:USDT", side="long")["ok"] is False
+
+
+def test_reaping_the_order_releases_the_symbol():
+    """The reaper, not a clock, is what makes a symbol tradable again."""
+    import time
+    ex = _ReapEx()
+    ex.fetch_open_orders = lambda s: []
+    svc = _reap_svc(ex)
+    first = svc.preview(symbol="BR/USDT:USDT", side="long")
+    svc.execute(first["plan"]["token"])
+    assert svc.preview(symbol="BR/USDT:USDT", side="long")["ok"] is False
+
+    for rows in svc._placed_orders.values():
+        for r in rows:
+            r["placed_at"] = time.time() - 3600
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    svc.clear_pending("BR/USDT:USDT")
+    assert svc.preview(symbol="BR/USDT:USDT", side="long")["ok"] is True
+
+
+def test_a_filled_order_also_releases_the_symbol():
+    import time
+    ex = _ReapEx()
+    ex.fetch_open_orders = lambda s: []          # order gone => filled
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
+                                            "placed_at": time.time() - 30}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert svc.bot_placed_orders("BR/USDT:USDT") == []
