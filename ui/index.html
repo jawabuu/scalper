@@ -1949,9 +1949,16 @@ function rangeCell(c) {
     return '<span class="rq rq-unknown">n/a</span>';
   }
   const pct = Math.round(c.range_pos_24h * 100);
-  // 0% = at the 24h low, 100% = at the 24h high
-  return `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`
-       + ` <span class="rq rq-${c.range_quality}">${pct}% ${c.range_quality}</span>`;
+  const bar = `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`;
+  // Lead with the extreme that matters for the direction: a short cares how far
+  // it is BELOW the 24h high, a long how far it is ABOVE the 24h low.
+  const up = c.pct_above_24h_low, dn = c.pct_below_24h_high;
+  const f = v => (v === null || v === undefined) ? '?' : `${v >= 0 ? '+' : ''}${v}%`;
+  const dist = (up === null || up === undefined) && (dn === null || dn === undefined)
+    ? `${pct}%`
+    : (c.direction === 'short' ? `${f(dn)} off high · ${f(up)} to low`
+                               : `${f(up)} off low · ${f(dn)} to high`);
+  return `${bar} <span class="rq rq-${c.range_quality}">${dist}</span>`;
 }
 
 function renderScan(data) {

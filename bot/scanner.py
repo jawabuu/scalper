@@ -81,6 +81,10 @@ class Candidate:
     # A SHORT near the high has resistance overhead and further to fall; a LONG
     # near the low has support beneath it. None when high/low are unavailable.
     range_pos_24h: float | None = None
+    # Distances to each 24h extreme, so the decision can be made from the
+    # candidate list rather than only after a position is open.
+    pct_above_24h_low: float | None = None
+    pct_below_24h_high: float | None = None
 
     @property
     def range_quality(self) -> str:
@@ -110,6 +114,16 @@ class Candidate:
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
+            # 24h range context. These were dropped when as_row() was rewritten
+            # for numpy casting, which is why the range column read "n/a" — the
+            # API simply never sent them.
+            "range_pos_24h": (None if self.range_pos_24h is None
+                              else round(float(self.range_pos_24h), 3)),
+            "range_quality": str(self.range_quality),
+            "pct_above_24h_low": (None if self.pct_above_24h_low is None
+                                  else round(float(self.pct_above_24h_low), 2)),
+            "pct_below_24h_high": (None if self.pct_below_24h_high is None
+                                   else round(float(self.pct_below_24h_high), 2)),
             "note": str(self.note),
         }
 
@@ -209,7 +223,12 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     rsi = float(row["rsi"])
     gap = ema_gap_pct(row)
     narrowing, gap_change = is_converging(df, cfg)
-    rpos = range_position_24h(float(row["close"]), high_24h, low_24h)
+    close_px = float(row["close"])
+    rpos = range_position_24h(close_px, high_24h, low_24h)
+    above_low = below_high = None
+    if high_24h and low_24h and float(high_24h) > float(low_24h):
+        above_low = (close_px - float(low_24h)) / float(low_24h) * 100
+        below_high = (close_px - float(high_24h)) / float(high_24h) * 100
 
     # NOTE: convergence is INFORMATIONAL (fade-early mode). RSI leads the screen;
     # the EMA gap and its narrowing are reported so the operator can judge how
@@ -221,6 +240,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
+            pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             note=(f"RSI {rsi:.0f} (>={cfg.short_rsi_min:.0f}) overbought; EMA9 {gap:+.2f}% "
                   f"above EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
@@ -232,6 +252,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
+            pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             note=(f"RSI {rsi:.0f} (in {cfg.long_rsi_min:.0f}-{cfg.long_rsi_max:.0f}); EMA9 {gap:+.2f}% below "
                   f"EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),

@@ -525,3 +525,55 @@ def test_percentile_setting_controls_strictness():
     _, loose = _vol_runner("percentile", 1, percentile=20.0)
     _, tight = _vol_runner("percentile", 1, percentile=80.0)
     assert len(loose) >= len(tight)
+
+
+# ── as_row must carry the 24h range (regression) ─────────────────────────────
+
+def test_as_row_includes_range_fields():
+    """
+    as_row() was rewritten for numpy casting and silently dropped the range
+    fields, so the API never sent them and the column read "n/a" regardless of
+    the fallbacks upstream.
+    """
+    c = Candidate("X/USDT", "short", 75, 0.5, 0, 15, 200e6, "",
+                  range_pos_24h=0.86, pct_above_24h_low=21.4,
+                  pct_below_24h_high=-2.88)
+    row = c.as_row()
+    for key in ("range_pos_24h", "range_quality",
+                "pct_above_24h_low", "pct_below_24h_high"):
+        assert key in row, f"as_row() dropped {key}"
+    assert row["range_pos_24h"] == pytest.approx(0.86)
+    assert row["range_quality"] == "strong"
+
+
+def test_as_row_is_json_serialisable():
+    import json
+    c = Candidate("X/USDT", "long", 55, -0.5, 0, -15, 200e6, "",
+                  range_pos_24h=0.06, pct_above_24h_low=1.2,
+                  pct_below_24h_high=-30.0)
+    json.dumps(c.as_row())
+
+
+def _mild_stall():
+    """Uptrend with only a slight stall, so RSI stays in the short band."""
+    closes = [100 + i * 0.5 for i in range(48)]
+    last = closes[-1]
+    closes += [last - i * 0.35 for i in range(1, 7)]
+    return _frame(closes)
+
+
+def test_distances_computed_from_extremes():
+    df = _mild_stall()
+    c = evaluate_symbol("AAA/USDT", df, 200e6, 15.0, ScanConfig(long_rsi_min=38.0),
+                        high_24h=125.0, low_24h=100.0)
+    assert c is not None
+    assert c.pct_above_24h_low > 0      # above the 24h low
+    assert c.pct_below_24h_high < 0     # below the 24h high
+
+
+def test_distances_absent_without_extremes():
+    df = _mild_stall()
+    c = evaluate_symbol("AAA/USDT", df, 200e6, 15.0, ScanConfig(long_rsi_min=38.0))
+    if c is not None:
+        assert c.pct_above_24h_low is None
+        assert c.pct_below_24h_high is None

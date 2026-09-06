@@ -657,14 +657,57 @@ class FuturesGuardian:
         """
         entry = meta.get("entry_price")
         last = meta.get("current_price")
+        side = meta.get("side")
+        notional = meta.get("notional") or 0.0
+
+        # Compute the result from our own record first. This is direction-aware
+        # and cannot come out sign-inverted: a short profits when price falls.
+        computed = None
+        if entry and last and side and notional:
+            move = ((last - entry) / entry) if side == "long" else ((entry - last) / entry)
+            computed = move * notional
+
+        # Binance's realizedPnl is more accurate (it includes fees), so prefer
+        # it — but only when it AGREES IN SIGN with the direction-aware figure.
+        # A short that closed in profit was being reported as a loss because the
+        # exchange value was taken on trust.
         realised = None
         try:
-            trades = self.exchange.fetch_my_trades(symbol, limit=10)
-            pnl = sum(float((t.get("info") or {}).get("realizedPnl") or 0) for t in trades)
+            # Scope the fills to THIS position's lifetime. fetch_my_trades
+            # returns the last N fills for the symbol regardless of which
+            # position they belonged to, so summing them blindly gave every
+            # trade on a symbol the SAME realised figure — two UAI trades with
+            # +24% and -5% ROI both reported an identical -1.4133.
+            opened_at = meta.get("opened_seen_at")
+            since_ms = int(opened_at * 1000) if opened_at else None
+            trades = self.exchange.fetch_my_trades(symbol, since=since_ms, limit=50)
+
+            scoped = []
+            for t in trades:
+                ts = t.get("timestamp")
+                if since_ms and ts and ts < since_ms:
+                    continue        # belongs to an earlier position
+                scoped.append(t)
+
+            pnl = sum(float((t.get("info") or {}).get("realizedPnl") or 0)
+                      for t in scoped)
+            if scoped and not pnl:
+                log.debug(f"{symbol}: {len(scoped)} fill(s) in scope, all zero realisedPnl")
             if pnl:
-                realised = pnl
+                if computed is None or (pnl >= 0) == (computed >= 0):
+                    realised = pnl
+                else:
+                    log.warning(
+                        f"{symbol}: exchange realisedPnl {pnl:+.4f} disagrees in sign "
+                        f"with the {side} result computed from entry/exit "
+                        f"({computed:+.4f}) — using the computed value."
+                    )
+                    realised = computed
         except Exception as e:
             log.debug(f"realised PnL lookup failed for {symbol}: {e}")
+
+        if realised is None and computed is not None:
+            realised = computed
 
         rec = {
             "symbol": symbol,
@@ -678,7 +721,7 @@ class FuturesGuardian:
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
             "armed": state.armed,
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
-            "exit_is_estimate": realised is None,
+            "exit_is_estimate": realised is None or realised == computed,
             "opened_at": meta.get("opened_seen_at"),
             "closed_at": time.time(),
         }

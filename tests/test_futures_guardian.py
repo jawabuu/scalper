@@ -834,3 +834,81 @@ def test_range_method_is_defined_once():
     import inspect, bot.futures_guardian as m
     src = inspect.getsource(m)
     assert src.count("def _range_24h(") == 1
+
+
+# ── Realised PnL must be per-position, not per-symbol ────────────────────────
+
+def _record_trade(guardian, symbol, side, entry, exit_, notional, opened_at,
+                  peak=1.0):
+    from bot.futures_guard import GuardState
+    guardian._closed_trades = []
+    meta = {"entry_price": entry, "current_price": exit_, "side": side,
+            "notional": notional, "margin": notional / 10,
+            "opened_seen_at": opened_at}
+    guardian._record_closed_trade(symbol, GuardState(peak_roi=peak), meta)
+    return guardian._closed_trades[0]
+
+
+def test_realised_pnl_is_scoped_to_the_position_lifetime():
+    """
+    fetch_my_trades returns the last N fills for a SYMBOL regardless of which
+    position they belonged to. Summing them blindly gave every trade on that
+    symbol the same figure — two UAI trades at +24% and -5% ROI both reported
+    an identical -1.4133.
+    """
+    import time
+    now = time.time()
+    older_fill = {"timestamp": int((now - 900) * 1000),
+                  "info": {"realizedPnl": "1.4133"}}     # previous position
+    this_fill = {"timestamp": int((now - 100) * 1000),
+                 "info": {"realizedPnl": "-0.3010"}}     # this position
+
+    class Ex(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return [older_fill, this_fill]               # API does not filter
+
+    g = _guardian(Ex())
+    rec = _record_trade(g, "UAI/USDT:USDT", "short", 0.6702, 0.6738,
+                        notional=59.35, opened_at=now - 200)
+    # Only the fill from THIS position counts.
+    assert rec["realised_pnl_usdt"] == pytest.approx(-0.3010, abs=1e-4)
+
+
+def test_two_trades_on_one_symbol_get_different_realised_values():
+    import time
+    now = time.time()
+
+    class Ex(FakeExchange):
+        fills = []
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return self.fills
+
+    g = _guardian(Ex())
+    g.exchange.fills = [{"timestamp": int((now - 900) * 1000),
+                         "info": {"realizedPnl": "1.4133"}}]
+    first = _record_trade(g, "UAI/USDT:USDT", "short", 0.6845, 0.6682,
+                          notional=59.35, opened_at=now - 1000)
+
+    g.exchange.fills = g.exchange.fills + [{"timestamp": int((now - 100) * 1000),
+                                            "info": {"realizedPnl": "-0.3010"}}]
+    second = _record_trade(g, "UAI/USDT:USDT", "short", 0.6702, 0.6738,
+                           notional=59.35, opened_at=now - 200)
+
+    assert first["realised_pnl_usdt"] != second["realised_pnl_usdt"]
+    assert first["realised_pnl_usdt"] > 0      # the winner
+    assert second["realised_pnl_usdt"] < 0     # the loser
+
+
+def test_short_win_reports_positive_realised():
+    """A short that closed lower must not report a loss."""
+    import time
+    now = time.time()
+
+    class Ex(FakeExchange):
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return []          # no exchange figure -> computed fallback
+
+    g = _guardian(Ex())
+    rec = _record_trade(g, "UAI/USDT:USDT", "short", 0.6845, 0.6682,
+                        notional=59.35, opened_at=now - 100)
+    assert rec["realised_pnl_usdt"] == pytest.approx(1.4133, abs=1e-3)
