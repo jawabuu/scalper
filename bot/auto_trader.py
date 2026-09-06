@@ -376,7 +376,13 @@ class AutoTrader:
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
                 "max_open_positions": self.cfg.max_open_positions,
                 "max_trades_per_hour": self.cfg.max_trades_per_hour,
+                "callback_atr_mult": self.cfg.callback_atr_mult,
+                "cooldown_override_rsi_delta": self.cfg.cooldown_override_rsi_delta,
+                "max_reentries_per_symbol": self.cfg.max_reentries_per_symbol,
+                "symbol_cooldown_s": self.cfg.symbol_cooldown_s,
             },
+            # Re-entries used today, so the cap is visible before it bites.
+            "reentries_today": dict(self.state.reentries_today),
         }
 
     def set_enabled(self, on: bool) -> dict:

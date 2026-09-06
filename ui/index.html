@@ -837,6 +837,10 @@
             <input type="number" class="pb-input" id="ar-srsi" step="1" onchange="onAutoRule('short_rsi_min','ar-srsi')"></span>
           <span class="pb-setting" style="border:none"><span class="k">callback&nbsp;</span>
             <input type="number" class="pb-input" id="ar-ratio" step="0.05" onchange="onAutoRule('callback_ratio','ar-ratio')"><span class="k">x dist</span></span>
+          <span class="pb-setting" style="border:none"><span class="k">ATR floor&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
+          <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
           <span class="scan-note" id="auto-rule-msg"></span>
         </div>
         <div id="scan-wrap"><div class="empty">Scanning&hellip;</div></div>
@@ -2373,6 +2377,8 @@ function fillAutoRules(c) {
   set('ar-lrsi', c.long_rsi_min);
   set('ar-srsi', c.short_rsi_min);
   set('ar-ratio', c.callback_ratio);
+  set('ar-atr', c.callback_atr_mult);
+  set('ar-cd', c.cooldown_override_rsi_delta);
 }
 
 async function refreshAuto() {
@@ -2402,7 +2408,9 @@ async function refreshAuto() {
       + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `
       + `short RSI>${c.short_rsi_min} · callback ${c.callback_ratio}x distance · `
       + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${c.max_trades_per_hour} trades/h · `
-      + `daily stop ${c.daily_loss_limit_pct}%`
+      + `daily stop ${c.daily_loss_limit_pct}% · `
+      + `re-entry cap ${c.max_reentries_per_symbol}/symbol/day`
+      + `${Object.keys(a.reentries_today || {}).length ? ' · used: ' + Object.entries(a.reentries_today).map(([k,v]) => k.split('/')[0] + ':' + v).join(', ') : ''}`
       + (cool ? ` · ${cool} on cooldown` : ''));
 
     const rules = document.getElementById('auto-rules');
