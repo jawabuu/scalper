@@ -1216,3 +1216,127 @@ def test_normal_close_is_a_single_order():
     g.run_cycle(); fake.created.clear()
     g.close_position("DOGE/USDT:USDT")
     assert len([o for o in fake.created if o["type"] == "MARKET"]) == 1
+
+
+# ── Sized stop must survive a delayed fill ───────────────────────────────────
+
+def test_guardian_honours_the_stop_the_position_was_sized_for():
+    """
+    A trailing-stop ENTRY rests before filling, so the guardian first sees the
+    position minutes after the entry sized it. Recomputing ATR then gave a very
+    different stop — a position sized for 12.9% received 24.4%, nearly 2x the
+    intended risk. Sharing the ATR cache only helps inside its TTL.
+    """
+    from bot.futures_guard import GuardConfig, FuturesPosition
+
+    class VolatileEx(FakeExchange):
+        def fetch_ohlcv(self, symbol, timeframe, limit=96):
+            p = 0.2628
+            return [[0, p, p * 1.0065, p * 0.9935, p, 10.0] for _ in range(limit)]
+
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=8, callback_roi=5,
+                      atr_stop_mult=1.5, atr_stop_min_roi=4, atr_stop_max_roi=30)
+    g = _guardian(VolatileEx(), cfg=cfg)
+    pos = FuturesPosition("FORM/USDT:USDT", "long", 0.262799, 13570, 20, 178.29)
+
+    recomputed = g.effective_stop_roi(pos)
+    g.note_entry_context("FORM/USDT:USDT", {"sized_stop_roi": 12.9})
+    honoured = g.effective_stop_roi(pos)
+
+    assert recomputed != pytest.approx(12.9, abs=0.5)
+    assert honoured == pytest.approx(12.9)
+
+
+def test_risk_matches_budget_across_a_delayed_fill():
+    from bot.futures_guard import GuardConfig, FuturesPosition
+
+    class VolatileEx(FakeExchange):
+        def fetch_ohlcv(self, symbol, timeframe, limit=96):
+            p = 0.2628
+            return [[0, p, p * 1.0065, p * 0.9935, p, 10.0] for _ in range(limit)]
+
+    cfg = GuardConfig(atr_stop_mult=1.5, atr_stop_min_roi=4, atr_stop_max_roi=30)
+    g = _guardian(VolatileEx(), cfg=cfg)
+    wallet, margin = 4341.0, 337.58
+    g.note_entry_context("FORM/USDT:USDT", {"sized_stop_roi": 12.86})
+    pos = FuturesPosition("FORM/USDT:USDT", "long", 0.262799, 13570, 20, margin)
+    loss = margin * g.effective_stop_roi(pos) / 100
+    assert loss == pytest.approx(wallet * 0.01, rel=0.03)
+
+
+def test_falls_back_to_atr_when_no_sized_stop_recorded():
+    """Manually opened positions have no sized stop — ATR still applies."""
+    from bot.futures_guard import GuardConfig, FuturesPosition
+    cfg = GuardConfig(atr_stop_mult=1.5, atr_stop_min_roi=4, atr_stop_max_roi=30)
+    g = _guardian(FakeExchange(), cfg=cfg)
+    pos = FuturesPosition("X/USDT:USDT", "short", 100.0, 10.0, 10, 100.0)
+    assert 4.0 <= g.effective_stop_roi(pos) <= 30.0
+
+
+def test_sized_stop_ignored_when_atr_sizing_is_off():
+    from bot.futures_guard import GuardConfig, FuturesPosition
+    cfg = GuardConfig(initial_stop_roi=10, atr_stop_mult=0.0)
+    g = _guardian(FakeExchange(), cfg=cfg)
+    g.note_entry_context("X/USDT:USDT", {"sized_stop_roi": 25.0})
+    pos = FuturesPosition("X/USDT:USDT", "short", 100.0, 10.0, 10, 100.0)
+    assert g.effective_stop_roi(pos) == pytest.approx(10.0)
+
+
+# ── ATR must be measured on the traded timeframe ─────────────────────────────
+
+def test_atr_uses_the_configured_timeframe():
+    """
+    ATR was computed on 15m candles while the strategy trades 3m. A 15m ATR is
+    ~2.2x a 3m ATR, so stops were more than twice as wide as the traded chart
+    justified — FORM got a 24.4% ROI stop where 10.9% was right.
+    """
+    seen = {}
+
+    class TFEx(FakeExchange):
+        def fetch_ohlcv(self, symbol, timeframe, limit=120):
+            seen.setdefault("atr_tf", timeframe)
+            p = 100.0
+            return [[0, p, p * 1.002, p * 0.998, p, 10.0] for _ in range(limit)]
+
+    g = _guardian(TFEx())
+    g.atr_timeframe = "3m"
+    g.atr_pct("X/USDT:USDT")
+    assert seen["atr_tf"] == "3m"
+
+
+def test_atr_timeframe_change_scales_the_stop():
+    class TFEx(FakeExchange):
+        def fetch_ohlcv(self, symbol, timeframe, limit=120):
+            # wider candles on the longer timeframe, as in a real market
+            half = 0.002 if timeframe == "3m" else 0.0045
+            p = 100.0
+            return [[0, p, p * (1 + half), p * (1 - half), p, 10.0] for _ in range(limit)]
+
+    from bot.futures_guard import GuardConfig, FuturesPosition
+    cfg = GuardConfig(atr_stop_mult=1.5, atr_stop_min_roi=1, atr_stop_max_roi=99)
+    pos = FuturesPosition("X/USDT:USDT", "long", 100.0, 10.0, 20, 100.0)
+
+    g3 = _guardian(TFEx(), cfg=cfg); g3.atr_timeframe = "3m"
+    g15 = _guardian(TFEx(), cfg=cfg); g15.atr_timeframe = "15m"
+    assert g15.effective_stop_roi(pos) > g3.effective_stop_roi(pos)
+
+
+def test_trail_log_reports_the_rate_actually_sent():
+    """
+    The log printed the raw config value, so a correctly-placed 0.25% trail was
+    reported as 1.0% — which made a working trail look misconfigured.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(arm_roi=8, callback_roi=5,
+                      trail_callback_pct=1.0, trail_callback_roi=5.0)
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0, lev=20, margin=100.0)],
+                        price=100.0)
+    g = _guardian(fake, cfg=cfg)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)
+    g.run_cycle()
+    armed = [a for a in g._actions if a["action"] == "trail_armed"]
+    assert armed, "trail should have armed"
+    assert "1.0%" not in armed[0]["detail"]
+    assert "ROI" in armed[0]["detail"]

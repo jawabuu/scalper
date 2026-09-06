@@ -74,6 +74,9 @@ class EntryPlan:
     projected_stop_roi: float | None = None
     projected_stop_loss_usdt: float | None = None
     atr_pct: float | None = None
+    # The stop this position was SIZED for. The guardian honours it rather than
+    # recomputing ATR at fill time, which can differ after a resting entry.
+    sized_stop_roi: float | None = None
     leverage_source: str = ""      # "info.leverage" | "assumed" | ...
     token: str = ""
     created_at: float = field(default_factory=time.time)
@@ -96,6 +99,7 @@ class EntryPlan:
             "projected_stop_price": self.projected_stop_price,
             "projected_stop_roi": self.projected_stop_roi,
             "projected_stop_loss_usdt": self.projected_stop_loss_usdt,
+            "sized_stop_roi": self.sized_stop_roi,
             "atr_pct": self.atr_pct,
             "token": self.token,
             "expires_in_s": max(0, round(CONFIRM_TTL_S - (time.time() - self.created_at))),
@@ -457,6 +461,7 @@ class EntryService:
             projected_stop_price=float(self.guardian.exchange.price_to_precision(symbol, stop_price)),
             projected_stop_roi=stop_roi,
             projected_stop_loss_usdt=round(risk_usdt_at_stop, 2),
+            sized_stop_roi=(abs(stop_roi) if stop_roi_override else None),
             atr_pct=(None if atr_pct is None else round(atr_pct, 3)),
             token=secrets.token_urlsafe(12),
         )
@@ -523,6 +528,18 @@ class EntryService:
             f"qty={plan.qty} callback={plan.callback_pct}% "
             f"margin={plan.margin_usdt:.2f} notional={plan.notional_usdt:.2f}"
         )
+        # Record the stop this order was sized for. The fill may be minutes
+        # away, by which time a recomputed ATR would disagree.
+        try:
+            if plan.sized_stop_roi:
+                self.guardian.note_entry_context(plan.symbol, {
+                    "sized_stop_roi": plan.sized_stop_roi,
+                    "sized_margin_usdt": plan.margin_usdt,
+                    "sized_at": time.time(),
+                })
+        except Exception as e:
+            log.debug(f"could not record sized stop: {e}")
+
         return {"ok": True, "dry_run": False, "order_id": oid,
                 "plan": plan.as_dict(),
                 "message": ("Trailing-stop entry placed. It fills only once price "

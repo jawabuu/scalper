@@ -256,6 +256,10 @@ class BotConfig:
     # When set, stop = mult x ATR and the position is sized so the loss at that
     # stop equals ENTRY_RISK_PCT of the wallet — constant risk across coins.
     atr_stop_mult: float = field(default_factory=lambda: _env_float("ATR_STOP_MULT", 0.0))
+    # Candle timeframe for ATR. Defaults to the scanner timeframe so stops are
+    # sized on the chart being traded — a 15m ATR is ~2.2x a 3m ATR.
+    atr_timeframe: str = field(default_factory=lambda: _env(
+        "ATR_TIMEFRAME", _env("SCANNER_TIMEFRAME", "3m")))
     atr_stop_min_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MIN_ROI", 4.0))
     atr_stop_max_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MAX_ROI", 30.0))
     entry_risk_pct: float = field(default_factory=lambda: _env_float("ENTRY_RISK_PCT", 1.0))

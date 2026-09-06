@@ -145,10 +145,12 @@ def _r3(v):
 
 class FuturesGuardian:
     def __init__(self, guard_cfg: GuardConfig, *, api_key: str, api_secret: str,
-                 demo: bool = True, dry_run: bool = True,
+                 demo: bool = True, dry_run: bool = True, atr_timeframe: str = "3m",
                  poll_interval: float = 5.0, socks_proxy: str | None = None):
         self.cfg = guard_cfg.validate()
         self.demo = demo
+        # ATR must be measured on the timeframe actually traded.
+        self.atr_timeframe = atr_timeframe or "3m"
         self.dry_run = dry_run
         self.poll_interval = poll_interval
 
@@ -307,6 +309,10 @@ class FuturesGuardian:
         return price
 
     RANGE_CACHE_TTL_S = 300.0
+    # Candle timeframe for ATR. Must match the timeframe the strategy trades:
+    # a 15m ATR is ~2.2x a 3m ATR, so stops sized off 15m were more than twice
+    # as wide as the 3m chart justified (FORM: 24.4% ROI where 10.9% was right).
+    atr_timeframe: str = "3m"
 
     def _range_24h(self, symbol: str, ticker: dict | None) -> tuple[float | None, float | None]:
         """
@@ -362,7 +368,7 @@ class FuturesGuardian:
         if cached and (now - cached[1]) < self.RANGE_CACHE_TTL_S:
             return cached[0]
         try:
-            raw = self.exchange.fetch_ohlcv(symbol, "15m", limit=96)
+            raw = self.exchange.fetch_ohlcv(symbol, self.atr_timeframe, limit=120)
             if not raw or len(raw) < 15:
                 return None
             trs = []
@@ -439,6 +445,21 @@ class FuturesGuardian:
         """
         if not self.cfg.atr_stop_mult:
             return self.cfg.initial_stop_roi
+
+        # Prefer the stop the position was actually SIZED for.
+        #
+        # A trailing-stop entry rests before it fills, so the guardian first
+        # sees the position minutes after the entry sized it. Recomputing ATR
+        # then can give a very different answer — a position sized for a 12.9%
+        # stop received a 24.4% one, nearly 2x the intended risk. Sharing the
+        # ATR cache only helps inside its TTL; the sized stop must be carried
+        # with the position instead.
+        with self._lock:
+            sized = (self._pos_meta.get(pos.symbol, {})
+                     .get("entry_context") or {}).get("sized_stop_roi")
+        if sized:
+            return float(sized)
+
         a = self.atr_pct(pos.symbol)
         roi = atr_stop_roi(a, pos.effective_leverage, self.cfg)
         if roi is None:
@@ -700,9 +721,13 @@ class FuturesGuardian:
                     self._cancel_stop(pos, prev_order_id)
                 state.native_trail_id = trail_id
                 state.stop_order_id = None
+                # Report the callbackRate actually sent, not the raw config
+                # value — printing trail_callback_pct made a correctly-placed
+                # 0.25% trail look like a 1.0% one.
                 self._record(pos.symbol, "trail_armed",
                              f"native trailing stop, callback "
-                             f"{self.cfg.trail_callback_pct}% price")
+                             f"{trail_callback_price_pct(pos.effective_leverage, self.cfg):.2f}% price "
+                             f"({callback_roi_at(pos.effective_leverage, self.cfg):.0f}% ROI)")
                 with self._lock:
                     self._states[pos.symbol] = state
                 return
