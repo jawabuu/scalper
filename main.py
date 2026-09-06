@@ -71,7 +71,7 @@ if __name__ == "__main__":
         guardian = FuturesGuardian(
             gcfg,
             api_key=cfg.api_key, api_secret=cfg.api_secret,
-            testnet=cfg.guardian_testnet,
+            demo=cfg.guardian_demo,
             dry_run=cfg.guardian_dry_run,
             poll_interval=cfg.guardian_poll_interval,
             socks_proxy=cfg.socks_proxy or None,

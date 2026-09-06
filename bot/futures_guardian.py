@@ -40,12 +40,20 @@ from .futures_guard import (
 log = logging.getLogger("futures_guardian")
 
 
+def _r2(v):
+    return None if v is None else round(float(v), 2)
+
+
+def _r3(v):
+    return None if v is None else round(float(v), 3)
+
+
 class FuturesGuardian:
     def __init__(self, guard_cfg: GuardConfig, *, api_key: str, api_secret: str,
-                 testnet: bool = True, dry_run: bool = True,
+                 demo: bool = True, dry_run: bool = True,
                  poll_interval: float = 5.0, socks_proxy: str | None = None):
         self.cfg = guard_cfg.validate()
-        self.testnet = testnet
+        self.demo = demo
         self.dry_run = dry_run
         self.poll_interval = poll_interval
 
@@ -58,19 +66,34 @@ class FuturesGuardian:
         if socks_proxy:
             params["proxies"] = {"http": socks_proxy, "https": socks_proxy}
         self.exchange = ccxt.binanceusdm(params)
-        if testnet:
-            self.exchange.set_sandbox_mode(True)
+        if demo:
+            # ccxt removed sandbox/testnet support for binanceusdm; Binance now
+            # offers "demo trading", which routes to demo-fapi.binance.com with
+            # separate demo credentials. enable_demo_trading() swaps the API
+            # URLs. Note ccxt refuses demo mode if sandbox mode is also on, so
+            # the two must never both be set.
+            try:
+                self.exchange.enable_demo_trading(True)
+                log.info("Futures DEMO trading enabled (demo-fapi.binance.com)")
+            except AttributeError:
+                # Older ccxt without demo support — fall back to the legacy call.
+                log.warning("ccxt has no enable_demo_trading(); falling back to "
+                            "set_sandbox_mode(). Upgrade ccxt if this fails.")
+                self.exchange.set_sandbox_mode(True)
 
         # symbol -> GuardState
         self._states: dict[str, GuardState] = {}
         self._lock = threading.RLock()
         self._last_cycle_ts: float = 0.0
         self._last_error: str | None = None
+        self._wallet_balance_cached: float = 0.0
         self._actions: list[dict] = []   # recent actions, for the dashboard
+        self._pos_meta: dict[str, dict] = {}   # symbol -> sizing snapshot
+        self._closed_trades: list[dict] = []   # futures trade history
 
         mode = "DRY RUN (no orders sent)" if dry_run else "LIVE (places real orders)"
         log.warning(
-            f"Futures guardian starting — testnet={testnet} — {mode} | "
+            f"Futures guardian starting — {'DEMO' if demo else 'LIVE ACCOUNT'} — {mode} | "
             f"stop {-self.cfg.initial_stop_roi:+.0f}% ROI, arm +{self.cfg.arm_roi:.0f}% ROI, "
             f"callback {self.cfg.callback_roi:.0f}% ROI"
         )
@@ -144,11 +167,16 @@ class FuturesGuardian:
             return []
 
     def mark_price(self, pos: FuturesPosition) -> float | None:
+        t = self._ticker(pos.symbol)
+        if not t:
+            return None
+        return float(t.get("last") or t.get("close") or 0) or None
+
+    def _ticker(self, symbol: str) -> dict | None:
         try:
-            t = self.exchange.fetch_ticker(pos.symbol)
-            return float(t.get("last") or t.get("close") or 0) or None
+            return self.exchange.fetch_ticker(symbol)
         except Exception as e:
-            log.warning(f"ticker failed for {pos.symbol}: {e}")
+            log.warning(f"ticker failed for {symbol}: {e}")
             return None
 
     # ── writing (the only two methods that mutate the account) ──────────────
@@ -210,6 +238,35 @@ class FuturesGuardian:
         price = self.mark_price(pos)
         if price is None:
             return
+        t = self._ticker(pos.symbol) or {}
+        hi, lo = t.get("high"), t.get("low")
+        current_roi = roi_pct(pos, price)
+        range_pos = None
+        dist_low = dist_high = None
+        try:
+            if hi and lo and float(hi) > float(lo):
+                hi_f, lo_f = float(hi), float(lo)
+                range_pos = (price - lo_f) / (hi_f - lo_f)
+                # How far price has travelled from each extreme, as a %.
+                dist_low = (price - lo_f) / lo_f * 100
+                dist_high = (price - hi_f) / hi_f * 100
+        except (TypeError, ValueError):
+            pass
+
+        with self._lock:
+            self._pos_meta[pos.symbol] = {
+                "margin": pos.margin, "notional": pos.notional,
+                "leverage": pos.effective_leverage, "side": pos.side,
+                "entry_price": pos.entry_price, "current_price": price,
+                "current_roi": current_roi,
+                "high_24h": float(hi) if hi else None,
+                "low_24h": float(lo) if lo else None,
+                "range_pos_24h": range_pos,
+                "pct_above_24h_low": dist_low,
+                "pct_below_24h_high": dist_high,
+                "opened_seen_at": self._pos_meta.get(pos.symbol, {}).get(
+                    "opened_seen_at", time.time()),
+            }
 
         with self._lock:
             state = self._states.get(pos.symbol)
@@ -260,16 +317,37 @@ class FuturesGuardian:
             log.warning(self._last_error)
             return
 
+        try:
+            b = self.exchange.fetch_balance()
+            u = b.get("USDT") or {}
+            info = b.get("info") or {}
+            self._wallet_balance_cached = float(
+                u.get("total") or info.get("totalWalletBalance") or 0.0)
+        except Exception:
+            pass
+
         live_symbols = {p.symbol for p in positions}
 
         # Forget state for positions that have closed (stopped out or closed by
         # the operator) so a future position on the same symbol starts fresh.
         with self._lock:
-            for sym in list(self._states):
-                if sym not in live_symbols:
-                    log.info(f"{sym}: position gone — clearing guard state")
-                    self._record(sym, "closed", "position no longer open")
-                    del self._states[sym]
+            gone = [(sym, self._states[sym], self._pos_meta.get(sym, {}))
+                    for sym in list(self._states) if sym not in live_symbols]
+            for sym, st, meta in gone:
+                self._record_closed_trade(sym, st, meta)
+                log.info(f"{sym}: position gone — clearing guard state")
+                self._record(sym, "closed", "position no longer open")
+                del self._states[sym]
+                self._pos_meta.pop(sym, None)
+
+        # Cancel any protective stop left resting after the position closed.
+        # An orphaned reduce-only stop is not harmless: if a NEW position is
+        # later opened on the same symbol, that stale order can trigger against
+        # it at a level chosen for the old trade. Done outside the state lock
+        # because it makes network calls.
+        for sym, st, _meta in gone:
+            if st.stop_order_id:
+                self._cancel_orphan_stop(sym, st.stop_order_id)
 
         for pos in positions:
             try:
@@ -279,6 +357,122 @@ class FuturesGuardian:
 
         self._last_cycle_ts = time.time()
         self._last_error = None
+
+    def _record_closed_trade(self, symbol: str, state: GuardState, meta: dict):
+        """
+        Log a position that has disappeared from the account.
+
+        The exit price is the LAST OBSERVED mark price, not the actual fill —
+        the guardian polls, so a stop that triggered between cycles filled at a
+        price it never saw. Binance's realised PnL is fetched where available
+        and preferred; otherwise the figures here are an approximation and are
+        labelled as such.
+        """
+        entry = meta.get("entry_price")
+        last = meta.get("current_price")
+        realised = None
+        try:
+            trades = self.exchange.fetch_my_trades(symbol, limit=10)
+            pnl = sum(float((t.get("info") or {}).get("realizedPnl") or 0) for t in trades)
+            if pnl:
+                realised = pnl
+        except Exception as e:
+            log.debug(f"realised PnL lookup failed for {symbol}: {e}")
+
+        rec = {
+            "symbol": symbol,
+            "side": meta.get("side"),
+            "entry_price": entry,
+            "exit_price": last,
+            "margin_usdt": meta.get("margin"),
+            "leverage": meta.get("leverage"),
+            "peak_roi": round(state.peak_roi, 2),
+            "final_roi": _r2(meta.get("current_roi")),
+            "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
+            "armed": state.armed,
+            "realised_pnl_usdt": None if realised is None else round(realised, 4),
+            "exit_is_estimate": realised is None,
+            "opened_at": meta.get("opened_seen_at"),
+            "closed_at": time.time(),
+        }
+        with self._lock:
+            self._closed_trades.append(rec)
+            self._closed_trades = self._closed_trades[-100:]
+        log.info(
+            f"CLOSED {symbol} {rec['side']} peak={rec['peak_roi']:+.1f}% ROI "
+            f"final={rec['final_roi']}% realised="
+            f"{'n/a' if realised is None else f'{realised:+.4f}'}"
+        )
+
+    def close_position(self, symbol: str) -> dict:
+        """
+        Close an open position at market with a REDUCE-ONLY order.
+
+        Reduce-only means this can only ever shrink or flatten the position; it
+        cannot open or reverse one, whatever size is passed. The resting
+        protective stop is cancelled afterwards, not before, so the position is
+        never left unprotected while the close is in flight.
+        """
+        positions = {p.symbol: p for p in self.fetch_positions()}
+        pos = positions.get(symbol)
+        if pos is None:
+            return {"ok": False, "error": f"no open position on {symbol}"}
+
+        side = stop_side(pos)          # the side that closes this position
+        qty = float(self.exchange.amount_to_precision(symbol, pos.qty))
+
+        if self.dry_run:
+            log.info(f"[DRY RUN] would close {symbol}: {side} MARKET reduceOnly {qty}")
+            self._record(symbol, "close_dry_run", f"{side} MARKET {qty}")
+            return {"ok": True, "dry_run": True, "symbol": symbol,
+                    "side": side, "qty": qty, "message": "Dry run — no order sent."}
+
+        try:
+            order = self.exchange.create_order(
+                symbol=symbol, type="MARKET", side=side, amount=qty,
+                price=None, params={"reduceOnly": True},
+            )
+        except Exception as e:
+            log.error(f"close failed for {symbol}: {e}")
+            self._record(symbol, "close_failed", str(e))
+            return {"ok": False, "error": str(e)}
+
+        oid = str(order.get("id") or order.get("orderId") or "")
+        log.warning(f"CLOSED {symbol} by operator: {side} MARKET reduceOnly qty={qty} id={oid}")
+        self._record(symbol, "closed_by_operator", f"{side} MARKET {qty} id={oid}")
+
+        # Remove the now-redundant protective stop.
+        with self._lock:
+            st = self._states.get(symbol)
+        if st and st.stop_order_id:
+            self._cancel_stop(pos, st.stop_order_id)
+
+        return {"ok": True, "dry_run": False, "symbol": symbol,
+                "side": side, "qty": qty, "order_id": oid}
+
+    def _cancel_orphan_stop(self, symbol: str, order_id: str):
+        """
+        Cancel a stop left behind by a closed position.
+
+        The order has usually already triggered (that is why the position
+        closed), so a "not found / already filled" error is the normal case and
+        is logged quietly rather than treated as a failure.
+        """
+        if self.dry_run:
+            log.info(f"[DRY RUN] would cancel orphaned stop {order_id} on {symbol}")
+            return
+        try:
+            self.exchange.cancel_order(order_id, symbol)
+            log.info(f"Cancelled orphaned stop {order_id} on {symbol} "
+                     f"(position already closed)")
+            self._record(symbol, "orphan_stop_cancelled", f"id={order_id}")
+        except Exception as e:
+            # Expected when the stop is what closed the position.
+            log.debug(f"orphaned stop {order_id} on {symbol} not cancellable: {e}")
+
+    def closed_trades(self) -> list[dict]:
+        with self._lock:
+            return list(reversed(self._closed_trades))
 
     def run_forever(self):
         while True:
@@ -304,6 +498,18 @@ class FuturesGuardian:
                     "armed": s.armed,
                     "stop_roi": None if s.stop_roi is None else round(s.stop_roi, 2),
                     "stop_order_id": s.stop_order_id,
+                    # Sizing, so a surprising position size is visible rather
+                    # than something to reconstruct from the exchange UI.
+                    "margin_usdt": round(self._pos_meta.get(sym, {}).get("margin", 0.0), 2),
+                    "notional_usdt": round(self._pos_meta.get(sym, {}).get("notional", 0.0), 2),
+                    "leverage": round(self._pos_meta.get(sym, {}).get("leverage", 0.0), 1),
+                    "side": self._pos_meta.get(sym, {}).get("side"),
+                    "current_roi": _r2(self._pos_meta.get(sym, {}).get("current_roi")),
+                    "entry_price": self._pos_meta.get(sym, {}).get("entry_price"),
+                    "current_price": self._pos_meta.get(sym, {}).get("current_price"),
+                    "range_pos_24h": _r3(self._pos_meta.get(sym, {}).get("range_pos_24h")),
+                    "pct_above_24h_low": _r2(self._pos_meta.get(sym, {}).get("pct_above_24h_low")),
+                    "pct_below_24h_high": _r2(self._pos_meta.get(sym, {}).get("pct_below_24h_high")),
                 }
                 for sym, s in self._states.items()
             }
@@ -311,11 +517,12 @@ class FuturesGuardian:
         return {
             "enabled": True,
             "dry_run": self.dry_run,
-            "testnet": self.testnet,
+            "demo": self.demo,
             "states": states,
             "recent_actions": actions,
             "last_cycle_ago_s": (time.time() - self._last_cycle_ts) if self._last_cycle_ts else None,
             "error": self._last_error,
+            "wallet_balance": self._wallet_balance_cached,
             "config": {
                 "initial_stop_roi": self.cfg.initial_stop_roi,
                 "arm_roi": self.cfg.arm_roi,

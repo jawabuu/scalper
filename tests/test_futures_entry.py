@@ -241,3 +241,74 @@ def test_long_entry_buys():
     token = svc.preview("DOGE/USDT:USDT", "long")["plan"]["token"]
     svc.execute(token)
     assert fake.created[0]["side"] == "buy"
+
+
+# ── Regression: leverage misread as 1 mis-sized the entry ────────────────────
+
+class _LevEx:
+    """Fake exchange reproducing the observed UNI case."""
+    def __init__(self, lev_field=1, info_lev="10", step_int=True):
+        self.lev_field, self.info_lev, self.step_int = lev_field, info_lev, step_int
+        self.created = []
+    def fetch_balance(self):
+        return {"USDT": {"total": 107.09}, "info": {"totalWalletBalance": "107.09"}}
+    def fetch_ticker(self, s): return {"last": 7.055}
+    def price_to_precision(self, s, p): return f"{float(p):.4f}"
+    def amount_to_precision(self, s, a):
+        return str(int(float(a))) if self.step_int else f"{float(a):.3f}"
+    def create_order(self, **kw):
+        self.created.append(kw); return {"id": "E1"}
+    def fetch_positions(self, syms=None):
+        return [{"symbol": (syms or ["X"])[0], "leverage": self.lev_field,
+                 "info": {"leverage": self.info_lev}}]
+
+
+class _LevGuardian:
+    dry_run = True
+    def __init__(self, ex):
+        from bot.futures_guard import GuardConfig
+        self.exchange = ex
+        self.cfg = GuardConfig(initial_stop_roi=10.0, arm_roi=15.0, callback_roi=10.0)
+    def fetch_positions(self): return []
+
+
+def _lev_svc(ex, max_positions=3):
+    from bot.futures_entry import EntryService, EntryLimits
+    return EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=max_positions, max_margin_pct=25,
+        default_margin_pct=10, default_callback_pct=0.1))
+
+
+def test_prefers_raw_info_leverage_over_parsed_field():
+    """
+    ccxt reported leverage=1 on an isolated 10x position, which sized the entry
+    at a tenth of the intended notional (then floored to the minimum lot,
+    producing 1 UNI / 0.70 USDT margin instead of ~15 UNI / ~10.6 USDT).
+    """
+    svc = _lev_svc(_LevEx(lev_field=1, info_lev="10"))
+    plan = svc.preview(symbol="UNI/USDT:USDT", side="long")["plan"]
+    assert plan["leverage"] == pytest.approx(10.0)
+    assert plan["qty"] == pytest.approx(15.0)
+    assert plan["margin_usdt"] == pytest.approx(10.58, abs=0.05)
+    assert plan["notional_usdt"] == pytest.approx(105.8, abs=0.5)
+
+
+def test_unresolvable_leverage_refuses_rather_than_assuming_1x():
+    """Silently defaulting to 1x mis-sizes the order — must refuse instead."""
+    svc = _lev_svc(_LevEx(lev_field=None, info_lev=None))
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("leverage" in e for e in res["errors"])
+
+
+def test_reports_post_rounding_size_and_warns_on_big_shrink():
+    """Plan must report what will ACTUALLY open, not the pre-rounding request."""
+    # Price high enough that an integer lot step shaves a lot off.
+    ex = _LevEx(lev_field=1, info_lev="10")
+    ex.fetch_ticker = lambda s: {"last": 40.0}     # 26.7 -> 26 lots
+    svc = _lev_svc(ex)
+    res = svc.preview(symbol="X/USDT:USDT", side="long")
+    plan = res["plan"]
+    assert plan["qty"] == float(int(plan["qty"]))                  # integer lots
+    assert plan["notional_usdt"] == pytest.approx(plan["qty"] * 40.0, rel=1e-6)
+    assert plan["margin_usdt"] == pytest.approx(plan["notional_usdt"] / 10.0, rel=1e-6)

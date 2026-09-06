@@ -20,7 +20,7 @@ import pandas as pd
 
 from .scanner import (
     ScanConfig, Candidate, ScanTracker, Delta,
-    evaluate_symbol, rank_with_deltas,
+    evaluate_symbol, rank_with_deltas, balance_directions,
 )
 
 log = logging.getLogger("scan_runner")
@@ -76,9 +76,34 @@ class ScanRunner:
         out.sort(key=lambda r: abs(r[2]), reverse=True)
         return out[: self.max_symbols]
 
+    def _candles_for_24h(self) -> int:
+        """
+        How many candles of this timeframe span 24h.
+
+        The 24h high/low fallback is only truthful if the fetched window
+        actually covers 24 hours — 120 candles is just 6h on a 3m chart, which
+        would present a 6-hour range as if it were the daily one.
+        """
+        tf = (self.timeframe or "5m").lower().strip()
+        try:
+            if tf.endswith("m"):
+                mins = int(tf[:-1])
+            elif tf.endswith("h"):
+                mins = int(tf[:-1]) * 60
+            elif tf.endswith("d"):
+                mins = int(tf[:-1]) * 1440
+            else:
+                mins = 5
+        except ValueError:
+            mins = 5
+        needed = int(24 * 60 / max(mins, 1)) + 2
+        # Enough for the indicators regardless, and within Binance's limit.
+        return max(120, min(needed, 1000))
+
     def _ohlcv(self, symbol: str) -> pd.DataFrame | None:
         try:
-            raw = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=120)
+            raw = self.exchange.fetch_ohlcv(symbol, self.timeframe,
+                                            limit=self._candles_for_24h())
         except Exception as e:
             log.debug(f"OHLCV failed for {symbol}: {e}")
             return None
@@ -109,18 +134,27 @@ class ScanRunner:
             if df is None:
                 continue
             try:
-                c = evaluate_symbol(
-                    sym, df, qv, pct, self.cfg,
-                    high_24h=float(hi) if hi else None,
-                    low_24h=float(lo) if lo else None,
-                )
+                # Some ticker payloads omit high/low; derive them from the
+                # candles instead. The fetch window is sized to cover 24h
+                # (see _candles_for_24h), so this is a true daily range rather
+                # than whatever happened to be in a short buffer.
+                h = float(hi) if hi else None
+                l = float(lo) if lo else None
+                if h is None or l is None:
+                    try:
+                        h = h if h is not None else float(df["high"].max())
+                        l = l if l is not None else float(df["low"].min())
+                    except Exception:
+                        pass
+                c = evaluate_symbol(sym, df, qv, pct, self.cfg,
+                                    high_24h=h, low_24h=l)
             except Exception as e:
                 log.debug(f"evaluate failed for {sym}: {e}")
                 continue
             if c is not None:
                 candidates.append(c)
 
-        pairs = rank_with_deltas(self.tracker.annotate(candidates))
+        pairs = balance_directions(rank_with_deltas(self.tracker.annotate(candidates)))
         self.tracker.commit(candidates)
 
         with self._lock:

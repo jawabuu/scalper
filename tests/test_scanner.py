@@ -379,3 +379,65 @@ def test_long_max_applied_in_evaluate():
     got = evaluate_symbol("BBB/USDT", df, 200e6, -15.0, c)
     if got is not None:
         assert c.long_rsi_min <= got.rsi <= c.long_rsi_max
+
+
+# ── Direction balancing (keep both sides visible) ────────────────────────────
+
+from bot.scanner import balance_directions
+
+
+def _pair(sym, direction):
+    return (Candidate(sym, direction, 70, 0.5, 0, 10, 200e6, ""), Delta(is_new=True))
+
+
+def test_balance_caps_dominant_direction():
+    pairs = [_pair(f"S{i}", "short") for i in range(9)] + [_pair(f"L{i}", "long") for i in range(2)]
+    out = balance_directions(pairs, max_share=0.70)
+    shorts = [p for p in out if p[0].direction == "short"]
+    longs = [p for p in out if p[0].direction == "long"]
+    assert len(shorts) <= 7          # capped at 70% of 11
+    assert len(longs) == 2           # minority kept in full
+
+
+def test_balance_keeps_all_when_one_direction_absent():
+    pairs = [_pair(f"S{i}", "short") for i in range(6)]
+    assert len(balance_directions(pairs)) == 6
+
+
+def test_balance_preserves_ranking_order():
+    pairs = [_pair("S1", "short"), _pair("L1", "long"), _pair("S2", "short")]
+    out = balance_directions(pairs)
+    assert [c.symbol for c, _ in out] == ["S1", "L1", "S2"]
+
+
+def test_balance_handles_empty():
+    assert balance_directions([]) == []
+
+
+# ── OHLCV window must actually span 24h for the range fallback ───────────────
+
+def test_candle_window_covers_24h():
+    """
+    The 24h high/low fallback is only honest if the fetched window covers 24h.
+    120 candles is 6h on a 3m chart — that would label a 6-hour range as daily.
+    """
+    from bot.scan_runner import ScanRunner
+    from bot.scanner import ScanConfig
+    for tf, mins in [("3m", 3), ("5m", 5), ("15m", 15)]:
+        r = ScanRunner(ScanConfig(), timeframe=tf, max_symbols=1, interval=60)
+        hours = r._candles_for_24h() * mins / 60
+        assert hours >= 24, f"{tf} only spans {hours:.1f}h"
+
+
+def test_candle_window_respects_exchange_limit():
+    from bot.scan_runner import ScanRunner
+    from bot.scanner import ScanConfig
+    r = ScanRunner(ScanConfig(), timeframe="1m", max_symbols=1, interval=60)
+    assert r._candles_for_24h() <= 1000       # Binance kline limit headroom
+
+
+def test_candle_window_has_a_floor_for_indicators():
+    from bot.scan_runner import ScanRunner
+    from bot.scanner import ScanConfig
+    r = ScanRunner(ScanConfig(), timeframe="1h", max_symbols=1, interval=60)
+    assert r._candles_for_24h() >= 120        # enough for EMA21 / RSI14

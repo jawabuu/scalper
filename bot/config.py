@@ -192,7 +192,11 @@ class BotConfig:
     # switched off deliberately before it sends a single real order.
     guardian_enabled: bool = field(default_factory=lambda: _env_bool("GUARDIAN_ENABLED", False))
     guardian_dry_run: bool = field(default_factory=lambda: _env_bool("GUARDIAN_DRY_RUN", True))
-    guardian_testnet: bool = field(default_factory=lambda: _env_bool("GUARDIAN_TESTNET", True))
+    # Binance retired futures testnet in favour of "demo trading" (separate
+    # credentials, routes to demo-fapi.binance.com, mirrors live market data).
+    # GUARDIAN_DEMO is the current name; GUARDIAN_TESTNET is still honoured.
+    guardian_demo: bool = field(default_factory=lambda: _env_bool(
+        "GUARDIAN_DEMO", _env_bool("GUARDIAN_TESTNET", True)))
     guardian_poll_interval: float = field(default_factory=lambda: _env_float("GUARDIAN_POLL_INTERVAL", 5.0))
     # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))

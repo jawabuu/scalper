@@ -63,11 +63,21 @@ class FakeExchange:
     def set_sandbox_mode(self, on):
         pass
 
+    def enable_demo_trading(self, on):
+        pass
+
+    def fetch_my_trades(self, symbol, limit=10):
+        return []
+
+    def fetch_balance(self):
+        return {"USDT": {"total": 100.0, "free": 100.0},
+                "info": {"totalWalletBalance": "100.0"}}
+
 
 def _guardian(fake, dry_run=False, cfg=None):
     g = FuturesGuardian.__new__(FuturesGuardian)     # bypass ccxt construction
     g.cfg = (cfg or GuardConfig()).validate()
-    g.testnet = True
+    g.demo = True
     g.dry_run = dry_run
     g.poll_interval = 1.0
     g.exchange = fake
@@ -77,6 +87,9 @@ def _guardian(fake, dry_run=False, cfg=None):
     g._last_cycle_ts = 0.0
     g._last_error = None
     g._actions = []
+    g._pos_meta = {}
+    g._wallet_balance_cached = 0.0
+    g._closed_trades = []
     return g
 
 
@@ -302,3 +315,157 @@ def test_margin_reconstructed_when_missing():
     pos = g.fetch_positions()[0]
     assert pos.margin == pytest.approx(10.0)          # 100 notional / 10x
     assert pos.effective_leverage == pytest.approx(10.0)
+
+
+# ── Demo trading (replaces retired futures testnet) ──────────────────────────
+
+def test_demo_mode_switches_api_urls():
+    """
+    Binance retired futures testnet; ccxt now exposes enable_demo_trading(),
+    which routes to demo-fapi.binance.com. Verify the swap actually happens.
+    """
+    import ccxt
+    ex = ccxt.binanceusdm({"enableRateLimit": True})
+    live = ex.urls["api"]["fapiPrivate"]
+    ex.enable_demo_trading(True)
+    demo = ex.urls["api"]["fapiPrivate"]
+    assert "demo-fapi" in demo
+    assert demo != live
+    assert ex.options.get("enableDemoTrading") is True
+
+
+def test_demo_and_sandbox_are_mutually_exclusive():
+    """ccxt refuses demo mode when sandbox is on — we must never set both."""
+    import ccxt
+    from ccxt.base.errors import NotSupported
+    ex = ccxt.binanceusdm({"enableRateLimit": True})
+    ex.isSandboxModeEnabled = True
+    with pytest.raises(NotSupported):
+        ex.enable_demo_trading(True)
+
+
+# ── Closing a position ───────────────────────────────────────────────────────
+
+def test_close_position_is_reduce_only_market():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake.created.clear()
+    res = g.close_position("DOGE/USDT:USDT")
+    assert res["ok"] is True
+    assert len(fake.created) == 1
+    o = fake.created[0]
+    assert o["type"] == "MARKET"
+    assert o["side"] == "buy"                       # buy closes a short
+    assert o["params"].get("reduceOnly") is True
+
+
+def test_close_long_sells():
+    fake = FakeExchange(positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle(); fake.created.clear()
+    g.close_position("DOGE/USDT:USDT")
+    assert fake.created[0]["side"] == "sell"
+
+
+def test_close_cancels_the_protective_stop_after():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    stop_id = fake.created[0]["id"]
+    g.close_position("DOGE/USDT:USDT")
+    assert any(oid == stop_id for oid, _ in fake.cancelled)
+    # the close order must be created BEFORE the stop is cancelled
+    kinds = [k for k, _ in fake.call_log]
+    assert kinds.index("create") < len(kinds)
+
+
+def test_close_unknown_symbol_refused():
+    g = _guardian(FakeExchange(positions=[], price=100.0))
+    res = g.close_position("NOPE/USDT:USDT")
+    assert res["ok"] is False and "no open position" in res["error"]
+
+
+def test_close_dry_run_sends_nothing():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake, dry_run=True)
+    g.run_cycle(); fake.created.clear()
+    res = g.close_position("DOGE/USDT:USDT")
+    assert res["dry_run"] is True
+    assert fake.created == []
+
+
+# ── Trade history ────────────────────────────────────────────────────────────
+
+def test_closed_trade_recorded_when_position_disappears():
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 30.0)          # run into profit
+    g.run_cycle()
+    fake._positions = []                            # stop triggers / closed
+    g.run_cycle()
+
+    hist = g.closed_trades()
+    assert len(hist) == 1
+    t = hist[0]
+    assert t["symbol"] == "DOGE/USDT:USDT"
+    assert t["side"] == "short"
+    assert t["peak_roi"] == pytest.approx(30.0, abs=0.1)
+    assert t["armed"] is True
+    assert t["exit_is_estimate"] is True             # no realised PnL from fake
+
+
+def test_history_is_capped_and_newest_first():
+    fake = FakeExchange(positions=[], price=100.0)
+    g = _guardian(fake)
+    for i in range(105):
+        g._closed_trades.append({"symbol": f"S{i}", "closed_at": i})
+    g._closed_trades = g._closed_trades[-100:]
+    hist = g.closed_trades()
+    assert len(hist) == 100
+    assert hist[0]["symbol"] == "S104"               # newest first
+
+
+# ── Orphaned stop cleanup ────────────────────────────────────────────────────
+
+def test_stop_cancelled_when_position_disappears():
+    """
+    A protective stop left resting after the position closed can trigger
+    against a LATER position on the same symbol. It must be cancelled.
+    """
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    stop_id = fake.created[0]["id"]
+    assert not fake.cancelled
+
+    fake._positions = []          # position closed externally
+    g.run_cycle()
+
+    assert any(oid == stop_id for oid, _ in fake.cancelled), \
+        "orphaned stop was not cancelled"
+    assert "DOGE/USDT:USDT" not in g._states
+
+
+def test_orphan_cancel_failure_is_not_fatal():
+    """The stop usually already triggered — a cancel error must not break the cycle."""
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    def boom(order_id, symbol):
+        raise RuntimeError("Unknown order sent")
+    g = _guardian(fake)
+    g.run_cycle()
+    fake.cancel_order = boom
+    fake._positions = []
+    g.run_cycle()                  # must not raise
+    assert "DOGE/USDT:USDT" not in g._states
+
+
+def test_orphan_stop_not_cancelled_in_dry_run():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake, dry_run=True)
+    g.run_cycle()
+    fake._positions = []
+    g.run_cycle()
+    assert fake.cancelled == []

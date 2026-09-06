@@ -142,6 +142,34 @@ def create_app(engine) -> FastAPI:
             return {"enabled": True, "states": {}, "recent_actions": [],
                     "config": {}, "error": f"{type(e).__name__}: {e}"}
 
+    @app.post("/api/futures/close")
+    def futures_close(payload: dict, user: dict = Depends(_require_auth)):
+        """Close an open futures position at market (reduce-only)."""
+        if _guardian is None:
+            raise HTTPException(status_code=400, detail="Guardian not enabled")
+        symbol = (payload or {}).get("symbol")
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        try:
+            res = _guardian.close_position(symbol)
+        except Exception as e:
+            log.exception("futures close failed")
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        log.warning(f"Futures close {symbol} by {user['username']}: ok={res.get('ok')} "
+                    f"dry_run={res.get('dry_run')}")
+        return res
+
+    @app.get("/api/futures/trades")
+    def futures_trades(user: dict = Depends(_require_auth)):
+        """Closed futures positions observed by the guardian."""
+        if _guardian is None:
+            return {"enabled": False, "trades": []}
+        try:
+            return {"enabled": True, "trades": _guardian.closed_trades()}
+        except Exception as e:
+            log.exception("futures trades failed")
+            return {"enabled": True, "trades": [], "error": f"{type(e).__name__}: {e}"}
+
     @app.get("/api/scan")
     def scan(user: dict = Depends(_require_auth)):
         """

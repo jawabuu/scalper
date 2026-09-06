@@ -358,6 +358,34 @@ def rank_with_deltas(pairs: list[tuple["Candidate", Delta]]) -> list[tuple["Cand
     ))
 
 
+def balance_directions(pairs: list[tuple["Candidate", "Delta"]],
+                       max_share: float = 0.70) -> list[tuple["Candidate", "Delta"]]:
+    """
+    Keep both directions visible.
+
+    Ranking alone can fill the whole list with one direction on a strongly
+    trending day, hiding the handful of opposite-side setups. This caps either
+    direction at `max_share` of the displayed rows WHENEVER the other direction
+    has candidates — if one side has none, the other keeps the full list.
+
+    Order within each direction is preserved, so the best candidates still lead.
+    """
+    if not pairs:
+        return pairs
+    longs = [p for p in pairs if p[0].direction == "long"]
+    shorts = [p for p in pairs if p[0].direction == "short"]
+    if not longs or not shorts:
+        return pairs            # only one kind exists — show them all
+
+    total = len(pairs)
+    cap = max(1, int(total * max_share))
+    kept_long = longs[:cap]
+    kept_short = shorts[:cap]
+    # Re-interleave by the original ranking so the strongest still sort first.
+    keep = set(id(p) for p in kept_long + kept_short)
+    return [p for p in pairs if id(p) in keep]
+
+
 def format_table_with_deltas(pairs: list[tuple["Candidate", Delta]]) -> str:
     if not pairs:
         return "No candidates met the criteria."

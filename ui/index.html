@@ -107,6 +107,13 @@
   .dir-short { color: var(--red); font-weight: bold; }
   .dir-long  { color: var(--green); font-weight: bold; }
   .scan-note { font-size: 10px; color: var(--muted); }
+  .view-switch { display: inline-flex; border: 1px solid var(--border2); border-radius: 4px; overflow: hidden; margin-left: 10px; }
+  .view-switch button {
+    background: transparent; border: none; color: var(--muted);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.5px;
+    padding: 3px 10px; cursor: pointer;
+  }
+  .view-switch button.active { background: var(--bg3); color: var(--accent); }
   .rq { font-size: 9px; padding: 1px 5px; border-radius: 3px; letter-spacing: 0.4px; }
   .rq-strong  { background: rgba(0,214,143,0.16); color: var(--green); }
   .rq-good    { background: rgba(0,153,255,0.14); color: var(--accent2); }
@@ -736,6 +743,10 @@
     <span class="logo">⬡ Scalper</span>
     <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
     <span class="badge" id="strategy-badge" style="display:none"></span>
+    <span class="view-switch" id="view-switch">
+      <button id="view-spot" onclick="setView('spot')">SPOT</button>
+      <button id="view-futures" onclick="setView('futures')">FUTURES</button>
+    </span>
     <div class="header-sep"></div>
     <span class="refresh-hint" id="refresh-hint">—</span>
     <span class="version-badge" id="version-hint">—</span>
@@ -759,7 +770,7 @@
     </div>
 
     <!-- Positions -->
-    <div class="panel positions-panel">
+    <div class="panel positions-panel" id="positions-panel">
       <div class="panel-label">Open positions</div>
       <div id="positions-wrap">
         <div class="empty">No open positions</div>
@@ -776,6 +787,8 @@
       </div>
       <div id="guard-body">
         <div id="guard-wrap"><div class="empty">No futures positions being guarded</div></div>
+        <div class="panel-label" style="margin-top:18px">Futures trade history</div>
+        <div id="guard-history"><div class="empty">No closed futures trades yet</div></div>
         <div class="scan-note" style="margin-top:10px" id="guard-actions"></div>
       </div>
     </div>
@@ -999,7 +1012,7 @@
     </div>
 
     <!-- Trade history -->
-    <div class="panel history-panel">
+    <div class="panel history-panel" id="history-panel">
       <div class="panel-label">Trade history</div>
       <div id="history-wrap">
         <div class="empty">No closed trades yet</div>
@@ -1919,6 +1932,7 @@ async function confirmEntry() {
     closeEntry();
     setEl('ctrl-msg', data.message || 'Entry placed.');
     refreshGuardian();
+    refreshFuturesHistory();
   } catch (e) {
     setEl('entry-error', 'Execute failed: ' + e.message);
     btn.disabled = false; btn.textContent = 'Retry';
@@ -1939,6 +1953,7 @@ function renderScan(data) {
   const panel = document.getElementById('scan-panel');
   if (!panel) return;
   if (!data || !data.enabled) { panel.style.display = 'none'; return; }
+  if (!viewAllows('scan-panel')) return;
   panel.style.display = '';
 
   const meta = document.getElementById('scan-meta');
@@ -1997,7 +2012,7 @@ async function refreshScan() {
     if (data && data.enabled === false) {
       // Explicitly disabled: show a one-line hint rather than hiding silently,
       // so "off" is distinguishable from "broken".
-      if (panel) {
+      if (panel && viewAllows('scan-panel')) {
         panel.style.display = '';
         setEl('scan-meta', '(disabled)');
         setEl('scan-wrap',
@@ -2043,10 +2058,221 @@ function toggleGuard() {
   txt.textContent = hidden ? 'hide' : 'show';
 }
 
+
+// Where an open position sits in its 24h range, framed for its direction:
+// a LONG is measured against the 24h low it rose from, a SHORT against the
+// 24h high it fell from — the extreme that matters for that side.
+function rangeContext(s) {
+  if (s.range_pos_24h === null || s.range_pos_24h === undefined) {
+    return '<span class="rq rq-unknown">n/a</span>';
+  }
+  const pct = Math.round(s.range_pos_24h * 100);
+  const bar = `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`;
+  let label;
+  if (s.side === 'long') {
+    const v = s.pct_above_24h_low;
+    label = (v === null || v === undefined) ? `${pct}%`
+      : `${v >= 0 ? '+' : ''}${v}% above 24h low`;
+  } else {
+    const v = s.pct_below_24h_high;
+    label = (v === null || v === undefined) ? `${pct}%`
+      : `${v}% from 24h high`;
+  }
+  // Favourable = long low in range, short high in range.
+  const fav = s.side === 'long' ? (1 - s.range_pos_24h) : s.range_pos_24h;
+  const cls = fav >= 0.8 ? 'strong' : fav >= 0.6 ? 'good' : fav >= 0.4 ? 'neutral' : 'weak';
+  return `${bar} <span class="rq rq-${cls}">${label}</span>`;
+}
+
+function promptFuturesClose(sym) {
+  const k = sym.replace('/USDT:USDT','').replace('/USDT','');
+  const i = document.getElementById(`fc-${k}-idle`);
+  const c = document.getElementById(`fc-${k}-confirm`);
+  if (i) i.style.display = 'none';
+  if (c) c.style.display = 'flex';
+}
+function cancelFuturesClose(sym) {
+  const k = sym.replace('/USDT:USDT','').replace('/USDT','');
+  const i = document.getElementById(`fc-${k}-idle`);
+  const c = document.getElementById(`fc-${k}-confirm`);
+  if (i) i.style.display = '';
+  if (c) c.style.display = 'none';
+}
+async function doFuturesClose(sym) {
+  try {
+    const r = await fetch(API + '/api/futures/close', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: sym }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      setEl('guard-actions', `<span style="color:var(--warn)">Close failed: ${d.error || r.status}</span>`);
+    }
+  } catch (e) {
+    setEl('guard-actions', `<span style="color:var(--warn)">Close failed: ${e.message}</span>`);
+  }
+  cancelFuturesClose(sym);
+  await refreshGuardian();
+  await refreshFuturesHistory();
+}
+
+async function refreshFuturesHistory() {
+  try {
+    const d = await api('/api/futures/trades');
+    _lastFuturesHist = d;
+    const el = document.getElementById('guard-history');
+    if (!el) return;
+    if (!d.enabled || !d.trades || !d.trades.length) {
+      el.innerHTML = '<div class="empty">No closed futures trades yet</div>';
+      return;
+    }
+    const rows = d.trades.map(t => {
+      const pnl = t.realised_pnl_usdt;
+      const pnlCell = (pnl === null || pnl === undefined)
+        ? '<span style="color:var(--muted)">n/a</span>'
+        : `<span class="${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}$${pnl}</span>`;
+      const fin = t.final_roi;
+      const finCell = (fin === null || fin === undefined) ? '—'
+        : `<span class="${fin >= 0 ? 'pos' : 'neg'}">${fin >= 0 ? '+' : ''}${fin}%</span>`;
+      const est = t.exit_is_estimate ? ' <span class="rq rq-unknown">est</span>' : '';
+      return `<tr>
+        <td class="sym">${t.symbol.replace('/USDT:USDT','').replace('/USDT','')}</td>
+        <td class="dir-${t.side}">${(t.side||'').toUpperCase()}</td>
+        <td class="num">${t.entry_price ?? '—'}</td>
+        <td class="num">${t.exit_price ?? '—'}${est}</td>
+        <td class="num">${finCell}</td>
+        <td class="num pos">+${t.peak_roi}%</td>
+        <td class="num">${pnlCell}</td>
+        <td style="color:var(--muted);font-size:11px">${t.closed_at ? new Date(t.closed_at*1000).toLocaleTimeString() : ''}</td>
+      </tr>`;
+    }).join('');
+    el.innerHTML = `<table><thead><tr>
+      <th>Pair</th><th>Dir</th><th class="num">Entry</th><th class="num">Exit</th>
+      <th class="num">Final ROI</th><th class="num">Peak ROI</th>
+      <th class="num">Realised</th><th>Closed</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+  } catch (e) { /* guardian off */ }
+}
+
+
+// ── Spot / Futures view ──────────────────────────────────────────────────────
+// One instance runs both a spot strategy and the futures guardian, so the
+// dashboard shows both sets of panels. On a futures-focused instance the spot
+// tiles read $0.00 and the spot controls are noise, so the view toggle hides
+// whichever half is not in use. Purely presentational — nothing is disabled.
+let _view = 'spot';
+let _lastGuardian = null;
+let _lastFuturesHist = null;
+
+function setView(v) {
+  _view = (v === 'futures') ? 'futures' : 'spot';
+  try { localStorage.setItem('dashView', _view); } catch (e) {}
+  applyView();
+  // Recompute the tiles straight away from the last poll, so switching views
+  // does not leave the previous mode's numbers on screen until the next tick.
+  if (_view === 'futures') {
+    renderFuturesStats(_lastGuardian, _lastFuturesHist);
+  } else {
+    restoreSpotStatLabels();
+    refresh();
+  }
+}
+
+function restoreSpotStatLabels() {
+  const lbls = document.querySelectorAll('#stats-row .stat-label');
+  if (lbls.length >= 2) {
+    lbls[0].textContent = 'Portfolio';
+    lbls[1].textContent = 'Available USDT';
+  }
+}
+
+function applyView() {
+  const futures = _view === 'futures';
+  const sBtn = document.getElementById('view-spot');
+  const fBtn = document.getElementById('view-futures');
+  if (sBtn) sBtn.className = futures ? '' : 'active';
+  if (fBtn) fBtn.className = futures ? 'active' : '';
+
+  // Spot-only panels
+  ['controls-panel', 'pullback-panel', 'positions-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (futures) {
+      el.dataset.viewHidden = '1';
+      el.style.display = 'none';
+    } else if (el.dataset.viewHidden === '1') {
+      delete el.dataset.viewHidden;
+      el.style.display = '';
+    }
+  });
+
+  // Futures-only panels. These manage their own visibility (hidden when the
+  // subsystem is disabled), so only force-hide them in spot view and let their
+  // own refresh decide otherwise.
+  ['guard-panel', 'scan-panel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!futures) {
+      el.dataset.viewHidden = '1';
+      el.style.display = 'none';
+    } else if (el.dataset.viewHidden === '1') {
+      delete el.dataset.viewHidden;
+      el.style.display = '';
+    }
+  });
+}
+
+// Panels that hide themselves must not override a view-level hide.
+function viewAllows(id) {
+  const el = document.getElementById(id);
+  return !(el && el.dataset.viewHidden === '1');
+}
+
+function renderFuturesStats(g, hist) {
+  if (_view !== 'futures') return;
+  const trades = (hist && hist.trades) || [];
+  const states = (g && g.states) || {};
+  const openCount = Object.keys(states).length;
+
+  const scored = trades.filter(t => t.final_roi !== null && t.final_roi !== undefined);
+  const wins = scored.filter(t => t.final_roi > 0).length;
+  const realised = trades
+    .map(t => t.realised_pnl_usdt)
+    .filter(v => v !== null && v !== undefined)
+    .reduce((a, b) => a + b, 0);
+  const avgRoi = scored.length
+    ? scored.reduce((a, t) => a + t.final_roi, 0) / scored.length : null;
+
+  const bal = (g && g.wallet_balance) || 0;
+  setEl('s-portfolio', `$${bal.toFixed(2)}`);
+  setEl('s-portfolio-sub', openCount ? `${openCount} open` : 'no open positions');
+  setEl('s-balance', `$${bal.toFixed(2)}`);
+  setEl('s-open', String(openCount));
+  setEl('s-total', String(trades.length));
+  setEl('s-winrate', scored.length ? `${Math.round(wins / scored.length * 100)}%` : '—');
+  setEl('s-pnl', realised ? `${realised >= 0 ? '+' : ''}$${realised.toFixed(2)}` : '—');
+  setEl('s-pnl-usdt', 'realised');
+  setEl('s-avg', avgRoi === null ? '—' : `${avgRoi >= 0 ? '+' : ''}${avgRoi.toFixed(1)}% ROI`);
+
+  // Relabel the two tiles whose meaning differs on futures.
+  const lbls = document.querySelectorAll('#stats-row .stat-label');
+  if (lbls.length >= 2) {
+    lbls[0].textContent = 'Futures wallet';
+    lbls[1].textContent = 'Wallet balance';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  try { _view = localStorage.getItem('dashView') || 'spot'; } catch (e) {}
+  applyView();
+});
+
 function renderGuardian(g) {
   const panel = document.getElementById('guard-panel');
   if (!panel) return;
   if (!g || !g.enabled) { panel.style.display = 'none'; return; }
+  if (!viewAllows('guard-panel')) return;
   panel.style.display = '';
 
   const meta = document.getElementById('guard-meta');
@@ -2057,7 +2283,7 @@ function renderGuardian(g) {
     const c = g.config || {};
     const ago = g.last_cycle_ago_s == null ? '—' : Math.round(g.last_cycle_ago_s) + 's ago';
     meta.innerHTML = `${mode} &nbsp;(stop -${c.initial_stop_roi}% ROI · arm +${c.arm_roi}% · `
-      + `callback ${c.callback_roi}% · ${g.testnet ? 'testnet' : 'live'} · ${ago})`;
+      + `callback ${c.callback_roi}% · ${g.demo ? 'demo' : 'LIVE ACCOUNT'} · ${ago})`;
   }
 
   const syms = Object.keys(g.states || {});
@@ -2066,23 +2292,41 @@ function renderGuardian(g) {
   } else {
     const rows = syms.map(sym => {
       const s = g.states[sym];
+      const short = sym.replace('/USDT:USDT','').replace('/USDT','');
       const armed = s.armed
         ? '<span class="guard-flag gf-armed">ARMED</span>'
         : '<span style="color:var(--muted)">initial</span>';
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
         : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`;
+      const cur = (s.current_roi === null || s.current_roi === undefined)
+        ? '—'
+        : `<span class="${s.current_roi >= 0 ? 'pos' : 'neg'}">${s.current_roi >= 0 ? '+' : ''}${s.current_roi}%</span>`;
+      const dirCls = s.side === 'short' ? 'dir-short' : 'dir-long';
       return `<tr>
-        <td class="sym">${sym.replace('/USDT:USDT','').replace('/USDT','')}</td>
+        <td class="sym">${short}</td>
+        <td class="${dirCls}">${(s.side || '').toUpperCase()}</td>
+        <td class="num">${cur}</td>
         <td class="num pos">+${s.peak_roi}%</td>
         <td class="num">${stop}</td>
         <td>${armed}</td>
-        <td class="scan-note">${s.stop_order_id || '—'}</td>
+        <td>${rangeContext(s)}</td>
+        <td class="num">$${s.margin_usdt ?? '—'}</td>
+        <td>
+          <div id="fc-${short}-idle">
+            <button class="btn-row-close" onclick="promptFuturesClose('${sym}')">Close</button>
+          </div>
+          <div id="fc-${short}-confirm" style="display:none;gap:4px;align-items:center">
+            <button class="btn-row-confirm yes" onclick="doFuturesClose('${sym}')">Confirm</button>
+            <button class="btn-row-confirm no" onclick="cancelFuturesClose('${sym}')">Cancel</button>
+          </div>
+        </td>
       </tr>`;
     }).join('');
     setEl('guard-wrap', `<table><thead><tr>
-      <th>Pair</th><th class="num">Peak ROI</th><th class="num">Stop @ ROI</th>
-      <th>Trail</th><th>Order id</th>
+      <th>Pair</th><th>Dir</th><th class="num">ROI now</th><th class="num">Peak ROI</th>
+      <th class="num">Stop @ ROI</th><th>Trail</th><th>24h range</th>
+      <th class="num">Margin</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table>`);
   }
 
@@ -2097,7 +2341,7 @@ async function refreshGuardian() {
   try {
     const g = await api('/api/guardian');
     if (g && g.enabled === false) {
-      if (panel) {
+      if (panel && viewAllows('guard-panel')) {
         panel.style.display = '';
         setEl('guard-meta', '(disabled)');
         setEl('guard-wrap',
@@ -2108,6 +2352,7 @@ async function refreshGuardian() {
       return;
     }
     _entryEnabled = !!(g && g.enabled && g.entry_enabled);
+    _lastGuardian = g;
     renderGuardian(g);
   } catch (e) {
     if (panel) {
@@ -2199,7 +2444,9 @@ async function refresh() {
     // Guardian first: it carries entry_enabled, which decides whether the
     // scanner rows render entry buttons. Sequenced, not concurrent.
     await refreshGuardian();
+    await refreshFuturesHistory();
     await refreshScan();
+    renderFuturesStats(_lastGuardian, _lastFuturesHist);
     if (status.strategy === 'pullback' && summary && summary.by_regime) {
       renderRegimeStats(summary.by_regime);
     }

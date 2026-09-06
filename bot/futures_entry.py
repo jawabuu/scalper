@@ -146,23 +146,89 @@ class EntryService:
 
     # -- account reads
     def wallet_balance(self) -> float:
+        """
+        Total USDT wallet balance backing futures positions.
+
+        Position size is a percentage of this, so a wrong reading silently
+        mis-sizes every entry. Several shapes are tried because the futures
+        balance payload differs between environments (live vs demo), and the
+        resolved value is logged so a surprising size can be traced.
+        """
         bal = self.guardian.exchange.fetch_balance()
-        usdt = (bal.get("USDT") or {})
-        return float(usdt.get("total") or usdt.get("free") or 0.0)
+        candidates = []
+
+        usdt = bal.get("USDT") or {}
+        if isinstance(usdt, dict):
+            candidates.append(("USDT.total", usdt.get("total")))
+            candidates.append(("USDT.free", usdt.get("free")))
+
+        total_map = bal.get("total") or {}
+        if isinstance(total_map, dict):
+            candidates.append(("total.USDT", total_map.get("USDT")))
+
+        info = bal.get("info") or {}
+        if isinstance(info, dict):
+            candidates.append(("info.totalWalletBalance", info.get("totalWalletBalance")))
+            candidates.append(("info.availableBalance", info.get("availableBalance")))
+            assets = info.get("assets")
+            if isinstance(assets, list):
+                for a in assets:
+                    if (a or {}).get("asset") == "USDT":
+                        candidates.append(("assets[USDT].walletBalance",
+                                           a.get("walletBalance")))
+
+        for source, raw in candidates:
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                log.info(f"Wallet balance {val:.2f} USDT (from {source})")
+                return val
+
+        log.warning(f"Could not resolve a positive USDT wallet balance; "
+                    f"tried {[c[0] for c in candidates]}")
+        return 0.0
 
     def symbol_leverage(self, symbol: str) -> float:
         """
         The leverage the operator configured for this symbol on Binance. The
         guardian never sets leverage; it is read so sizing matches reality.
+
+        Two hazards handled here:
+
+        1. ccxt's parsed `leverage` field has been observed reporting 1 on
+           isolated positions, so the RAW `info.leverage` from Binance is
+           preferred — that is the authoritative value.
+        2. On failure this returns 0.0, NOT 1.0. A silent 1.0 sized an entry at
+           a tenth of the intended notional (which then floored to the minimum
+           lot), producing a position a fraction of the requested size. Zero
+           makes the plan invalid so the entry is REFUSED instead of mis-sized.
         """
+        raw_candidates: list[tuple[str, object]] = []
         try:
             for p in self.guardian.exchange.fetch_positions([symbol]):
-                lev = p.get("leverage") or (p.get("info") or {}).get("leverage")
-                if lev:
-                    return float(lev)
+                info = p.get("info") or {}
+                # Raw Binance value first — the parsed field is less reliable.
+                raw_candidates.append(("info.leverage", info.get("leverage")))
+                raw_candidates.append(("leverage", p.get("leverage")))
         except Exception as e:
             log.warning(f"leverage lookup failed for {symbol}: {e}")
-        return 1.0
+
+        for source, raw in raw_candidates:
+            try:
+                lev = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if lev > 0:
+                log.info(f"{symbol}: leverage {lev:g}x (from {source})")
+                return lev
+
+        log.error(
+            f"{symbol}: could not resolve leverage — refusing to size an entry. "
+            f"Set leverage for this symbol on Binance first."
+        )
+        return 0.0
 
     def _account_state(self, symbol: str) -> tuple[int, bool]:
         positions = self.guardian.fetch_positions()
@@ -190,10 +256,32 @@ class EntryService:
             return {"ok": False, "errors": ["could not read a price for this symbol"]}
 
         leverage = self.symbol_leverage(symbol)
-        margin, notional, qty = compute_size(balance, margin_pct, leverage, price)
-        qty = float(self.guardian.exchange.amount_to_precision(symbol, qty))
+        if leverage <= 0:
+            return {"ok": False, "errors": [
+                "could not read this symbol's leverage from Binance — refusing "
+                "to size an entry. Set leverage for the symbol first."]}
+
+        margin, notional, qty_raw = compute_size(balance, margin_pct, leverage, price)
+        qty = float(self.guardian.exchange.amount_to_precision(symbol, qty_raw))
         if qty <= 0:
             return {"ok": False, "errors": ["computed quantity rounds to zero — margin too small"]}
+
+        # Lot-size rounding can shrink a position substantially on high-priced
+        # coins with coarse steps. Silently shipping a fraction of the requested
+        # size is how a 10.7 USDT margin became 0.7, so surface it loudly and
+        # report the size that will ACTUALLY be opened, not the requested one.
+        size_warnings: list[str] = []
+        if qty_raw > 0:
+            shrink = (qty_raw - qty) / qty_raw
+            if shrink >= 0.10:
+                size_warnings.append(
+                    f"lot rounding reduced size {shrink*100:.0f}% "
+                    f"({qty_raw:.4f} -> {qty:g}) — actual margin will be "
+                    f"{qty * price / leverage:.2f} USDT, not {margin:.2f}"
+                )
+        # Report the real, post-rounding economics.
+        notional = qty * price
+        margin = notional / leverage
 
         # Show where the guardian's initial stop will land, so the operator sees
         # the downside before confirming rather than after the fill.
@@ -213,7 +301,12 @@ class EntryService:
         )
         self._pending[plan.token] = plan
         self._prune()
-        return {"ok": True, "plan": plan.as_dict(), "dry_run": self.guardian.dry_run}
+        if size_warnings:
+            for w in size_warnings:
+                log.warning(f"{symbol}: {w}")
+        return {"ok": True, "plan": plan.as_dict(),
+                "warnings": size_warnings,
+                "dry_run": self.guardian.dry_run}
 
     def _prune(self):
         now = time.time()
