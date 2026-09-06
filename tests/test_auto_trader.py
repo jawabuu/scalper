@@ -256,3 +256,71 @@ def test_edited_rules_take_effect_on_the_next_decision():
     assert not evaluate_candidate(row, streak=2, cfg=a.cfg).enter    # 76 < 78
     a.update_rules({"short_rsi_min": 75})
     assert evaluate_candidate(row, streak=2, cfg=a.cfg, atr_pct=0.5).enter
+
+
+# ── Cooldown override on a genuinely stronger signal ─────────────────────────
+
+from bot.auto_trader import record_reentry
+
+
+def test_stronger_signal_overrides_the_cooldown(cfg):
+    """
+    A coin that stopped you out and has pushed FURTHER into the extreme is a
+    stronger fade than the one that failed — a bare timer discards that.
+    """
+    st = roll_day(SafetyState(), 1000.0)
+    st = record_loss(st, "X", cfg, entry_rsi=78.0)
+    ok, why = check_safety(st, cfg, balance=1000.0, open_positions=0,
+                           symbol="X", current_rsi=85.0, side="short")
+    assert ok and "cooldown overridden" in why
+
+
+def test_marginal_improvement_does_not_override(cfg):
+    st = roll_day(SafetyState(), 1000.0)
+    st = record_loss(st, "X", cfg, entry_rsi=78.0)
+    ok, _ = check_safety(st, cfg, balance=1000.0, open_positions=0,
+                         symbol="X", current_rsi=79.0, side="short")
+    assert not ok          # under the 3-point delta
+
+
+def test_weaker_signal_stays_blocked(cfg):
+    st = roll_day(SafetyState(), 1000.0)
+    st = record_loss(st, "X", cfg, entry_rsi=78.0)
+    ok, _ = check_safety(st, cfg, balance=1000.0, open_positions=0,
+                         symbol="X", current_rsi=72.0, side="short")
+    assert not ok
+
+
+def test_reentries_are_capped_however_strong_the_signal(cfg):
+    """Re-entering a coin that keeps running against you is how a fade dies."""
+    st = roll_day(SafetyState(), 1000.0)
+    st = record_loss(st, "X", cfg, entry_rsi=78.0)
+    for _ in range(cfg.max_reentries_per_symbol):
+        record_reentry(st, "X")
+    ok, why = check_safety(st, cfg, balance=1000.0, open_positions=0,
+                           symbol="X", current_rsi=95.0, side="short")
+    assert not ok and "already retried" in why
+
+
+def test_reentry_counts_reset_next_day(cfg):
+    st = roll_day(SafetyState(), 1000.0)
+    record_reentry(st, "X")
+    st.day_key = "1970-01-01"
+    st = roll_day(st, 1000.0)
+    assert st.reentries_today == {}
+
+
+def test_strict_timer_when_override_disabled():
+    cfg = AutoTradeConfig(cooldown_override_rsi_delta=0.0)
+    st = roll_day(SafetyState(), 1000.0)
+    st = record_loss(st, "X", cfg, entry_rsi=78.0)
+    ok, _ = check_safety(st, cfg, balance=1000.0, open_positions=0,
+                         symbol="X", current_rsi=95.0, side="short")
+    assert not ok
+
+
+def test_reentry_cap_is_not_dashboard_tunable():
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader); a.cfg = AutoTradeConfig(); a._log = []
+    applied, errors = a.update_rules({"max_reentries_per_symbol": 99})
+    assert applied == {} and any("safety limit" in e for e in errors)

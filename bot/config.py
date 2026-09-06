@@ -275,6 +275,10 @@ class BotConfig:
     auto_daily_loss_limit_pct: float = field(default_factory=lambda: _env_float("AUTO_DAILY_LOSS_LIMIT_PCT", 5.0))
     auto_symbol_cooldown_s: float = field(default_factory=lambda: _env_float("AUTO_SYMBOL_COOLDOWN_S", 1800.0))
     auto_max_trades_per_hour: int = field(default_factory=lambda: _env_int("AUTO_MAX_TRADES_PER_HOUR", 6))
+    # Re-enter a cooled-down symbol when the signal has pushed this much
+    # further into the extreme than the entry that failed. 0 = strict timer.
+    auto_cooldown_override_rsi: float = field(default_factory=lambda: _env_float("AUTO_COOLDOWN_OVERRIDE_RSI", 3.0))
+    auto_max_reentries_per_symbol: int = field(default_factory=lambda: _env_int("AUTO_MAX_REENTRIES_PER_SYMBOL", 2))
 
     # ── Operator-initiated futures entry (UI button) ────────────────────
     # The ONLY component that can OPEN a position. Off by default; honours

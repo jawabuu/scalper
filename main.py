@@ -174,6 +174,8 @@ if __name__ == "__main__":
                     daily_loss_limit_pct=cfg.auto_daily_loss_limit_pct,
                     symbol_cooldown_s=cfg.auto_symbol_cooldown_s,
                     max_trades_per_hour=cfg.auto_max_trades_per_hour,
+                    cooldown_override_rsi_delta=cfg.auto_cooldown_override_rsi,
+                    max_reentries_per_symbol=cfg.auto_max_reentries_per_symbol,
                     max_open_positions=cfg.entry_max_positions,
                 )
                 auto = AutoTrader(auto_cfg, scan_runner, entry_service, guardian)

@@ -55,6 +55,16 @@ class AutoTradeConfig:
     # ── Safety limits for unattended running ────────────────────────────
     daily_loss_limit_pct: float = 5.0      # halt for the day at -5% of wallet
     symbol_cooldown_s: float = 1800.0      # 30 min before retrying a loser
+    # A cooldown on a pure timer discards real information: a coin that stopped
+    # you out and has since pushed FURTHER into the extreme is a stronger fade
+    # than the one that failed. So the cooldown can be overridden when the
+    # signal has genuinely improved by this much RSI versus the failed entry.
+    # 0 disables the override (strict timer).
+    cooldown_override_rsi_delta: float = 3.0
+    # But the loop still has to be bounded. Re-entering a coin that keeps
+    # running against you is how a fade strategy dies, so a symbol can only be
+    # retried this many times per day however good the signal looks.
+    max_reentries_per_symbol: int = 2
     max_trades_per_hour: int = 6
     max_open_positions: int = 3
 
@@ -202,6 +212,9 @@ class SafetyState:
     day_key: str = ""
     recent_entry_times: list[float] = field(default_factory=list)
     symbol_blocked_until: dict[str, float] = field(default_factory=dict)
+    # RSI at the entry that failed, per symbol — the bar a re-entry must beat.
+    failed_entry_rsi: dict[str, float] = field(default_factory=dict)
+    reentries_today: dict[str, int] = field(default_factory=dict)
     halted_reason: str | None = None
 
 
@@ -217,6 +230,7 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
         state.day_key = key
         state.day_start_balance = balance
         state.halted_reason = None
+        state.reentries_today = {}
     if state.day_start_balance <= 0:
         state.day_start_balance = balance
     return state
@@ -224,6 +238,7 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
 
 def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
                  open_positions: int, symbol: str,
+                 current_rsi: float | None = None, side: str = "short",
                  now: float | None = None) -> tuple[bool, str]:
     """
     Whether an automated entry is permitted right now.
@@ -253,6 +268,24 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
 
     blocked_until = state.symbol_blocked_until.get(symbol, 0)
     if now < blocked_until:
+        # The cooldown can be overridden by a genuinely stronger signal, but
+        # only up to the per-symbol re-entry cap.
+        prior = state.failed_entry_rsi.get(symbol)
+        improved = (
+            cfg.cooldown_override_rsi_delta
+            and prior is not None
+            and current_rsi is not None
+            and abs(current_rsi - prior) >= cfg.cooldown_override_rsi_delta
+            and ((current_rsi > prior) if side == "short" else (current_rsi > prior))
+        )
+        used = state.reentries_today.get(symbol, 0)
+        if improved and used < cfg.max_reentries_per_symbol:
+            return True, (f"cooldown overridden: RSI {current_rsi:.0f} vs "
+                          f"{prior:.0f} at the failed entry "
+                          f"(re-entry {used + 1}/{cfg.max_reentries_per_symbol})")
+        if improved:
+            return False, (f"{symbol} signal improved but already retried "
+                           f"{used}/{cfg.max_reentries_per_symbol} times today")
         return False, (f"{symbol} in cooldown for another "
                        f"{int(blocked_until - now)}s after a loss")
 
@@ -271,11 +304,22 @@ def record_entry(state: SafetyState, now: float | None = None) -> SafetyState:
 
 
 def record_loss(state: SafetyState, symbol: str, cfg: AutoTradeConfig,
+                entry_rsi: float | None = None,
                 now: float | None = None) -> SafetyState:
-    """Block a symbol for a while after a losing trade on it."""
+    """
+    Block a symbol after a losing trade, remembering the RSI it failed at so a
+    later re-entry can be judged against it rather than on a bare timer.
+    """
     now = now or _time.time()
     if cfg.symbol_cooldown_s:
         state.symbol_blocked_until[symbol] = now + cfg.symbol_cooldown_s
+    if entry_rsi is not None:
+        state.failed_entry_rsi[symbol] = float(entry_rsi)
+    return state
+
+
+def record_reentry(state: SafetyState, symbol: str) -> SafetyState:
+    state.reentries_today[symbol] = state.reentries_today.get(symbol, 0) + 1
     return state
 
 
@@ -353,9 +397,13 @@ class AutoTrader:
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),
+        # How much stronger a signal must be to override a cooldown. This is an
+        # entry-quality judgement, so it is tunable; the re-entry CAP is not.
+        "cooldown_override_rsi_delta": (float, 0.0, 50.0),
     }
     SAFETY_ONLY = {"daily_loss_limit_pct", "symbol_cooldown_s",
-                   "max_trades_per_hour", "max_open_positions"}
+                   "max_trades_per_hour", "max_open_positions",
+                   "max_reentries_per_symbol"}
 
     def update_rules(self, payload: dict) -> tuple[dict, list[str]]:
         """
@@ -434,7 +482,8 @@ class AutoTrader:
                 continue
 
             ok, why = check_safety(self.state, self.cfg, balance=balance,
-                                   open_positions=len(positions), symbol=symbol)
+                                   open_positions=len(positions), symbol=symbol,
+                                   current_rsi=row.get("rsi"), side=side)
             if not ok:
                 _log.info(f"auto-trade: {symbol} qualified but blocked — {why}")
                 self._record("blocked", why, symbol)
@@ -456,6 +505,11 @@ class AutoTrader:
                                                            "error": "no token"}
             if res.get("ok"):
                 record_entry(self.state)
+                if "cooldown overridden" in why:
+                    record_reentry(self.state, symbol)
+                # Remember the RSI this entry was taken at, so if it fails the
+                # next attempt is judged against it.
+                self.state.failed_entry_rsi.setdefault(symbol, row.get("rsi") or 0.0)
                 positions.append(object())     # count it toward the cap now
                 note = " | ".join(decision.notes) if decision.notes else ""
                 _log.warning(
@@ -468,9 +522,11 @@ class AutoTrader:
             else:
                 self._record("execute_failed", str(res.get("error")), symbol)
 
-    def note_closed_trade(self, symbol: str, realised: float | None):
+    def note_closed_trade(self, symbol: str, realised: float | None,
+                          entry_rsi: float | None = None):
         """Apply the post-loss cooldown when a position closes down."""
         if realised is not None and realised < 0:
-            record_loss(self.state, symbol, self.cfg)
+            record_loss(self.state, symbol, self.cfg,
+                        entry_rsi=entry_rsi or self.state.failed_entry_rsi.get(symbol))
             self._record("cooldown", f"loss on {symbol}; blocked for "
                                      f"{int(self.cfg.symbol_cooldown_s)}s", symbol)
