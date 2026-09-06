@@ -166,6 +166,26 @@ def create_app(engine) -> FastAPI:
                     f"dry_run={res.get('dry_run')}")
         return res
 
+    @app.get("/api/analysis")
+    def analysis(user: dict = Depends(_require_auth)):
+        """
+        Which entry conditions actually paid, from recorded trades.
+
+        Reports sample size alongside every result — a striking difference
+        across a handful of trades is noise, and this is exactly where a
+        strategy gets overfitted.
+        """
+        if _guardian is None:
+            return {"enabled": False, "message": "Guardian not enabled"}
+        try:
+            from bot.analysis import analyse
+            report = analyse(_guardian.closed_trades())
+            report["enabled"] = True
+            return report
+        except Exception as e:
+            log.exception("analysis failed")
+            return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
+
     @app.get("/api/futures/trades")
     def futures_trades(user: dict = Depends(_require_auth)):
         """Closed futures positions observed by the guardian."""

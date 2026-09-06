@@ -112,6 +112,22 @@
   .dir-short { color: var(--red); font-weight: bold; }
   .dir-long  { color: var(--green); font-weight: bold; }
   .scan-note { font-size: 10px; color: var(--muted); }
+  .analysis-panel { grid-column: 1 / -1; order: 0.7; }
+  .an-note { font-size: 11px; color: var(--warn); padding: 6px 0; line-height: 1.6; }
+  .conf { font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+  .conf-usable       { background: rgba(0,214,143,.15); color: var(--green); }
+  .conf-thin         { background: rgba(255,170,0,.14); color: var(--warn); }
+  .conf-insufficient { background: rgba(255,255,255,.05); color: var(--muted); }
+  /* Seven numeric columns need real width — packing four tables across a row
+     made them overlap and unreadable. Two per row, each scrollable. */
+  /* One table per row. Seven numeric columns plus a label do not fit side by
+     side at any realistic width — packing them caused the tables to overflow
+     their grid cells and paint over each other. */
+  .an-grid { display: block; margin-top: 12px; }
+  .an-grid > div { margin-bottom: 22px; overflow-x: auto; }
+  .an-grid table { width: 100%; }
+  .an-grid th, .an-grid td { white-space: nowrap; }
+  .an-grid .sym { white-space: nowrap; }
   .auto-bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
               padding:10px 0 4px; border-bottom:1px solid var(--border); margin-bottom:10px; }
   .auto-flag { font-size:9px; padding:2px 7px; border-radius:3px; font-weight:bold; letter-spacing:.5px; }
@@ -790,6 +806,27 @@
       <div class="panel-label">Open positions</div>
       <div id="positions-wrap">
         <div class="empty">No open positions</div>
+      </div>
+    </div>
+
+    <!-- Trade analysis -->
+    <div class="panel analysis-panel" id="analysis-panel" style="display:none">
+      <div class="controls-head" onclick="toggleAnalysis()">
+        <div class="panel-label" style="margin-bottom:0">
+          Analysis <span id="an-meta" style="color:var(--muted);font-weight:normal;font-size:10px"></span>
+        </div>
+        <span class="controls-toggle"><span id="an-caret" class="controls-caret">&#9660;</span> <span id="an-toggle-text">hide</span></span>
+      </div>
+      <div id="an-body">
+        <div id="an-notes"></div>
+        <div id="an-overall"></div>
+        <div class="an-grid" id="an-grid"></div>
+        <div class="scan-note" style="margin-top:12px">
+          Groups marked <span class="conf conf-insufficient">insufficient</span> or
+          <span class="conf conf-thin">thin</span> do not support a conclusion.
+          Slicing a small sample by several conditions produces convincing
+          differences that are noise — that is how a strategy gets overfitted.
+        </div>
       </div>
     </div>
 
@@ -2279,7 +2316,7 @@ function applyView() {
   // Futures-only panels. These manage their own visibility (hidden when the
   // subsystem is disabled), so only force-hide them in spot view and let their
   // own refresh decide otherwise.
-  ['guard-panel', 'scan-panel'].forEach(id => {
+  ['guard-panel', 'scan-panel', 'analysis-panel'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     if (!futures) {
@@ -2380,6 +2417,96 @@ function fillAutoRules(c) {
   set('ar-atr', c.callback_atr_mult);
   set('ar-cd', c.cooldown_override_rsi_delta);
 }
+
+
+// ── Analysis page ────────────────────────────────────────────────────────────
+function toggleAnalysis() {
+  const b = document.getElementById('an-body');
+  const c = document.getElementById('an-caret');
+  const t = document.getElementById('an-toggle-text');
+  const hidden = b.style.display === 'none';
+  b.style.display = hidden ? '' : 'none';
+  c.style.transform = hidden ? '' : 'rotate(-90deg)';
+  t.textContent = hidden ? 'hide' : 'show';
+  try { localStorage.setItem('anCollapsed', hidden ? '0' : '1'); } catch (e) {}
+}
+
+function confBadge(c) { return `<span class="conf conf-${c}">${c}</span>`; }
+
+function statRow(s) {
+  if (!s || !s.n) return '<td colspan="6" class="scan-note">no trades</td>';
+  const cls = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
+  const exp = s.expectancy_usdt;
+  return `<td class="num">${s.n}</td>
+    <td class="num">${s.win_rate}%</td>
+    <td class="num ${cls(s.avg_roi)}">${s.avg_roi >= 0 ? '+' : ''}${s.avg_roi}%</td>
+    <td class="num">${s.avg_peak_roi >= 0 ? '+' : ''}${s.avg_peak_roi}%</td>
+    <td class="num">${s.avg_giveback}%</td>
+    <td class="num ${exp === null ? '' : cls(exp)}">${exp === null ? '—' : (exp >= 0 ? '+$' : '-$') + Math.abs(exp).toFixed(3)}</td>`;
+}
+
+function statTable(title, rows) {
+  const body = rows.filter(r => r.n).map(r =>
+    `<tr><td class="sym">${r.label}${confBadge(r.confidence)}</td>${statRow(r)}</tr>`).join('');
+  if (!body) return `<div><div class="panel-label">${title}</div>
+    <div class="empty" style="padding:12px">no trades in any bucket yet</div></div>`;
+  return `<div><div class="panel-label">${title}</div>
+    <table><thead><tr><th></th><th class="num">n</th><th class="num">win</th>
+    <th class="num">avg ROI</th><th class="num">avg peak</th>
+    <th class="num">give-back</th><th class="num">expectancy</th></tr></thead>
+    <tbody>${body}</tbody></table></div>`;
+}
+
+async function refreshAnalysis() {
+  const panel = document.getElementById('analysis-panel');
+  if (!panel) return;
+  try {
+    const a = await api('/api/analysis');
+    if (!a || !a.enabled) { panel.style.display = 'none'; return; }
+    if (!viewAllows('analysis-panel')) return;
+    panel.style.display = '';
+
+    if (a.error) {
+      setEl('an-notes', `<div class="an-note">Analysis error: ${a.error}</div>`);
+      return;
+    }
+    const o = a.overall || {};
+    setEl('an-meta', o.n ? `(${o.n} closed trades)` : '(no closed trades yet)');
+    setEl('an-notes', (a.notes || []).map(n => `<div class="an-note">${n}</div>`).join(''));
+
+    setEl('an-overall', o.n ? `<table><thead><tr><th></th><th class="num">n</th>
+      <th class="num">win</th><th class="num">avg ROI</th><th class="num">avg peak</th>
+      <th class="num">give-back</th><th class="num">expectancy</th></tr></thead><tbody>
+      <tr><td class="sym">ALL${confBadge(o.confidence)}</td>${statRow(o)}</tr>
+      <tr><td class="dir-long">LONG${confBadge((a.by_side.long || {}).confidence || 'insufficient')}</td>${statRow(a.by_side.long)}</tr>
+      <tr><td class="dir-short">SHORT${confBadge((a.by_side.short || {}).confidence || 'insufficient')}</td>${statRow(a.by_side.short)}</tr>
+      </tbody></table>` : '<div class="empty">No closed trades yet</div>');
+
+    setEl('an-grid', [
+      statTable('By RSI at entry', a.by_rsi || []),
+      statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
+      statTable('By ATR (volatility)', a.by_atr || []),
+      statTable('By exit reason', a.by_exit_reason || []),
+      statTable('Re-entries vs fresh entries', [
+        Object.assign({label: 'override re-entry'}, a.reentries.override_reentries),
+        Object.assign({label: 'fresh entry'}, a.reentries.fresh_entries),
+      ]),
+    ].join(''));
+  } catch (e) { panel.style.display = 'none'; }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  let c = false;
+  try { c = localStorage.getItem('anCollapsed') === '1'; } catch (e) {}
+  if (c) {
+    const b = document.getElementById('an-body');
+    const ct = document.getElementById('an-caret');
+    const t = document.getElementById('an-toggle-text');
+    if (b) b.style.display = 'none';
+    if (ct) ct.style.transform = 'rotate(-90deg)';
+    if (t) t.textContent = 'show';
+  }
+});
 
 async function refreshAuto() {
   const bar = document.getElementById('auto-bar');
@@ -2646,6 +2773,7 @@ async function refresh() {
     await refreshFuturesHistory();
     await refreshScan();
     await refreshAuto();
+    await refreshAnalysis();
     renderFuturesStats(_lastGuardian, _lastFuturesHist);
     if (status.strategy === 'pullback' && summary && summary.by_regime) {
       renderRegimeStats(summary.by_regime);

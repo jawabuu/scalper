@@ -183,26 +183,21 @@ class EntryService:
         return val
 
     def _atr_pct(self, symbol: str) -> float | None:
-        """ATR as a % of price, for volatility-scaled sizing."""
+        """
+        ATR as a % of price, from the GUARDIAN's cached value.
+
+        Previously this was a second, uncached implementation. When it failed
+        transiently while the guardian's succeeded, the entry silently fell back
+        to flat sizing while the guardian still placed a volatility-scaled stop
+        — a full-size position behind a wide stop, which is how a trade lost 3x
+        the configured risk. One source, one cache, one answer.
+        """
         try:
-            raw = self.guardian.exchange.fetch_ohlcv(symbol, "15m", limit=96)
-            if not raw or len(raw) < 15:
-                return None
-            trs, prev_close = [], None
-            for _ts, _o, h, l, c, _v in raw:
-                if None in (h, l, c):
-                    continue
-                tr = h - l
-                if prev_close is not None:
-                    tr = max(tr, abs(h - prev_close), abs(l - prev_close))
-                trs.append(tr)
-                prev_close = c
-            if not trs or not prev_close:
-                return None
-            return (sum(trs[-14:]) / min(len(trs), 14)) / prev_close * 100
+            if hasattr(self.guardian, "atr_pct"):
+                return self.guardian.atr_pct(symbol)
         except Exception as e:
             log.warning(f"{symbol}: ATR lookup failed: {type(e).__name__}: {e}")
-            return None
+        return None
 
     def _resolve_symbol(self, symbol: str) -> tuple[bool, str, str]:
         """
@@ -384,6 +379,15 @@ class EntryService:
                 raw_roi = self.limits.atr_stop_mult * atr_pct * leverage
                 stop_roi_override = max(self.limits.atr_stop_min_roi,
                                         min(self.limits.atr_stop_max_roi, raw_roi))
+            else:
+                # Refuse rather than fall back to flat sizing. The guardian will
+                # still place an ATR-scaled stop, so a flat-sized position would
+                # sit behind a stop it was not sized for — the exact mismatch
+                # that cost 3x the intended risk on a single trade.
+                return {"ok": False, "errors": [
+                    f"volatility sizing is enabled but ATR is unavailable for "
+                    f"{symbol} — refusing rather than sizing this at a flat "
+                    f"{margin_pct}% behind a volatility-scaled stop"]}
 
         if stop_roi_override:
             stop_move_pct = stop_roi_override / leverage      # price % to the stop

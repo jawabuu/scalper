@@ -385,6 +385,50 @@ class FuturesGuardian:
             log.warning(f"{symbol}: ATR lookup failed: {type(e).__name__}: {e}")
             return None
 
+    def _capture_entry_context(self, pos: FuturesPosition, price: float,
+                               range_pos: float | None) -> dict:
+        """
+        Snapshot the conditions a position was entered under.
+
+        Recorded once, on first sight, and never updated — the point is what was
+        true AT ENTRY, so later analysis can ask which conditions actually paid.
+        External entries are captured approximately (first observation rather
+        than the true fill moment); auto-trade entries supply exact values via
+        note_entry_context().
+        """
+        ctx = {
+            "side": pos.side,
+            "atr_pct": self.atr_pct(pos.symbol),
+            "range_pos_24h": range_pos,
+            "leverage": pos.effective_leverage,
+            "margin": pos.margin,
+            "captured": "observed",
+        }
+        meta = self._pos_meta.get(pos.symbol, {})
+        hi, lo = meta.get("high_24h"), meta.get("low_24h")
+        try:
+            if hi and lo:
+                ctx["dist_to_extreme_pct"] = (
+                    abs((price - float(lo)) / float(lo) * 100) if pos.side == "long"
+                    else abs((price - float(hi)) / float(hi) * 100))
+        except (TypeError, ValueError):
+            pass
+        return ctx
+
+    def note_entry_context(self, symbol: str, ctx: dict):
+        """
+        Record exact entry conditions from whoever opened the position.
+
+        The auto-trader knows the RSI, distance and re-entry status it acted on;
+        the guardian can only observe after the fact. Exact beats observed.
+        """
+        with self._lock:
+            meta = self._pos_meta.setdefault(symbol, {})
+            existing = meta.get("entry_context") or {}
+            merged = {**existing, **ctx, "captured": "exact"}
+            meta["entry_context"] = merged
+        log.info(f"{symbol}: entry context recorded {ctx}")
+
     def effective_stop_roi(self, pos: FuturesPosition) -> float:
         """
         The initial stop distance to use for this position.
@@ -599,6 +643,10 @@ class FuturesGuardian:
                 "pct_below_24h_high": dist_high,
                 "opened_seen_at": self._pos_meta.get(pos.symbol, {}).get(
                     "opened_seen_at", time.time()),
+                # Entry conditions, captured once and preserved, so closed
+                # trades can later be analysed by what they were entered on.
+                "entry_context": self._pos_meta.get(pos.symbol, {}).get(
+                    "entry_context") or self._capture_entry_context(pos, price, range_pos),
             }
 
         with self._lock:
@@ -898,6 +946,9 @@ class FuturesGuardian:
             "armed": state.armed,
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
             "exit_is_estimate": not exit_from_exchange,
+            "entry_context": meta.get("entry_context") or {},
+            "exit_reason": ("trail" if state.native_trail_id
+                            else ("stop" if state.stop_roi is not None else "unknown")),
             "opened_at": meta.get("opened_seen_at"),
             "closed_at": time.time(),
         }

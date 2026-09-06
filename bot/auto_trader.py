@@ -516,6 +516,25 @@ class AutoTrader:
                 # Remember the RSI this entry was taken at, so if it fails the
                 # next attempt is judged against it.
                 self.state.failed_entry_rsi.setdefault(symbol, row.get("rsi") or 0.0)
+                # Hand the guardian the exact conditions this entry acted on,
+                # so the trade can later be analysed by what triggered it.
+                try:
+                    self.guardian.note_entry_context(symbol, {
+                        "rsi": row.get("rsi"),
+                        "atr_pct": row.get("atr_pct"),
+                        "dist_to_extreme_pct": abs(
+                            row.get("pct_above_24h_low") if side == "long"
+                            else row.get("pct_below_24h_high")),
+                        "range_pos_24h": row.get("range_pos_24h"),
+                        "ema_gap_pct": row.get("ema_gap_pct"),
+                        "strength": row.get("strength"),
+                        "streak": streak,
+                        "callback_pct": decision.callback_pct,
+                        "was_reentry": "cooldown overridden" in why,
+                        "auto": True,
+                    })
+                except Exception as e:
+                    _log.debug(f"could not record entry context for {symbol}: {e}")
                 positions.append(object())     # count it toward the cap now
                 note = " | ".join(decision.notes) if decision.notes else ""
                 _log.warning(

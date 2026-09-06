@@ -276,6 +276,26 @@ class _LevEx:
 
 class _LevGuardian:
     dry_run = True
+
+    def atr_pct(self, symbol):
+        """Mirrors the real guardian: ATR% from candles, single source."""
+        try:
+            raw = self.exchange.fetch_ohlcv(symbol, "15m", limit=96)
+        except Exception:
+            return None
+        if not raw or len(raw) < 15:
+            return None
+        trs, prev = [], None
+        for _ts, _o, h, l, c, _v in raw:
+            tr = h - l
+            if prev is not None:
+                tr = max(tr, abs(h - prev), abs(l - prev))
+            trs.append(tr)
+            prev = c
+        if not trs or not prev:
+            return None
+        return (sum(trs[-14:]) / min(len(trs), 14)) / prev * 100
+
     def __init__(self, ex):
         from bot.futures_guard import GuardConfig
         self.exchange = ex
@@ -588,3 +608,67 @@ def test_entry_unaffected_when_below_the_cap():
         default_callback_pct=0.1, assumed_leverage=10.0))
     plan = svc.preview(symbol="X/USDT:USDT", side="short")["plan"]
     assert plan["qty"] == pytest.approx(15.0, abs=1.0)
+
+
+# ── Sizing and stop must never disagree (regression) ─────────────────────────
+
+def test_refuses_rather_than_flat_sizing_when_atr_unavailable():
+    """
+    The entry silently fell back to flat sizing when its ATR lookup failed,
+    while the guardian still placed an ATR-scaled stop. A full-size position
+    behind a -30% ROI stop cost 3x the configured risk on one trade.
+    """
+    class NoAtrGuardian(_LevGuardian):
+        def atr_pct(self, symbol):
+            return None            # transient failure
+
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(NoAtrGuardian(_atr_ex(0.0035)), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0))
+    res = svc.preview(symbol="X/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("ATR is unavailable" in e for e in res["errors"])
+
+
+def test_flat_sizing_still_allowed_when_atr_sizing_is_off():
+    """With volatility sizing disabled there is no mismatch to worry about."""
+    class NoAtrGuardian(_LevGuardian):
+        def atr_pct(self, symbol):
+            return None
+
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(NoAtrGuardian(_atr_ex(0.0035)), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0))   # atr_stop_mult = 0
+    assert svc.preview(symbol="X/USDT:USDT", side="long")["ok"] is True
+
+
+def test_entry_and_guardian_use_the_same_atr():
+    """One source, one cache — two implementations could disagree."""
+    ex = _atr_ex(0.0035)
+    g = _LevGuardian(ex)
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(g, EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0))
+    assert svc._atr_pct("X/USDT:USDT") == pytest.approx(g.atr_pct("X/USDT:USDT"))
+
+
+def test_risk_is_honoured_when_the_stop_is_clamped_to_max():
+    """
+    A stop clamped to ATR_STOP_MAX_ROI must still size so the loss equals
+    ENTRY_RISK_PCT — the clamp changes the stop, not the money at risk.
+    """
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(_LevGuardian(_atr_ex(0.05)), EntryLimits(   # very volatile
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0,
+        atr_stop_min_roi=4.0, atr_stop_max_roi=30.0))
+    plan = svc.preview(symbol="X/USDT:USDT", side="long")["plan"]
+    assert abs(plan["projected_stop_roi"]) == pytest.approx(30.0)
+    # loss at that stop must be ~1% of the wallet, not 30% of a flat position
+    assert plan["projected_stop_loss_usdt"] == pytest.approx(107.0 * 0.01, rel=0.05)
