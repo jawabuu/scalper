@@ -7,16 +7,51 @@ import os
 from dataclasses import dataclass, field
 
 
+def _strip_inline_comment(raw: str) -> str:
+    """
+    Drop a trailing `# comment` and surrounding whitespace.
+
+    Compose `environment:` entries keep everything after the `=` verbatim, so a
+    line like `GUARD_TRAIL_CALLBACK_PCT=1.0  # price percent` arrives with the
+    comment attached. _env_bool already handled this; the numeric readers did
+    not, and crashed the process at startup instead.
+    """
+    return (raw or "").split("#", 1)[0].strip()
+
+
 def _env(key: str, default: str = "") -> str:
-    return os.environ.get(key, default)
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    # A value that is ONLY a comment is treated as unset.
+    cleaned = _strip_inline_comment(raw)
+    return cleaned if cleaned or not raw.strip().startswith("#") else default
 
 
 def _env_float(key: str, default: float) -> float:
-    return float(os.environ.get(key, str(default)))
+    raw = _strip_inline_comment(os.environ.get(key, ""))
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger("config").warning(
+            f"{key}={raw!r} is not a number — falling back to {default}")
+        return float(default)
 
 
 def _env_int(key: str, default: int) -> int:
-    return int(os.environ.get(key, str(default)))
+    raw = _strip_inline_comment(os.environ.get(key, ""))
+    if not raw:
+        return int(default)
+    try:
+        return int(float(raw))
+    except ValueError:
+        import logging
+        logging.getLogger("config").warning(
+            f"{key}={raw!r} is not a number — falling back to {default}")
+        return int(default)
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -220,6 +255,22 @@ class BotConfig:
     atr_stop_min_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MIN_ROI", 4.0))
     atr_stop_max_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MAX_ROI", 30.0))
     entry_risk_pct: float = field(default_factory=lambda: _env_float("ENTRY_RISK_PCT", 1.0))
+
+    # ── Unattended auto-trading ─────────────────────────────────────────
+    # OFF by default and also toggleable from the dashboard. Opens leveraged
+    # positions without supervision, so the safety limits below are not
+    # optional extras — they are what makes it survivable.
+    auto_trade_enabled: bool = field(default_factory=lambda: _env_bool("AUTO_TRADE_ENABLED", False))
+    auto_interval: int = field(default_factory=lambda: _env_int("AUTO_TRADE_INTERVAL", 30))
+    auto_max_dist_pct: float = field(default_factory=lambda: _env_float("AUTO_MAX_DIST_PCT", 3.0))
+    auto_strength_sweeps: int = field(default_factory=lambda: _env_int("AUTO_STRENGTH_SWEEPS", 2))
+    auto_long_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_LONG_RSI_MIN", 48.0))
+    auto_short_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MIN", 78.0))
+    auto_callback_ratio: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_RATIO", 0.5))
+    auto_callback_atr_mult: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_ATR_MULT", 0.75))
+    auto_daily_loss_limit_pct: float = field(default_factory=lambda: _env_float("AUTO_DAILY_LOSS_LIMIT_PCT", 5.0))
+    auto_symbol_cooldown_s: float = field(default_factory=lambda: _env_float("AUTO_SYMBOL_COOLDOWN_S", 1800.0))
+    auto_max_trades_per_hour: int = field(default_factory=lambda: _env_int("AUTO_MAX_TRADES_PER_HOUR", 6))
 
     # ── Operator-initiated futures entry (UI button) ────────────────────
     # The ONLY component that can OPEN a position. Off by default; honours

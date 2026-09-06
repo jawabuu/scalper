@@ -31,6 +31,13 @@ log = logging.getLogger("api")
 _engine = None
 _scanner = None
 _guardian = None
+_auto = None
+
+
+def set_auto_trader(auto):
+    """Attach the auto-trader so the dashboard can toggle and inspect it."""
+    global _auto
+    _auto = auto
 _entry = None
 
 
@@ -169,6 +176,30 @@ def create_app(engine) -> FastAPI:
         except Exception as e:
             log.exception("futures trades failed")
             return {"enabled": True, "trades": [], "error": f"{type(e).__name__}: {e}"}
+
+    @app.get("/api/auto-trade")
+    def auto_trade_status(user: dict = Depends(_require_auth)):
+        if _auto is None:
+            return {"available": False, "enabled": False,
+                    "message": "Auto-trade not configured on this instance"}
+        snap = _auto.snapshot()
+        snap["available"] = True
+        return snap
+
+    @app.post("/api/auto-trade")
+    def auto_trade_set(payload: dict, user: dict = Depends(_require_auth)):
+        """Toggle unattended trading, or clear a daily-loss halt."""
+        if _auto is None:
+            raise HTTPException(status_code=400, detail="Auto-trade not configured")
+        if payload.get("reset_halt"):
+            log.warning(f"Auto-trade halt cleared by {user['username']}")
+            snap = _auto.reset_halt()
+        else:
+            on = bool(payload.get("enabled"))
+            log.warning(f"Auto-trade {'ENABLED' if on else 'DISABLED'} by {user['username']}")
+            snap = _auto.set_enabled(on)
+        snap["available"] = True
+        return snap
 
     @app.get("/api/scan")
     def scan(user: dict = Depends(_require_auth)):

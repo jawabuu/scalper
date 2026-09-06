@@ -1050,3 +1050,34 @@ def test_computed_fallback_is_flagged_as_estimate():
     rec = g._closed_trades[0]
     assert rec["exit_is_estimate"] is True
     assert rec["exit_from_exchange"] is False
+
+
+# ── Env parsing must tolerate inline comments (regression) ───────────────────
+
+def test_numeric_env_readers_strip_inline_comments():
+    """
+    Compose keeps everything after `=` verbatim, so
+    `GUARD_TRAIL_CALLBACK_PCT=1.0  # price percent` arrived with the comment
+    attached and crashed the process at startup. _env_bool handled this; the
+    numeric readers did not.
+    """
+    import os
+    from bot.config import _env_float, _env_int
+    os.environ["_T_FLOAT"] = "1.0    # PRICE percent, Binance's own unit"
+    os.environ["_T_INT"] = "6   # positions"
+    try:
+        assert _env_float("_T_FLOAT", 9.9) == pytest.approx(1.0)
+        assert _env_int("_T_INT", 1) == 6
+    finally:
+        os.environ.pop("_T_FLOAT", None)
+        os.environ.pop("_T_INT", None)
+
+
+def test_unparseable_numeric_env_falls_back_instead_of_crashing():
+    import os
+    from bot.config import _env_float
+    os.environ["_T_BAD"] = "not-a-number"
+    try:
+        assert _env_float("_T_BAD", 2.5) == pytest.approx(2.5)
+    finally:
+        os.environ.pop("_T_BAD", None)

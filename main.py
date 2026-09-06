@@ -5,6 +5,7 @@ Starts the FastAPI dashboard in a background thread, then runs the bot loop.
 """
 
 import logging
+import threading
 import os
 import sys
 
@@ -46,6 +47,10 @@ if __name__ == "__main__":
     )
 
     engine = ScalpingEngine(cfg)
+    # Handles the auto-trader needs; stay None when their subsystem is off.
+    guardian = None
+    entry_service = None
+    scan_runner = None
 
     # Explicit feature banner — makes it unambiguous from the logs whether the
     # optional subsystems are on, instead of silence when they are off.
@@ -92,7 +97,7 @@ if __name__ == "__main__":
         if cfg.futures_entry_enabled:
             from bot.futures_entry import EntryService, EntryLimits
             from bot.api import set_entry_service
-            set_entry_service(EntryService(guardian, EntryLimits(
+            entry_service = EntryService(guardian, EntryLimits(
                 max_positions=cfg.entry_max_positions,
                 max_margin_pct=cfg.entry_max_margin_pct,
                 default_margin_pct=cfg.entry_default_margin_pct,
@@ -102,7 +107,8 @@ if __name__ == "__main__":
                 atr_stop_min_roi=cfg.atr_stop_min_roi,
                 atr_stop_max_roi=cfg.atr_stop_max_roi,
                 risk_pct=cfg.entry_risk_pct,
-            )))
+            ))
+            set_entry_service(entry_service)
             log.warning(
                 f"Futures ENTRY enabled — max {cfg.entry_max_positions} position(s), "
                 f"margin {cfg.entry_default_margin_pct}% (cap {cfg.entry_max_margin_pct}%), "
@@ -133,7 +139,7 @@ if __name__ == "__main__":
             stop_pct_for_ratio=(cfg.guard_initial_stop_roi /
                                 max(cfg.entry_assumed_leverage, 1.0)),
         )
-        runner = ScanRunner(
+        scan_runner = ScanRunner(
             scan_cfg,
             timeframe=cfg.scanner_timeframe,
             max_symbols=cfg.scanner_max_symbols,
@@ -141,10 +147,56 @@ if __name__ == "__main__":
             interval=cfg.scanner_interval,
             demo=cfg.scanner_demo,
         )
-        set_scanner(runner)
-        runner.start_background()
+        set_scanner(scan_runner)
+        scan_runner.start_background()
       except Exception as e:
         log.error(f"Scanner failed to start: {e}", exc_info=True)
+
+    # Unattended auto-trading. Requires BOTH the scanner (for candidates) and
+    # the entry service (for guardrailed order placement); without either it
+    # cannot run, so it is only started when both are present.
+    # Constructed whenever its dependencies exist, so the dashboard toggle works
+    # even if it starts disabled. The AutoTradeConfig.enabled flag gates action.
+    if True:
+        try:
+            from bot.auto_trader import AutoTradeConfig, AutoTrader
+            from bot.api import set_auto_trader
+            if scan_runner and entry_service and guardian:
+                auto_cfg = AutoTradeConfig(
+                    enabled=cfg.auto_trade_enabled,
+                    max_dist_to_extreme_pct=cfg.auto_max_dist_pct,
+                    required_strength_sweeps=cfg.auto_strength_sweeps,
+                    long_rsi_min=cfg.auto_long_rsi_min,
+                    short_rsi_min=cfg.auto_short_rsi_min,
+                    callback_ratio=cfg.auto_callback_ratio,
+                    callback_atr_mult=cfg.auto_callback_atr_mult,
+                    daily_loss_limit_pct=cfg.auto_daily_loss_limit_pct,
+                    symbol_cooldown_s=cfg.auto_symbol_cooldown_s,
+                    max_trades_per_hour=cfg.auto_max_trades_per_hour,
+                    max_open_positions=cfg.entry_max_positions,
+                )
+                auto = AutoTrader(auto_cfg, scan_runner, entry_service, guardian)
+                set_auto_trader(auto)
+
+                def _auto_loop():
+                    import time as _t
+                    while True:
+                        try:
+                            auto.run_once()
+                        except Exception as e:
+                            log.warning(f"auto-trade cycle error: {e}")
+                        _t.sleep(cfg.auto_interval)
+
+                threading.Thread(target=_auto_loop, daemon=True,
+                                 name="auto-trader").start()
+                log.warning(
+                    f"Auto-trade wired: {'ENABLED' if cfg.auto_trade_enabled else 'off'} "
+                    f"(toggle from the dashboard) — every {cfg.auto_interval}s")
+            else:
+                log.info("Auto-trade not wired: needs both the scanner and "
+                         "futures entry to be enabled")
+        except Exception as e:
+            log.error(f"Auto-trade failed to start: {e}", exc_info=True)
 
     run_api(engine, host="0.0.0.0", port=8000)
 

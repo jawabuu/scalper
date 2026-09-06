@@ -112,6 +112,12 @@
   .dir-short { color: var(--red); font-weight: bold; }
   .dir-long  { color: var(--green); font-weight: bold; }
   .scan-note { font-size: 10px; color: var(--muted); }
+  .auto-bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+              padding:10px 0 4px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+  .auto-flag { font-size:9px; padding:2px 7px; border-radius:3px; font-weight:bold; letter-spacing:.5px; }
+  .af-on   { background:rgba(255,77,106,.18); color:var(--red); border:1px solid rgba(255,77,106,.45); }
+  .af-off  { background:rgba(255,255,255,.05); color:var(--muted); border:1px solid var(--border2); }
+  .af-halt { background:rgba(255,170,0,.15); color:var(--warn); border:1px solid rgba(255,170,0,.4); }
   .view-switch { display: inline-flex; border: 1px solid var(--border2); border-radius: 4px; overflow: hidden; margin-left: 10px; }
   .view-switch button {
     background: transparent; border: none; color: var(--muted);
@@ -812,6 +818,13 @@
         <span class="controls-toggle"><span id="scan-caret" class="controls-caret">&#9660;</span> <span id="scan-toggle-text">hide</span></span>
       </div>
       <div id="scan-body">
+        <div class="auto-bar" id="auto-bar" style="display:none">
+          <span class="ta-label">Auto trade</span>
+          <label class="ta-switch"><input type="checkbox" id="auto-toggle" onchange="onAutoToggle()"><span class="ta-slider"></span></label>
+          <span id="auto-flag"></span>
+          <span class="scan-note" id="auto-meta"></span>
+          <button class="btn-row-close" id="auto-reset" style="display:none" onclick="resetAutoHalt()">Clear halt</button>
+        </div>
         <div id="scan-wrap"><div class="empty">Scanning&hellip;</div></div>
         <div class="scan-note" style="margin-top:10px">
           Indicators of <strong>potential</strong> only — the scanner is read-only and never trades. Review each before acting.
@@ -2306,6 +2319,75 @@ document.addEventListener('DOMContentLoaded', () => {
   applyView();
 });
 
+
+// ── Auto-trade toggle ────────────────────────────────────────────────────────
+// Unattended entries. Deliberately prominent and red when live: this is the one
+// control that opens leveraged positions with nobody watching.
+async function refreshAuto() {
+  const bar = document.getElementById('auto-bar');
+  if (!bar) return;
+  try {
+    const a = await api('/api/auto-trade');
+    if (!a || !a.available) { bar.style.display = 'none'; return; }
+    bar.style.display = '';
+    const t = document.getElementById('auto-toggle');
+    if (t) t.checked = !!a.enabled;
+
+    const flag = document.getElementById('auto-flag');
+    if (a.halted_reason) {
+      flag.innerHTML = '<span class="auto-flag af-halt">HALTED</span>';
+    } else {
+      flag.innerHTML = a.enabled
+        ? '<span class="auto-flag af-on">LIVE — TRADING UNATTENDED</span>'
+        : '<span class="auto-flag af-off">OFF</span>';
+    }
+
+    const c = a.config || {};
+    const cool = Object.keys(a.cooldowns || {}).length;
+    setEl('auto-meta',
+      (a.halted_reason ? a.halted_reason + ' · ' : '')
+      + `within ${c.max_dist_to_extreme_pct}% of extreme · `
+      + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `
+      + `short RSI>${c.short_rsi_min} · callback ${c.callback_ratio}x distance · `
+      + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${c.max_trades_per_hour} trades/h · `
+      + `daily stop ${c.daily_loss_limit_pct}%`
+      + (cool ? ` · ${cool} on cooldown` : ''));
+
+    const rst = document.getElementById('auto-reset');
+    if (rst) rst.style.display = a.halted_reason ? '' : 'none';
+  } catch (e) { bar.style.display = 'none'; }
+}
+
+async function onAutoToggle() {
+  const on = document.getElementById('auto-toggle').checked;
+  if (on && !confirm(
+      'Enable AUTO TRADE?\n\nThe bot will open leveraged positions on its own, '
+      + 'without confirmation. Entries still pass every guardrail and honour dry '
+      + 'run, but nobody will be reviewing them.')) {
+    document.getElementById('auto-toggle').checked = false;
+    return;
+  }
+  try {
+    await fetch(API + '/api/auto-trade', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: on }),
+    });
+  } catch (e) {}
+  refreshAuto();
+}
+
+async function resetAutoHalt() {
+  try {
+    await fetch(API + '/api/auto-trade', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset_halt: true }),
+    });
+  } catch (e) {}
+  refreshAuto();
+}
+
 function renderGuardian(g) {
   const panel = document.getElementById('guard-panel');
   if (!panel) return;
@@ -2499,6 +2581,7 @@ async function refresh() {
     await refreshGuardian();
     await refreshFuturesHistory();
     await refreshScan();
+    await refreshAuto();
     renderFuturesStats(_lastGuardian, _lastFuturesHist);
     if (status.strategy === 'pullback' && summary && summary.by_regime) {
       renderRegimeStats(summary.by_regime);
