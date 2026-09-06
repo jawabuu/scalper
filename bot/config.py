@@ -246,6 +246,11 @@ class BotConfig:
     guardian_demo: bool = field(default_factory=lambda: _env_bool(
         "GUARDIAN_DEMO", _env_bool("GUARDIAN_TESTNET", _env_bool("TESTNET", True))))
     guardian_poll_interval: float = field(default_factory=lambda: _env_float("GUARDIAN_POLL_INTERVAL", 5.0))
+    # Faster polling while an entry order is resting. A filled position has no
+    # stop until the guardian notices it, and that window is where a sharp move
+    # does its damage.
+    guardian_pending_poll_interval: float = field(default_factory=lambda: max(
+        0.5, _env_float("GUARDIAN_PENDING_POLL_INTERVAL", 1.0)))
     # Persists restart-critical futures state: sized stops, position peaks, the
     # daily-loss baseline, cooldowns and trade history. Empty disables it.
     futures_state_path: str = field(default_factory=lambda: _env(

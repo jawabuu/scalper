@@ -94,6 +94,7 @@ if __name__ == "__main__":
         )
         # The guardian needs the risk budget to police the sizing/stop invariant.
         guardian.risk_pct = cfg.entry_risk_pct
+        guardian.pending_poll_interval = cfg.guardian_pending_poll_interval
         # Restore before the first cycle so discovered positions keep the stop
         # they were sized for and their peak ROI, instead of being re-derived.
         if cfg.futures_state_path:

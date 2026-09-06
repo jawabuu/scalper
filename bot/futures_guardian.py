@@ -230,6 +230,10 @@ class FuturesGuardian:
         self._entry_service = getattr(self, "_entry_service", None)
         # How long an unfilled entry order may rest before it is cancelled.
         self.entry_order_ttl_s: float = getattr(self, "entry_order_ttl_s", 900.0)
+        # Poll interval used while an entry order is resting and could fill at
+        # any moment. Shrinks the unprotected window after a fill.
+        self.pending_poll_interval: float = getattr(
+            self, "pending_poll_interval", 1.0)
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -1346,13 +1350,32 @@ class FuturesGuardian:
         with self._lock:
             return list(reversed(self._closed_trades))
 
+    def _has_pending_entries(self) -> bool:
+        entry = getattr(self, "_entry_service", None)
+        if entry is None:
+            return False
+        try:
+            return any(entry.bot_placed_orders(sym)
+                       for sym in list(entry.export_placed_orders().keys()))
+        except Exception:
+            return False
+
     def run_forever(self):
         while True:
             try:
                 self.run_cycle()
             except Exception as e:
                 log.warning(f"guardian cycle error: {e}")
-            time.sleep(self.poll_interval)
+
+            # Between an entry FILLING and the guardian first seeing it, the
+            # position has no stop at all. On a sharp move that window is long
+            # enough to blow past the stop level entirely — at 20x, a 0.5% move
+            # in 5s is already -10% ROI. Poll faster while an entry order is
+            # resting, so a new position is protected sooner.
+            interval = self.poll_interval
+            if self._has_pending_entries():
+                interval = min(interval, self.pending_poll_interval)
+            time.sleep(interval)
 
     def start_background(self):
         t = threading.Thread(target=self.run_forever, daemon=True,

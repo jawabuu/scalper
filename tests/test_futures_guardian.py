@@ -1656,3 +1656,62 @@ def test_instance_identity_without_a_guardian_is_unknown():
         assert api._instance_identity()["futures_env"] == "unknown"
     finally:
         api._guardian = prev
+
+
+# ── The unprotected window after a fill ──────────────────────────────────────
+
+def test_polls_faster_while_an_entry_order_rests():
+    """
+    Between an entry filling and the guardian seeing it, the position has no
+    stop. At 20x a 0.5% move in 5s is already -10% ROI, so the window is where
+    a sharp move does its damage.
+    """
+    g = _guardian(FakeExchange())
+    g.poll_interval = 5.0
+    g.pending_poll_interval = 1.0
+
+    class Entry:
+        def export_placed_orders(self): return {"X/USDT:USDT": [{"id": "E1"}]}
+        def bot_placed_orders(self, sym): return [{"id": "E1"}]
+    g._entry_service = Entry()
+    assert g._has_pending_entries() is True
+
+
+def test_normal_interval_when_nothing_is_pending():
+    g = _guardian(FakeExchange())
+
+    class Entry:
+        def export_placed_orders(self): return {}
+        def bot_placed_orders(self, sym): return []
+    g._entry_service = Entry()
+    assert g._has_pending_entries() is False
+
+
+def test_no_entry_service_means_normal_polling():
+    g = _guardian(FakeExchange())
+    g._entry_service = None
+    assert g._has_pending_entries() is False
+
+
+def test_position_past_its_stop_on_discovery_is_closed_not_left_open():
+    """
+    A sharp move (or fill slippage) can leave a position already past its stop
+    the first time the guardian sees it. It must close, not sit unprotected.
+    """
+    from bot.futures_guard import GuardConfig
+
+    class Ex(FakeExchange):
+        def create_order(self, **kw):
+            if kw.get("type") == "STOP_MARKET":
+                raise RuntimeError("Order would immediately trigger")
+            return FakeExchange.create_order(self, **kw)
+
+    cfg = GuardConfig(initial_stop_roi=10, atr_stop_mult=0.0,
+                      close_if_past_stop=True)
+    fake = Ex(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    g = _guardian(fake, cfg=cfg)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, -20.0)      # gapped past the stop
+    g.run_cycle()
+    assert [o for o in fake.created if o["type"] == "MARKET"]
+    assert any(a["action"] == "closed_past_stop" for a in g._actions)
