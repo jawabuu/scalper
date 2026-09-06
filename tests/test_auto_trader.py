@@ -224,8 +224,10 @@ def test_safety_limits_cannot_be_changed_from_the_dashboard():
     stay env-only.
     """
     a = _trader()
+    # max_trades_per_hour deliberately moved to the tunable tier: it is a rate
+    # limit, and the loss limits below are what actually bound the damage.
     for key in ("daily_loss_limit_pct", "symbol_cooldown_s",
-                "max_trades_per_hour", "max_open_positions"):
+                "max_open_positions", "max_reentries_per_symbol"):
         applied, errors = a.update_rules({key: 999})
         assert applied == {}
         assert any("safety limit" in e for e in errors)
@@ -324,3 +326,44 @@ def test_reentry_cap_is_not_dashboard_tunable():
     a = AutoTrader.__new__(AutoTrader); a.cfg = AutoTradeConfig(); a._log = []
     applied, errors = a.update_rules({"max_reentries_per_symbol": 99})
     assert applied == {} and any("safety limit" in e for e in errors)
+
+
+# ── Rate cap moved to the tunable tier ───────────────────────────────────────
+
+def test_trades_per_hour_is_live_editable():
+    """
+    A rate limit, not a loss limit — the daily stop and position cap already
+    bound the damage, so this one is tunable from the dashboard.
+    """
+    a = _trader()
+    applied, errors = a.update_rules({"max_trades_per_hour": 20})
+    assert not errors and a.cfg.max_trades_per_hour == 20
+
+
+def test_trades_per_hour_can_be_disabled_live():
+    a = _trader()
+    a.update_rules({"max_trades_per_hour": 0})
+    assert a.cfg.max_trades_per_hour == 0
+    st = roll_day(SafetyState(), 1000.0)
+    import time
+    now = time.time()
+    for _ in range(50):
+        record_entry(st, now)
+    ok, _ = check_safety(st, a.cfg, balance=1000.0, open_positions=0,
+                         symbol="X", now=now)
+    assert ok
+
+
+def test_trades_per_hour_is_bounded():
+    a = _trader()
+    applied, errors = a.update_rules({"max_trades_per_hour": 500})
+    assert applied == {} and errors
+
+
+def test_loss_limits_remain_env_only():
+    """Moving the rate cap must not have loosened the real safety limits."""
+    a = _trader()
+    for key in ("daily_loss_limit_pct", "symbol_cooldown_s",
+                "max_open_positions", "max_reentries_per_symbol"):
+        applied, errors = a.update_rules({key: 999})
+        assert applied == {} and any("safety limit" in e for e in errors)

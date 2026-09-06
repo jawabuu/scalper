@@ -436,10 +436,12 @@ class AutoTrader:
         # How much stronger a signal must be to override a cooldown. This is an
         # entry-quality judgement, so it is tunable; the re-entry CAP is not.
         "cooldown_override_rsi_delta": (float, 0.0, 50.0),
+        # A rate limit, not a loss limit: the daily loss stop and position cap
+        # already bound the damage, so this is tunable. 0 disables it.
+        "max_trades_per_hour": (int, 0, 200),
     }
     SAFETY_ONLY = {"daily_loss_limit_pct", "symbol_cooldown_s",
-                   "max_trades_per_hour", "max_open_positions",
-                   "max_reentries_per_symbol"}
+                   "max_open_positions", "max_reentries_per_symbol"}
 
     def update_rules(self, payload: dict) -> tuple[dict, list[str]]:
         """

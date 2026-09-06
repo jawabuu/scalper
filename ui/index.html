@@ -587,6 +587,71 @@
     .login-card { padding: 32px 24px; min-width: 280px; }
   }
 
+
+  /* ── Mobile: the futures panels postdate the original breakpoints ── */
+  @media (max-width: 768px) {
+    /* Every full-width panel scrolls horizontally rather than squashing its
+       table into unreadable columns. */
+    /* min-width:0 is essential: a grid item defaults to min-width:auto and so
+       cannot shrink below its table's min-width, pushing the whole page wider
+       than the viewport instead of scrolling inside the panel. */
+    .guard-panel, .scan-panel, .analysis-panel,
+    .positions-panel, .history-panel, .panel {
+      grid-column: 1;
+      min-width: 0;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    main, .stats-row { min-width: 0; max-width: 100vw; }
+    .stat { min-width: 0; }
+    .stat-value { overflow-wrap: anywhere; }
+
+    /* Header must shrink, not push the page wide. */
+    header { min-width: 0; }
+    .user-avatar { display: none; }
+    .version-badge { display: none; }
+
+    /* Real tap targets. */
+    .view-switch button { padding: 8px 12px; font-size: 11px; }
+    .pb-input { height: 30px; }
+    .btn-logout { padding: 8px 12px; }
+    .guard-panel table, .scan-panel table { min-width: 760px; }
+    .analysis-panel table { min-width: 680px; }
+
+    /* The auto-trade bar and entry rules wrap instead of overflowing. */
+    .auto-bar {
+      gap: 8px 12px;
+      align-items: flex-start;
+    }
+    .auto-bar .scan-note { flex-basis: 100%; line-height: 1.6; }
+    .pb-input { width: 64px; }
+
+    /* Header gets tight — the view switch matters more than the badges. */
+    .view-switch { margin-left: 4px; }
+    .view-switch button { padding: 3px 8px; }
+    /* Reclaim header width for the view switch on narrow screens. */
+    .badge-breakout, .badge-pullback, .badge-live, .badge-testnet { display: none; }
+
+    /* Analysis tables stack anyway; give each its own scroll context. */
+    .an-grid > div { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+    /* Row action buttons need a real tap target. */
+    .btn-entry, .btn-row-close, .btn-row-confirm {
+      padding: 8px 12px;
+      font-size: 11px;
+    }
+    .range-bar { display: none; }   /* label carries the meaning */
+  }
+
+  @media (max-width: 480px) {
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .panel { padding: 12px 10px; }
+    .auto-bar .ta-label { flex-basis: 100%; }
+    .an-note { font-size: 10px; }
+    /* Keep the numbers legible rather than fitting more of them. */
+    .guard-panel table, .scan-panel table { min-width: 820px; }
+  }
+
   /* ── Login screen ── */
   .login-screen {
     display: none;
@@ -884,6 +949,8 @@
             <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
           <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
             <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">max trades/h&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-tph" step="1" title="0 disables the rate cap" onchange="onAutoRule('max_trades_per_hour','ar-tph')"></span>
           <span class="scan-note" id="auto-rule-msg"></span>
         </div>
         <div id="scan-wrap"><div class="empty">Scanning&hellip;</div></div>
@@ -1792,7 +1859,9 @@ function applyStrategyView(status) {
   const strat = status.strategy || 'breakout';
   const sb = document.getElementById('strategy-badge');
   if (sb) {
-    sb.style.display = 'inline-block';
+    // Clear the inline display rather than setting one, so the mobile rule
+    // that hides badges can still win. An inline style beats a media query.
+    sb.style.display = '';
     sb.className = 'badge badge-' + (strat === 'pullback' ? 'pullback' : 'breakout');
     sb.textContent = strat.toUpperCase();
   }
@@ -2422,6 +2491,7 @@ function fillAutoRules(c) {
   set('ar-ratio', c.callback_ratio);
   set('ar-atr', c.callback_atr_mult);
   set('ar-cd', c.cooldown_override_rsi_delta);
+  set('ar-tph', c.max_trades_per_hour);
 }
 
 
