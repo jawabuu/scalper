@@ -35,6 +35,7 @@ from .futures_guard import (
     FuturesPosition, GuardState, GuardConfig,
     roi_pct, price_for_roi, stop_side,
     adopt_state, is_protective_stop, evaluate,
+    callback_roi_at, trail_locks_in, is_armed,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -207,6 +208,51 @@ class FuturesGuardian:
                  f"trigger={price_str} id={oid}")
         return oid
 
+    def _place_native_trail(self, pos: FuturesPosition) -> str | None:
+        """
+        Place Binance's own TRAILING_STOP_MARKET for the armed phase.
+
+        Once this is resting the exchange tracks the peak continuously, tick by
+        tick, so the trail no longer depends on how often the guardian polls —
+        the sampling gap that let a spike go unnoticed disappears.
+
+        callbackRate is a PRICE percentage, so its ROI cost scales with the
+        position's leverage; that is why the lock-in check happens here rather
+        than at startup.
+        """
+        cb = self.cfg.trail_callback_pct
+        lev = pos.effective_leverage
+        locked = trail_locks_in(lev, self.cfg)
+        if locked <= 0:
+            log.warning(
+                f"{pos.symbol}: arming a {cb}% trail at {lev:.0f}x gives back "
+                f"{callback_roi_at(lev, self.cfg):.0f}% ROI, but the arm level is "
+                f"+{self.cfg.arm_roi:.0f}% — the trail would engage at "
+                f"{locked:+.0f}% ROI (at or below entry). Keeping the fixed stop "
+                f"instead. Raise GUARD_ARM_ROI or lower GUARD_TRAIL_CALLBACK_PCT."
+            )
+            return None
+
+        qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
+        side = stop_side(pos)
+        if self.dry_run:
+            log.info(f"[DRY RUN] would place {side} TRAILING_STOP_MARKET reduceOnly "
+                     f"{qty_str} {pos.symbol} callbackRate={cb}%")
+            return f"dry-trail-{int(time.time()*1000)}"
+
+        order = self.exchange.create_order(
+            symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
+            amount=float(qty_str), price=None,
+            params={"callbackRate": cb, "reduceOnly": True},
+        )
+        oid = str(order.get("id") or order.get("orderId") or "")
+        log.info(
+            f"{pos.symbol}: ARMED native trailing stop (callback {cb}% price = "
+            f"{callback_roi_at(lev, self.cfg):.0f}% ROI at {lev:.0f}x), locks in "
+            f"~{locked:+.0f}% ROI. id={oid}"
+        )
+        return oid
+
     def _cancel_stop(self, pos: FuturesPosition, order_id: str) -> bool:
         """
         Cancel a stop the guardian is managing.
@@ -281,7 +327,43 @@ class FuturesGuardian:
                          f"existing stop: {state.stop_roi is not None}")
 
         prev_order_id = state.stop_order_id
+        was_armed = state.armed
         state, stop_price, reason = evaluate(pos, price, state, self.cfg)
+
+        # ── Armed phase: Binance owns the trail ──────────────────────────────
+        # Once a native trailing stop is resting the exchange tracks the peak
+        # continuously, so the guardian must NOT keep repositioning stops — it
+        # only watches. This is what removes the polling gap.
+        if state.native_trail_id:
+            with self._lock:
+                self._states[pos.symbol] = state
+            return
+
+        # ── Transition: arm the native trail, replacing the fixed stop ───────
+        if self.cfg.use_native_trail and state.armed and not was_armed:
+            trail_id = None
+            try:
+                trail_id = self._place_native_trail(pos)
+            except Exception as e:
+                log.error(f"FAILED to arm native trail for {pos.symbol}: {e} — "
+                          f"keeping the fixed stop")
+                self._record(pos.symbol, "trail_failed", str(e))
+
+            if trail_id:
+                # Place-then-cancel, same as everywhere else: the trail is
+                # resting before the fixed stop is removed.
+                if prev_order_id:
+                    self._cancel_stop(pos, prev_order_id)
+                state.native_trail_id = trail_id
+                state.stop_order_id = None
+                self._record(pos.symbol, "trail_armed",
+                             f"native trailing stop, callback "
+                             f"{self.cfg.trail_callback_pct}% price")
+                with self._lock:
+                    self._states[pos.symbol] = state
+                return
+            # Falling through means the trail could not be armed (e.g. the
+            # lock-in check failed) — carry on managing the fixed stop.
 
         if stop_price is not None:
             stop_price = float(self.exchange.price_to_precision(pos.symbol, stop_price))
@@ -498,6 +580,7 @@ class FuturesGuardian:
                     "armed": s.armed,
                     "stop_roi": None if s.stop_roi is None else round(s.stop_roi, 2),
                     "stop_order_id": s.stop_order_id,
+                    "native_trail_id": s.native_trail_id,
                     # Sizing, so a surprising position size is visible rather
                     # than something to reconstruct from the exchange UI.
                     "margin_usdt": round(self._pos_meta.get(sym, {}).get("margin", 0.0), 2),
@@ -527,5 +610,7 @@ class FuturesGuardian:
                 "initial_stop_roi": self.cfg.initial_stop_roi,
                 "arm_roi": self.cfg.arm_roi,
                 "callback_roi": self.cfg.callback_roi,
+                "trail_callback_pct": self.cfg.trail_callback_pct,
+                "use_native_trail": self.cfg.use_native_trail,
             },
         }

@@ -202,6 +202,12 @@ class BotConfig:
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
     guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))
     guard_callback_roi: float = field(default_factory=lambda: _env_float("GUARD_CALLBACK_ROI", 10.0))
+    # Armed phase uses Binance's native TRAILING_STOP_MARKET. callbackRate is a
+    # PRICE percentage (Binance's own unit), so at 10x a 1.0% callback gives
+    # back 10% ROI. Must be smaller than GUARD_ARM_ROI in ROI terms or arming
+    # would engage the trail at/below entry — checked per position at arm time.
+    guard_trail_callback_pct: float = field(default_factory=lambda: _env_float("GUARD_TRAIL_CALLBACK_PCT", 1.0))
+    guard_use_native_trail: bool = field(default_factory=lambda: _env_bool("GUARD_USE_NATIVE_TRAIL", True))
 
     # ── Operator-initiated futures entry (UI button) ────────────────────
     # The ONLY component that can OPEN a position. Off by default; honours

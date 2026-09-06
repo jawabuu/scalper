@@ -67,6 +67,10 @@ class GuardState:
     armed: bool = False            # has the trailing stop armed?
     stop_order_id: str | None = None
     stop_roi: float | None = None  # ROI level the resting stop sits at
+    # Order id of the native Binance trailing stop, once armed. While this is
+    # set the exchange manages the trail tick-by-tick and the guardian stops
+    # repositioning anything.
+    native_trail_id: str | None = None
 
 
 @dataclass
@@ -82,6 +86,12 @@ class GuardConfig:
     initial_stop_roi: float = 7.0    # positive number; applied as -7% ROI
     arm_roi: float = 15.0
     callback_roi: float = 10.0
+    # Native Binance trailing stop used for the ARMED phase, expressed as a
+    # PRICE percentage (Binance's callbackRate). At L leverage this equals
+    # callback_pct * L in ROI terms, so its ROI cost depends on the position's
+    # leverage and cannot be validated at startup — it is checked at arm time.
+    trail_callback_pct: float = 1.0
+    use_native_trail: bool = True
     # Only move a resting stop if the new level differs by at least this much
     # ROI, to avoid spamming cancel/replace on every tick.
     min_stop_move_roi: float = 1.0
@@ -223,6 +233,22 @@ _ROI_EPS = 1e-6
 def is_armed(state: GuardState, cfg: GuardConfig) -> bool:
     """Has the peak reached the arming threshold (float-tolerant)?"""
     return state.peak_roi >= (cfg.arm_roi - _ROI_EPS)
+
+
+def callback_roi_at(leverage: float, cfg: GuardConfig) -> float:
+    """The native trail's give-back expressed in ROI% for a given leverage."""
+    return cfg.trail_callback_pct * max(leverage, 0.0)
+
+
+def trail_locks_in(leverage: float, cfg: GuardConfig) -> float:
+    """
+    ROI the stop lands at the moment the trail arms.
+
+    Positive means arming locks in profit. Zero or negative means the trail
+    engages at or below entry — the flaw the callback<arm invariant exists to
+    prevent, but here it depends on leverage so it is evaluated per position.
+    """
+    return cfg.arm_roi - callback_roi_at(leverage, cfg)
 
 
 def desired_stop_roi(state: GuardState, cfg: GuardConfig) -> float:

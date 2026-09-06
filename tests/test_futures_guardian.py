@@ -195,20 +195,28 @@ def test_replacement_places_before_cancelling():
     assert fake.cancelled[0][0] == first_id
 
 
-def test_failed_placement_leaves_old_stop_intact():
-    """If placing the new stop fails, the old one must NOT be cancelled."""
+def test_failed_trail_arming_leaves_fixed_stop_intact():
+    """
+    If the native trail cannot be placed, the fixed stop must survive — the
+    position is never left unprotected by a failed upgrade.
+    """
     fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
     g = _guardian(fake)
     g.run_cycle()
     old_id = fake.created[0]["id"]
 
     pos = g.fetch_positions()[0]
-    fake._price = price_for_roi(pos, 40.0)
-    fake.fail_next_create = True
+    fake._price = price_for_roi(pos, 40.0)      # would arm the trail
+    # Make every order placement fail, so neither the trail nor a fallback lands.
+    def always_fail(**kw):
+        raise RuntimeError("exchange rejected order")
+    fake.create_order = always_fail
     g.run_cycle()
 
-    assert fake.cancelled == [], "old stop must survive a failed replacement"
-    assert g._states["DOGE/USDT:USDT"].stop_order_id == old_id
+    assert fake.cancelled == [], "fixed stop must survive a failed arming"
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.native_trail_id is None
+    assert st.stop_order_id == old_id
 
 
 # ── dry run ──────────────────────────────────────────────────────────────────
@@ -469,3 +477,78 @@ def test_orphan_stop_not_cancelled_in_dry_run():
     fake._positions = []
     g.run_cycle()
     assert fake.cancelled == []
+
+
+# ── Native trailing stop for the armed phase ─────────────────────────────────
+
+def test_arming_places_native_trailing_stop():
+    """
+    The armed phase must use Binance's own TRAILING_STOP_MARKET so the exchange
+    tracks the peak tick-by-tick, instead of the guardian repositioning a plain
+    stop every poll (which missed spikes between cycles).
+    """
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()                                  # initial fixed stop
+    fixed_id = fake.created[0]["id"]
+
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 40.0)         # past the arm level
+    g.run_cycle()
+
+    trail = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert len(trail) == 1
+    assert trail[0]["params"]["reduceOnly"] is True
+    assert trail[0]["params"]["callbackRate"] == g.cfg.trail_callback_pct
+    assert trail[0]["side"] == "buy"               # closes a short
+    # the fixed stop is cancelled only AFTER the trail is resting
+    assert any(oid == fixed_id for oid, _ in fake.cancelled)
+    assert g._states["DOGE/USDT:USDT"].native_trail_id == trail[0]["id"]
+
+
+def test_guardian_stops_repositioning_once_native_trail_is_armed():
+    """Binance owns the trail after arming — the guardian must not interfere."""
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 40.0)
+    g.run_cycle()
+    n_after_arm = len(fake.created)
+
+    # Further favourable moves must NOT create more orders.
+    for roi in (60.0, 90.0, 120.0):
+        fake._price = price_for_roi(pos, roi)
+        g.run_cycle()
+    assert len(fake.created) == n_after_arm
+
+
+def test_trail_refused_when_it_would_lock_in_no_profit():
+    """
+    callbackRate is a PRICE percent, so its ROI cost scales with leverage. At
+    high leverage a 1% callback can exceed the arm level, which would engage the
+    trail at or below entry — that must be refused and the fixed stop kept.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=10, callback_roi=5,
+                      trail_callback_pct=1.0)     # 1% x 10x = 10% ROI == arm
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake, cfg=cfg)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 20.0)
+    g.run_cycle()
+
+    assert not [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert g._states["DOGE/USDT:USDT"].native_trail_id is None
+
+
+def test_long_trail_sells():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 40.0)
+    g.run_cycle()
+    trail = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert trail and trail[0]["side"] == "sell"

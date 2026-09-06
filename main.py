@@ -67,6 +67,8 @@ if __name__ == "__main__":
             initial_stop_roi=cfg.guard_initial_stop_roi,
             arm_roi=cfg.guard_arm_roi,
             callback_roi=cfg.guard_callback_roi,
+            trail_callback_pct=cfg.guard_trail_callback_pct,
+            use_native_trail=cfg.guard_use_native_trail,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,

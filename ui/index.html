@@ -2282,8 +2282,11 @@ function renderGuardian(g) {
       : '<span class="guard-flag gf-live">LIVE ORDERS</span>';
     const c = g.config || {};
     const ago = g.last_cycle_ago_s == null ? '—' : Math.round(g.last_cycle_ago_s) + 's ago';
+    const trail = c.use_native_trail
+      ? `native trail ${c.trail_callback_pct}% price`
+      : `callback ${c.callback_roi}% ROI`;
     meta.innerHTML = `${mode} &nbsp;(stop -${c.initial_stop_roi}% ROI · arm +${c.arm_roi}% · `
-      + `callback ${c.callback_roi}% · ${g.demo ? 'demo' : 'LIVE ACCOUNT'} · ${ago})`;
+      + `${trail} · ${g.demo ? 'demo' : 'LIVE ACCOUNT'} · ${ago})`;
   }
 
   const syms = Object.keys(g.states || {});
@@ -2293,9 +2296,11 @@ function renderGuardian(g) {
     const rows = syms.map(sym => {
       const s = g.states[sym];
       const short = sym.replace('/USDT:USDT','').replace('/USDT','');
-      const armed = s.armed
-        ? '<span class="guard-flag gf-armed">ARMED</span>'
-        : '<span style="color:var(--muted)">initial</span>';
+      const armed = s.native_trail_id
+        ? '<span class="guard-flag gf-armed">TRAILING</span>'
+        : (s.armed
+            ? '<span class="guard-flag gf-armed">ARMED</span>'
+            : '<span style="color:var(--muted)">initial</span>');
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
         : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`;
