@@ -149,46 +149,18 @@ class EntryService:
         """
         Total USDT wallet balance backing futures positions.
 
-        Position size is a percentage of this, so a wrong reading silently
-        mis-sizes every entry. Several shapes are tried because the futures
-        balance payload differs between environments (live vs demo), and the
-        resolved value is logged so a surprising size can be traced.
+        Delegates to the shared resolver so the figure sizing an entry is
+        always the same one the dashboard displays — two different readings
+        here would silently mis-size positions.
         """
+        from .futures_guardian import resolve_usdt_balance
         bal = self.guardian.exchange.fetch_balance()
-        candidates = []
-
-        usdt = bal.get("USDT") or {}
-        if isinstance(usdt, dict):
-            candidates.append(("USDT.total", usdt.get("total")))
-            candidates.append(("USDT.free", usdt.get("free")))
-
-        total_map = bal.get("total") or {}
-        if isinstance(total_map, dict):
-            candidates.append(("total.USDT", total_map.get("USDT")))
-
-        info = bal.get("info") or {}
-        if isinstance(info, dict):
-            candidates.append(("info.totalWalletBalance", info.get("totalWalletBalance")))
-            candidates.append(("info.availableBalance", info.get("availableBalance")))
-            assets = info.get("assets")
-            if isinstance(assets, list):
-                for a in assets:
-                    if (a or {}).get("asset") == "USDT":
-                        candidates.append(("assets[USDT].walletBalance",
-                                           a.get("walletBalance")))
-
-        for source, raw in candidates:
-            try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if val > 0:
-                log.info(f"Wallet balance {val:.2f} USDT (from {source})")
-                return val
-
-        log.warning(f"Could not resolve a positive USDT wallet balance; "
-                    f"tried {[c[0] for c in candidates]}")
-        return 0.0
+        val, source = resolve_usdt_balance(bal)
+        if val > 0:
+            log.info(f"Wallet balance {val:.2f} USDT (from {source})")
+        else:
+            log.warning("Could not resolve a positive USDT wallet balance")
+        return val
 
     def symbol_leverage(self, symbol: str) -> float:
         """

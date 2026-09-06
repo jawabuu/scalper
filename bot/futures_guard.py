@@ -71,6 +71,11 @@ class GuardState:
     # set the exchange manages the trail tick-by-tick and the guardian stops
     # repositioning anything.
     native_trail_id: str | None = None
+    # Set when the exchange refuses the protective stop because the position is
+    # already past that level (Binance -2021). The position is UNPROTECTED and
+    # the operator must decide what to do — the guardian will not close a
+    # position on its own initiative.
+    unprotected_reason: str | None = None
 
 
 @dataclass

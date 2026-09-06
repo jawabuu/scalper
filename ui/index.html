@@ -141,6 +141,11 @@
   .gf-dry  { background: rgba(255,170,0,0.15); color: var(--warn); border: 1px solid rgba(255,170,0,0.4); }
   .gf-live { background: rgba(255,77,106,0.18); color: var(--red); border: 1px solid rgba(255,77,106,0.45); }
   .gf-armed { background: rgba(0,214,143,0.15); color: var(--green); border: 1px solid rgba(0,214,143,0.35); }
+  .gf-unprot {
+    background: rgba(255,77,106,0.22); color: var(--red);
+    border: 1px solid rgba(255,77,106,0.6); animation: unprotPulse 1.6s ease-in-out infinite;
+  }
+  @keyframes unprotPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
   .pb-regime-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 12px; }
   .regime-card { border: 1px solid var(--border); border-radius: 4px; padding: 12px; }
   .regime-name { font-size: 11px; font-weight: bold; color: var(--accent2); letter-spacing: 1px; margin-bottom: 8px; }
@@ -1718,7 +1723,7 @@ function applyStrategyView(status) {
   });
   const panel = document.getElementById('pullback-panel');
   if (panel) {
-    if (strat === 'pullback' && status.pullback) {
+    if (strat === 'pullback' && status.pullback && viewAllows('pullback-panel')) {
       panel.style.display = '';
       renderPullbackSettings(status.pullback, status.timeframe);
     } else {
@@ -2068,16 +2073,19 @@ function rangeContext(s) {
   }
   const pct = Math.round(s.range_pos_24h * 100);
   const bar = `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`;
+  // Show BOTH distances so the position can be read against either extreme,
+  // leading with the one that matters for the direction.
+  const up = s.pct_above_24h_low, dn = s.pct_below_24h_high;
+  const fmtPct = v => (v === null || v === undefined) ? '?' : `${v >= 0 ? '+' : ''}${v}%`;
   let label;
   if (s.side === 'long') {
-    const v = s.pct_above_24h_low;
-    label = (v === null || v === undefined) ? `${pct}%`
-      : `${v >= 0 ? '+' : ''}${v}% above 24h low`;
+    label = `${fmtPct(up)} off low · ${fmtPct(dn)} to high`;
   } else {
-    const v = s.pct_below_24h_high;
-    label = (v === null || v === undefined) ? `${pct}%`
-      : `${v}% from 24h high`;
+    label = `${fmtPct(dn)} off high · ${fmtPct(up)} to low`;
   }
+  const ex = (s.high_24h && s.low_24h)
+    ? ` <span style="color:var(--muted)">(${s.low_24h}–${s.high_24h})</span>` : '';
+  label += ex;
   // Favourable = long low in range, short high in range.
   const fav = s.side === 'long' ? (1 - s.range_pos_24h) : s.range_pos_24h;
   const cls = fav >= 0.8 ? 'strong' : fav >= 0.6 ? 'good' : fav >= 0.4 ? 'neutral' : 'weak';
@@ -2161,7 +2169,7 @@ async function refreshFuturesHistory() {
 // dashboard shows both sets of panels. On a futures-focused instance the spot
 // tiles read $0.00 and the spot controls are noise, so the view toggle hides
 // whichever half is not in use. Purely presentational — nothing is disabled.
-let _view = 'spot';
+let _view = 'futures';
 let _lastGuardian = null;
 let _lastFuturesHist = null;
 
@@ -2264,7 +2272,7 @@ function renderFuturesStats(g, hist) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  try { _view = localStorage.getItem('dashView') || 'spot'; } catch (e) {}
+  try { _view = localStorage.getItem('dashView') || 'futures'; } catch (e) {}
   applyView();
 });
 
@@ -2296,11 +2304,13 @@ function renderGuardian(g) {
     const rows = syms.map(sym => {
       const s = g.states[sym];
       const short = sym.replace('/USDT:USDT','').replace('/USDT','');
-      const armed = s.native_trail_id
-        ? '<span class="guard-flag gf-armed">TRAILING</span>'
-        : (s.armed
-            ? '<span class="guard-flag gf-armed">ARMED</span>'
-            : '<span style="color:var(--muted)">initial</span>');
+      const armed = s.unprotected_reason
+        ? '<span class="guard-flag gf-unprot">UNPROTECTED</span>'
+        : (s.native_trail_id
+            ? '<span class="guard-flag gf-armed">TRAILING</span>'
+            : (s.armed
+                ? '<span class="guard-flag gf-armed">ARMED</span>'
+                : '<span style="color:var(--muted)">initial</span>'));
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
         : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`;
@@ -2328,7 +2338,15 @@ function renderGuardian(g) {
         </td>
       </tr>`;
     }).join('');
-    setEl('guard-wrap', `<table><thead><tr>
+    const unprot = syms.filter(k => g.states[k].unprotected_reason);
+    const banner = unprot.length ? `<div style="background:rgba(255,77,106,0.12);
+      border:1px solid rgba(255,77,106,0.45);border-radius:4px;padding:8px 10px;
+      margin-bottom:10px;font-size:11px;color:var(--red)">
+      <strong>${unprot.length} position(s) have no protective stop.</strong>
+      ${unprot.map(k => `${k.replace('/USDT:USDT','')}: ${g.states[k].unprotected_reason}`).join('<br>')}
+      <br>The guardian will not close a position on its own — close it here or accept the risk.
+      </div>` : '';
+    setEl('guard-wrap', banner + `<table><thead><tr>
       <th>Pair</th><th>Dir</th><th class="num">ROI now</th><th class="num">Peak ROI</th>
       <th class="num">Stop @ ROI</th><th>Trail</th><th>24h range</th>
       <th class="num">Margin</th><th></th>
@@ -2476,6 +2494,10 @@ async function refresh() {
     const avg = summary.avg_pnl_pct ?? 0;
     const positionsValue = positions.reduce((sum, p) => sum + (p.current_price * p.qty), 0);
     const portfolio = status.balance_usdt + positionsValue;
+    // In futures view the tiles are owned by renderFuturesStats; writing the
+    // spot figures here would blow them away on every poll (the flicker where
+    // the balance reverted a moment after switching views).
+    if (_view !== 'futures') {
     const portfolioEl = document.getElementById('s-portfolio');
     portfolioEl.textContent = `$${fmt(portfolio, 2)}`;
     setEl('s-portfolio-sub', positions.length ? `$${fmt(status.balance_usdt,2)} + $${fmt(positionsValue,2)}` : 'no open positions');
@@ -2492,6 +2514,7 @@ async function refresh() {
     const avgEl = document.getElementById('s-avg');
     avgEl.textContent = summary.total_trades ? `${avg >= 0 ? '+' : ''}${fmt(avg, 3)}%` : '—';
     avgEl.className = `stat-value ${pnlClass(avg)}`;
+    }  // end spot-only stat tiles
 
     // Positions
     _lastPositions = positions;

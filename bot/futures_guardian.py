@@ -41,6 +41,46 @@ from .futures_guard import (
 log = logging.getLogger("futures_guardian")
 
 
+def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
+    """
+    Total USDT wallet balance from a ccxt futures balance payload.
+
+    Single source of truth: the guardian displays this figure and the entry
+    service sizes positions from it, so they must never resolve it differently.
+    Several shapes are tried because the payload differs between live and demo.
+    Returns (value, source) so the origin can be logged when a figure surprises.
+    """
+    candidates: list[tuple[str, object]] = []
+
+    usdt = (bal or {}).get("USDT") or {}
+    if isinstance(usdt, dict):
+        candidates.append(("USDT.total", usdt.get("total")))
+        candidates.append(("USDT.free", usdt.get("free")))
+
+    total_map = (bal or {}).get("total") or {}
+    if isinstance(total_map, dict):
+        candidates.append(("total.USDT", total_map.get("USDT")))
+
+    info = (bal or {}).get("info") or {}
+    if isinstance(info, dict):
+        candidates.append(("info.totalWalletBalance", info.get("totalWalletBalance")))
+        candidates.append(("info.availableBalance", info.get("availableBalance")))
+        assets = info.get("assets")
+        if isinstance(assets, list):
+            for a in assets:
+                if (a or {}).get("asset") == "USDT":
+                    candidates.append(("assets[USDT].walletBalance", a.get("walletBalance")))
+
+    for source, raw in candidates:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            return val, source
+    return 0.0, "unresolved"
+
+
 def _r2(v):
     return None if v is None else round(float(v), 2)
 
@@ -82,6 +122,24 @@ class FuturesGuardian:
                             "set_sandbox_mode(). Upgrade ccxt if this fails.")
                 self.exchange.set_sandbox_mode(True)
 
+        self._init_runtime_state()
+
+        mode = "DRY RUN (no orders sent)" if dry_run else "LIVE (places real orders)"
+        log.warning(
+            f"Futures guardian starting — {'DEMO' if demo else 'LIVE ACCOUNT'} — {mode} | "
+            f"stop {-self.cfg.initial_stop_roi:+.0f}% ROI, arm +{self.cfg.arm_roi:.0f}% ROI, "
+            f"native trail {self.cfg.trail_callback_pct:.2f}% price"
+        )
+
+    def _init_runtime_state(self):
+        """
+        All mutable runtime state in one place.
+
+        __init__ calls this, and so can any construction path that bypasses it
+        (test doubles). Keeping the attribute list in a single method stops the
+        two from drifting apart and producing AttributeErrors that get silently
+        swallowed by the per-position exception handler.
+        """
         # symbol -> GuardState
         self._states: dict[str, GuardState] = {}
         self._lock = threading.RLock()
@@ -91,13 +149,12 @@ class FuturesGuardian:
         self._actions: list[dict] = []   # recent actions, for the dashboard
         self._pos_meta: dict[str, dict] = {}   # symbol -> sizing snapshot
         self._closed_trades: list[dict] = []   # futures trade history
-
-        mode = "DRY RUN (no orders sent)" if dry_run else "LIVE (places real orders)"
-        log.warning(
-            f"Futures guardian starting — {'DEMO' if demo else 'LIVE ACCOUNT'} — {mode} | "
-            f"stop {-self.cfg.initial_stop_roi:+.0f}% ROI, arm +{self.cfg.arm_roi:.0f}% ROI, "
-            f"callback {self.cfg.callback_roi:.0f}% ROI"
-        )
+        # symbol -> (high, low, fetched_at). Some ticker payloads omit high/low,
+        # so the 24h range is derived from candles as a fallback and cached —
+        # the guardian polls every few seconds and must not refetch 24h of
+        # klines that often.
+        self._range_cache: dict[str, tuple[float, float, float]] = {}
+        self._range_cache_ttl: float = 300.0
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -172,6 +229,80 @@ class FuturesGuardian:
         if not t:
             return None
         return float(t.get("last") or t.get("close") or 0) or None
+
+    RANGE_CACHE_TTL_S = 300.0
+
+    def _range_24h(self, symbol: str, ticker: dict | None) -> tuple[float | None, float | None]:
+        """
+        24h high/low for a symbol.
+
+        Prefers the ticker (one field lookup, no extra call). Falls back to
+        deriving them from 24h of candles when the ticker omits them — which the
+        demo endpoint does — and caches the result so a 5-second poll loop does
+        not refetch klines every cycle.
+        """
+        hi = (ticker or {}).get("high")
+        lo = (ticker or {}).get("low")
+        try:
+            if hi and lo and float(hi) > float(lo):
+                return float(hi), float(lo)
+        except (TypeError, ValueError):
+            pass
+
+        cached = self._range_cache.get(symbol)
+        if cached and (time.time() - cached[2]) < self.RANGE_CACHE_TTL_S:
+            return cached[0], cached[1]
+
+        try:
+            # 96 x 15m = 24h, one request, coarse enough for a daily range.
+            raw = self.exchange.fetch_ohlcv(symbol, "15m", limit=96)
+            if raw:
+                highs = [r[2] for r in raw if r[2] is not None]
+                lows = [r[3] for r in raw if r[3] is not None]
+                if highs and lows:
+                    h, l = float(max(highs)), float(min(lows))
+                    self._range_cache[symbol] = (h, l, time.time())
+                    return h, l
+        except Exception as e:
+            log.debug(f"24h range fallback failed for {symbol}: {e}")
+        return None, None
+
+    def _range_24h(self, symbol: str, ticker: dict | None) -> tuple[float | None, float | None]:
+        """
+        24h high/low for a symbol.
+
+        Prefers the ticker, but some payloads omit high/low — in which case the
+        range is derived from candles instead, so an open position always shows
+        where it sits relative to its daily extremes. The derived value is
+        cached because it needs a klines call and would otherwise run on every
+        poll (default every 5s).
+        """
+        hi = (ticker or {}).get("high")
+        lo = (ticker or {}).get("low")
+        try:
+            if hi and lo and float(hi) > float(lo):
+                return float(hi), float(lo)
+        except (TypeError, ValueError):
+            pass
+
+        now = time.time()
+        cached = self._range_cache.get(symbol)
+        if cached and now - cached[2] < self._range_cache_ttl:
+            return cached[0], cached[1]
+
+        try:
+            # 5m candles: 288 spans a full 24h in a single request.
+            raw = self.exchange.fetch_ohlcv(symbol, "5m", limit=288)
+            if raw:
+                highs = [r[2] for r in raw if r[2] is not None]
+                lows = [r[3] for r in raw if r[3] is not None]
+                if highs and lows:
+                    h, l = float(max(highs)), float(min(lows))
+                    self._range_cache[symbol] = (h, l, now)
+                    return h, l
+        except Exception as e:
+            log.debug(f"24h range fallback failed for {symbol}: {e}")
+        return None, None
 
     def _ticker(self, symbol: str) -> dict | None:
         try:
@@ -285,7 +416,7 @@ class FuturesGuardian:
         if price is None:
             return
         t = self._ticker(pos.symbol) or {}
-        hi, lo = t.get("high"), t.get("low")
+        hi, lo = self._range_24h(pos.symbol, t)
         current_roi = roi_pct(pos, price)
         range_pos = None
         dist_low = dist_high = None
@@ -327,6 +458,7 @@ class FuturesGuardian:
                          f"existing stop: {state.stop_roi is not None}")
 
         prev_order_id = state.stop_order_id
+        prev_stop_roi = state.stop_roi
         was_armed = state.armed
         state, stop_price, reason = evaluate(pos, price, state, self.cfg)
 
@@ -371,10 +503,38 @@ class FuturesGuardian:
             new_id = None
             try:
                 new_id = self._place_stop(pos, stop_price)
+                state.unprotected_reason = None
             except Exception as e:
-                log.error(f"FAILED to place stop for {pos.symbol}: {e} — "
-                          f"leaving the existing stop in place")
-                self._record(pos.symbol, "place_failed", str(e))
+                msg = str(e)
+                if "-2021" in msg or "immediately trigger" in msg.lower():
+                    # The position is already worse than its stop level, so the
+                    # stop cannot be placed at all. This is NOT a transient
+                    # error: the position is unprotected until the operator acts.
+                    # Deliberately not auto-closing — that is the operator's call.
+                    cur = roi_pct(pos, price)
+                    state.unprotected_reason = (
+                        f"already at {cur:+.1f}% ROI, past the "
+                        f"{-self.cfg.initial_stop_roi:+.0f}% stop — exchange "
+                        f"rejected the stop (would trigger immediately)"
+                    )
+                    log.error(
+                        f"{pos.symbol}: UNPROTECTED — {state.unprotected_reason}. "
+                        f"Close it or accept the risk; the guardian will not "
+                        f"close a position on its own."
+                    )
+                    self._record(pos.symbol, "UNPROTECTED", state.unprotected_reason)
+                else:
+                    log.error(f"FAILED to place stop for {pos.symbol}: {e} — "
+                              f"leaving the existing stop in place")
+                    self._record(pos.symbol, "place_failed", msg)
+                # evaluate() optimistically recorded the new stop level before
+                # the order was sent. Roll it back so state reflects what is
+                # ACTUALLY resting — otherwise should_replace_stop sees the
+                # level as already achieved and never retries, leaving the
+                # position unprotected indefinitely.
+                state.stop_roi = prev_stop_roi
+                with self._lock:
+                    self._states[pos.symbol] = state
                 return   # keep old state/order; do not cancel anything
 
             if prev_order_id and new_id:
@@ -401,12 +561,14 @@ class FuturesGuardian:
 
         try:
             b = self.exchange.fetch_balance()
-            u = b.get("USDT") or {}
-            info = b.get("info") or {}
-            self._wallet_balance_cached = float(
-                u.get("total") or info.get("totalWalletBalance") or 0.0)
-        except Exception:
-            pass
+            val, source = resolve_usdt_balance(b)
+            if val <= 0:
+                log.warning("Could not resolve a positive USDT futures balance")
+            elif abs(val - self._wallet_balance_cached) > 0.01:
+                log.info(f"Futures wallet balance {val:.2f} USDT (from {source})")
+            self._wallet_balance_cached = val
+        except Exception as e:
+            log.debug(f"balance fetch failed: {e}")
 
         live_symbols = {p.symbol for p in positions}
 
@@ -581,6 +743,7 @@ class FuturesGuardian:
                     "stop_roi": None if s.stop_roi is None else round(s.stop_roi, 2),
                     "stop_order_id": s.stop_order_id,
                     "native_trail_id": s.native_trail_id,
+                    "unprotected_reason": s.unprotected_reason,
                     # Sizing, so a surprising position size is visible rather
                     # than something to reconstruct from the exchange UI.
                     "margin_usdt": round(self._pos_meta.get(sym, {}).get("margin", 0.0), 2),
@@ -593,6 +756,8 @@ class FuturesGuardian:
                     "range_pos_24h": _r3(self._pos_meta.get(sym, {}).get("range_pos_24h")),
                     "pct_above_24h_low": _r2(self._pos_meta.get(sym, {}).get("pct_above_24h_low")),
                     "pct_below_24h_high": _r2(self._pos_meta.get(sym, {}).get("pct_below_24h_high")),
+                    "high_24h": self._pos_meta.get(sym, {}).get("high_24h"),
+                    "low_24h": self._pos_meta.get(sym, {}).get("low_24h"),
                 }
                 for sym, s in self._states.items()
             }

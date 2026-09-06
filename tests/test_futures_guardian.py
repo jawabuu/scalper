@@ -69,6 +69,13 @@ class FakeExchange:
     def fetch_my_trades(self, symbol, limit=10):
         return []
 
+    def fetch_ohlcv(self, symbol, timeframe, limit=288):
+        return [[0, 100.0, 110.0, 90.0, 100.0, 10.0] for _ in range(limit)]
+
+    def fetch_ohlcv(self, symbol, timeframe, limit=96):
+        # ts, o, h, l, c, v — a flat synthetic 24h range
+        return [[i, 100.0, 105.0, 95.0, 100.0, 10.0] for i in range(limit)]
+
     def fetch_balance(self):
         return {"USDT": {"total": 100.0, "free": 100.0},
                 "info": {"totalWalletBalance": "100.0"}}
@@ -81,15 +88,8 @@ def _guardian(fake, dry_run=False, cfg=None):
     g.dry_run = dry_run
     g.poll_interval = 1.0
     g.exchange = fake
-    g._states = {}
-    import threading
-    g._lock = threading.RLock()
-    g._last_cycle_ts = 0.0
-    g._last_error = None
-    g._actions = []
-    g._pos_meta = {}
-    g._wallet_balance_cached = 0.0
-    g._closed_trades = []
+    # Reuse the real initialiser so this double cannot drift from __init__.
+    g._init_runtime_state()
     return g
 
 
@@ -552,3 +552,193 @@ def test_long_trail_sells():
     g.run_cycle()
     trail = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
     assert trail and trail[0]["side"] == "sell"
+
+
+# ── Unprotected positions (-2021) ────────────────────────────────────────────
+
+def test_position_past_its_stop_is_flagged_unprotected():
+    """
+    Adopting a position already worse than the stop level makes Binance reject
+    the stop (-2021). The position is UNPROTECTED and must be flagged, not
+    silently logged as a generic failure.
+    """
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    def reject(**kw):
+        raise RuntimeError('binanceusdm {"code":-2021,"msg":"Order would immediately trigger."}')
+    fake.create_order = reject
+    g = _guardian(fake)
+    g.run_cycle()
+
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.unprotected_reason is not None
+    assert "past the" in st.unprotected_reason
+    assert any(a["action"] == "UNPROTECTED" for a in g._actions)
+
+
+def test_guardian_does_not_auto_close_an_unprotected_position():
+    """Closing is the operator's decision — the guardian must never do it itself."""
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    def reject(**kw):
+        raise RuntimeError('{"code":-2021,"msg":"Order would immediately trigger."}')
+    fake.create_order = reject
+    g = _guardian(fake)
+    g.run_cycle()
+    # no MARKET close was sent
+    assert not [o for o in fake.created if o.get("type") == "MARKET"]
+
+
+def test_unprotected_flag_clears_once_a_stop_lands():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    orig = fake.create_order
+    def reject(**kw):
+        raise RuntimeError('{"code":-2021,"msg":"Order would immediately trigger."}')
+    fake.create_order = reject
+    g = _guardian(fake)
+    g.run_cycle()
+    assert g._states["DOGE/USDT:USDT"].unprotected_reason is not None
+
+    fake.create_order = orig          # exchange accepts again
+    fake._price = 100.5               # moved back into a placeable range
+    g.run_cycle()
+    assert g._states["DOGE/USDT:USDT"].unprotected_reason is None
+
+
+# ── 24h range fallback ───────────────────────────────────────────────────────
+
+def test_range_falls_back_to_candles_when_ticker_lacks_high_low():
+    """The demo endpoint omits high/low; the range must come from candles."""
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    fake.fetch_ticker = lambda s: {"last": 100.0}     # no high/low
+    g = _guardian(fake)
+    hi, lo = g._range_24h("DOGE/USDT:USDT", {"last": 100.0})
+    assert hi == pytest.approx(105.0)
+    assert lo == pytest.approx(95.0)
+
+
+def test_range_prefers_ticker_when_present():
+    fake = FakeExchange(positions=[], price=100.0)
+    g = _guardian(fake)
+    hi, lo = g._range_24h("X/USDT:USDT", {"high": 120.0, "low": 80.0})
+    assert (hi, lo) == (120.0, 80.0)
+
+
+def test_range_fallback_is_cached():
+    """A 5s poll loop must not refetch 24h of klines every cycle."""
+    fake = FakeExchange(positions=[], price=100.0)
+    calls = {"n": 0}
+    orig = fake.fetch_ohlcv
+    def counting(symbol, timeframe, limit=96):
+        calls["n"] += 1
+        return orig(symbol, timeframe, limit)
+    fake.fetch_ohlcv = counting
+    g = _guardian(fake)
+    for _ in range(5):
+        g._range_24h("X/USDT:USDT", {"last": 1.0})
+    assert calls["n"] == 1
+
+
+# ── 24h range fallback for open positions ────────────────────────────────────
+
+class _RangeEx(FakeExchange):
+    def __init__(self, hilo=True, **kw):
+        super().__init__(**kw)
+        self.hilo = hilo
+        self.ohlcv_calls = 0
+    def fetch_ticker(self, symbol):
+        t = {"last": self._price}
+        if self.hilo:
+            t.update(high=110.0, low=90.0)
+        return t
+    def fetch_ohlcv(self, symbol, timeframe, limit=288):
+        self.ohlcv_calls += 1
+        return [[0, 100.0, 110.0, 90.0, 100.0, 10.0] for _ in range(limit)]
+
+
+def test_range_uses_ticker_when_present():
+    ex = _RangeEx(hilo=True, positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(ex)
+    g._range_cache = {}; g._range_cache_ttl = 300.0
+    hi, lo = g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert (hi, lo) == (110.0, 90.0)
+    assert ex.ohlcv_calls == 0          # no extra call needed
+
+
+def test_range_falls_back_to_candles_when_ticker_omits_them():
+    """
+    Some ticker payloads omit high/low, which left the 24h range showing n/a
+    for open positions. Derive it from candles instead.
+    """
+    ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(ex)
+    g._range_cache = {}; g._range_cache_ttl = 300.0
+    hi, lo = g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert (hi, lo) == (110.0, 90.0)
+    assert ex.ohlcv_calls == 1
+
+
+def test_range_fallback_is_cached():
+    """The guardian polls every ~5s; the fallback must not fetch klines each time."""
+    ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(ex)
+    g._range_cache = {}; g._range_cache_ttl = 300.0
+    for _ in range(5):
+        g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert ex.ohlcv_calls == 1
+
+
+def test_position_meta_carries_distances_to_both_extremes():
+    ex = _RangeEx(hilo=True, positions=[_raw_pos("long", entry=100.0)], price=100.0)
+    g = _guardian(ex)
+    g._range_cache = {}; g._range_cache_ttl = 300.0
+    g.run_cycle()
+    meta = g._pos_meta["DOGE/USDT:USDT"]
+    assert meta["high_24h"] == 110.0 and meta["low_24h"] == 90.0
+    assert meta["pct_above_24h_low"] == pytest.approx(11.11, abs=0.05)
+    assert meta["pct_below_24h_high"] == pytest.approx(-9.09, abs=0.05)
+    assert meta["range_pos_24h"] == pytest.approx(0.5, abs=0.01)
+
+
+# ── Shared balance resolution ────────────────────────────────────────────────
+
+def test_balance_resolver_handles_all_payload_shapes():
+    """
+    The guardian displays this figure and the entry service sizes positions
+    from it — they must never resolve it differently.
+    """
+    from bot.futures_guardian import resolve_usdt_balance
+    shapes = [
+        {"USDT": {"total": 107.09}},
+        {"info": {"totalWalletBalance": "107.09"}},
+        {"total": {"USDT": 107.09}},
+        {"info": {"assets": [{"asset": "BNB", "walletBalance": "1"},
+                             {"asset": "USDT", "walletBalance": "107.09"}]}},
+    ]
+    for payload in shapes:
+        val, src = resolve_usdt_balance(payload)
+        assert val == pytest.approx(107.09), src
+
+
+def test_balance_resolver_reports_unresolved():
+    from bot.futures_guardian import resolve_usdt_balance
+    assert resolve_usdt_balance({}) == (0.0, "unresolved")
+    assert resolve_usdt_balance({"USDT": {"total": 0}})[0] == 0.0
+
+
+def test_entry_and_guardian_agree_on_balance():
+    """Both must read the same number from the same payload."""
+    from bot.futures_guardian import resolve_usdt_balance
+    from bot.futures_entry import EntryService, EntryLimits
+
+    payload = {"info": {"totalWalletBalance": "107.09"}}
+
+    class _Ex:
+        def fetch_balance(self): return payload
+    class _G:
+        dry_run = True
+        exchange = _Ex()
+        cfg = GuardConfig()
+        def fetch_positions(self): return []
+
+    svc = EntryService(_G(), EntryLimits(max_positions=3, max_margin_pct=25,
+                                         default_margin_pct=10, default_callback_pct=0.1))
+    assert svc.wallet_balance() == pytest.approx(resolve_usdt_balance(payload)[0])
