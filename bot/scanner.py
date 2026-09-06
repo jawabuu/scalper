@@ -53,6 +53,14 @@ class ScanConfig:
     # structure (arguably a short setup) surfaces as a long. Longs want
     # oversold-to-neutral and recovering, not already-hot.
     long_rsi_max: float = 65.0
+    # The EMA gap decides which side a coin is screened for, but a hard sign
+    # test creates a blind spot at the crossover: a coin at RSI 85 whose EMA9
+    # has JUST crossed below EMA21 is a confirmed roll-over — a better short
+    # than one still climbing — yet it routed to the long side and failed the
+    # long RSI band, vanishing from both screens. This tolerance lets a coin
+    # still be screened for its direction while the gap sits just the other
+    # side of zero. Expressed as a % of EMA21, same unit as the gap itself.
+    ema_tolerance_pct: float = 0.15
     ema_fast: int = 9
     ema_slow: int = 21
     rsi_len: int = 14
@@ -264,8 +272,10 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     # the EMA gap and its narrowing are reported so the operator can judge how
     # far along the turn is, but they no longer gate the candidate.
 
-    # SHORT potential: overbought inside a still-bullish structure -> fade it
-    if gap > 0 and rsi >= cfg.short_rsi_min:
+    # SHORT potential: overbought, with EMA9 above EMA21 OR just below it.
+    # Checked before the long branch: within the tolerance band both could
+    # match, and a high RSI is the stronger signal about direction.
+    if gap > -cfg.ema_tolerance_pct and rsi >= cfg.short_rsi_min:
         return Candidate(
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
@@ -274,13 +284,14 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             atr_pct=atr_pct,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
-            note=(f"RSI {rsi:.0f} (>={cfg.short_rsi_min:.0f}) overbought; EMA9 {gap:+.2f}% "
+            note=(("just crossed down — " if gap < 0 else "")
+                  + f"RSI {rsi:.0f} (>={cfg.short_rsi_min:.0f}) overbought; EMA9 {gap:+.2f}% "
                   f"above EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
         )
 
-    # LONG potential: recovering inside a still-bearish structure
-    if gap < 0 and cfg.long_rsi_min <= rsi <= cfg.long_rsi_max:
+    # LONG potential: recovering, with EMA9 below EMA21 OR just above it.
+    if gap < cfg.ema_tolerance_pct and cfg.long_rsi_min <= rsi <= cfg.long_rsi_max:
         return Candidate(
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
@@ -289,7 +300,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             atr_pct=atr_pct,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
-            note=(f"RSI {rsi:.0f} (in {cfg.long_rsi_min:.0f}-{cfg.long_rsi_max:.0f}); EMA9 {gap:+.2f}% below "
+            note=(("just crossed up — " if gap > 0 else "")
+                  + f"RSI {rsi:.0f} (in {cfg.long_rsi_min:.0f}-{cfg.long_rsi_max:.0f}); EMA9 {gap:+.2f}% below "
                   f"EMA21, gap {gap_change:+.2f}%"
                   + (" and converging" if narrowing else "")),
         )

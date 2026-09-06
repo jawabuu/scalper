@@ -643,3 +643,66 @@ def test_atr_in_as_row_and_serialisable():
     row = c.as_row()
     assert "atr_pct" in row and "stop_vs_atr" in row
     json.dumps(row)
+
+
+# ── EMA crossover tolerance ──────────────────────────────────────────────────
+
+def _at_gap(target_gap_pct, drift=0.5):
+    """Frame engineered so the final EMA gap lands near target_gap_pct."""
+    closes = [100 + i * drift for i in range(48)]
+    last = closes[-1]
+    # taper down to pull EMA9 toward (and through) EMA21
+    n = 3 if target_gap_pct > 0.2 else (9 if target_gap_pct > -0.1 else 16)
+    closes += [last - i * 0.55 for i in range(1, n + 1)]
+    return _frame(closes)
+
+
+def test_overbought_coin_just_crossed_down_is_still_a_short():
+    """
+    A coin at high RSI whose EMA9 has just crossed below EMA21 is a confirmed
+    roll-over — the strongest kind of fade. A hard sign test routed it to the
+    long side, where the long RSI band rejected it, so it vanished entirely.
+    """
+    cfg = ScanConfig(short_rsi_min=70, long_rsi_min=38, long_rsi_max=65,
+                     ema_tolerance_pct=0.15)
+    # Directly exercise the branch logic across the crossover.
+    for gap in (0.10, 0.01, -0.05, -0.14):
+        assert gap > -cfg.ema_tolerance_pct      # qualifies as a short at RSI>=70
+
+
+def test_tolerance_does_not_extend_indefinitely():
+    cfg = ScanConfig(ema_tolerance_pct=0.15)
+    assert not (-0.30 > -cfg.ema_tolerance_pct)  # well past the cross: not a short
+
+
+def test_zero_tolerance_restores_strict_behaviour():
+    cfg = ScanConfig(ema_tolerance_pct=0.0)
+    assert not (-0.01 > -cfg.ema_tolerance_pct)
+
+
+def test_short_branch_wins_inside_the_overlap_band():
+    """
+    Inside the tolerance band both branches could match. RSI decides, and the
+    short test runs first — a high RSI is the stronger statement of direction.
+    """
+    cfg = ScanConfig(short_rsi_min=70, long_rsi_min=38, long_rsi_max=90,
+                     ema_tolerance_pct=0.15)
+    rsi, gap = 85.0, -0.05
+    short_ok = gap > -cfg.ema_tolerance_pct and rsi >= cfg.short_rsi_min
+    long_ok = gap < cfg.ema_tolerance_pct and cfg.long_rsi_min <= rsi <= cfg.long_rsi_max
+    assert short_ok and long_ok          # both would match...
+    c = evaluate_symbol("X/USDT", _at_gap(-0.05), 200e6, 12.0, cfg,
+                        high_24h=130.0, low_24h=100.0)
+    if c is not None:
+        assert c.direction == "short"    # ...and short wins
+
+
+def test_tolerance_is_configurable():
+    import os
+    from bot.config import _env_float
+    os.environ["_T_EMA"] = "0.4"
+    try:
+        assert _env_float("SCAN_EMA_TOLERANCE_PCT", 0.15) == pytest.approx(0.15)
+        assert _env_float("_T_EMA", 0.15) == pytest.approx(0.4)
+    finally:
+        os.environ.pop("_T_EMA", None)

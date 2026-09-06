@@ -131,6 +131,7 @@ if __name__ == "__main__":
             short_rsi_min=cfg.scan_short_rsi_min,
             long_rsi_min=cfg.scan_long_rsi_min,
             long_rsi_max=cfg.scan_long_rsi_max,
+            ema_tolerance_pct=cfg.scan_ema_tolerance_pct,
             volume_mode=cfg.scan_volume_mode,
             vol_percentile=cfg.scan_vol_percentile,
             min_atr_pct=cfg.scan_min_atr_pct,

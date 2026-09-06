@@ -322,6 +322,10 @@ class BotConfig:
     scan_short_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_SHORT_RSI_MIN", 70.0))
     scan_long_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MIN", 50.0))
     scan_long_rsi_max: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MAX", 65.0))
+    # How far past the EMA crossover a coin can sit and still be screened for
+    # its direction. Catches the just-crossed roll-over that a hard sign test
+    # made invisible. 0 restores the strict behaviour.
+    scan_ema_tolerance_pct: float = field(default_factory=lambda: _env_float("SCAN_EMA_TOLERANCE_PCT", 0.15))
 
     # ── Timing ──────────────────────────────────────────────────────────
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL", 60))

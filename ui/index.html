@@ -98,7 +98,10 @@
   .pb-input::-webkit-outer-spin-button, .pb-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .pb-input:focus { outline: none; border-color: var(--accent); }
   .ta-switch.sm { transform: scale(0.85); }
-  .scan-panel { grid-column: 1 / -1; order: 0.5; }
+  /* align-self:start stops the grid stretching these to fill the row. The
+     container carries min-height:100vh, which otherwise inflated whichever
+     full-width panel landed last, leaving a large empty gap inside it. */
+  .scan-panel { grid-column: 1 / -1; order: 0.5; align-self: start; }
   .scan-badge { font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: bold; letter-spacing: 0.5px; }
   .sb-CONFIRMED     { background: rgba(0,214,143,0.18); color: var(--green); border: 1px solid rgba(0,214,143,0.4); }
   .sb-strengthening { background: rgba(0,153,255,0.15); color: var(--accent2); border: 1px solid rgba(0,153,255,0.35); }
@@ -112,7 +115,10 @@
   .dir-short { color: var(--red); font-weight: bold; }
   .dir-long  { color: var(--green); font-weight: bold; }
   .scan-note { font-size: 10px; color: var(--muted); }
-  .analysis-panel { grid-column: 1 / -1; order: 0.7; }
+  /* Bottom of the futures view, where the spot trade history sits in the spot
+     view. Analysis is for reviewing after the fact — it does not belong above
+     the live panels you actually watch. */
+  .analysis-panel { grid-column: 1 / -1; order: 3; align-self: start; }
   .an-note { font-size: 11px; color: var(--warn); padding: 6px 0; line-height: 1.6; }
   .conf { font-size: 9px; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
   .conf-usable       { background: rgba(0,214,143,.15); color: var(--green); }
@@ -163,7 +169,7 @@
   .entry-input { width: 84px; background: var(--bg3); border: 1px solid var(--border2); border-radius: 3px;
     color: var(--accent); font-family: var(--mono); font-size: 11px; padding: 3px 7px; text-align: right; }
   .range-dot { position: absolute; top: -2px; width: 3px; height: 9px; background: var(--accent); border-radius: 1px; }
-  .guard-panel { grid-column: 1 / -1; order: 0.6; }
+  .guard-panel { grid-column: 1 / -1; order: 0.6; align-self: start; }
   .guard-flag { font-size: 9px; padding: 2px 7px; border-radius: 3px; font-weight: bold; letter-spacing: 0.5px; }
   .gf-dry  { background: rgba(255,170,0,0.15); color: var(--warn); border: 1px solid rgba(255,170,0,0.4); }
   .gf-live { background: rgba(255,77,106,0.18); color: var(--red); border: 1px solid rgba(255,77,106,0.45); }
@@ -2301,7 +2307,7 @@ function applyView() {
   if (fBtn) fBtn.className = futures ? 'active' : '';
 
   // Spot-only panels
-  ['controls-panel', 'pullback-panel', 'positions-panel'].forEach(id => {
+  ['controls-panel', 'pullback-panel', 'positions-panel', 'history-panel'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     if (futures) {
