@@ -24,6 +24,14 @@ class FakeExchange:
         self._leverage = leverage
         self.created = []
         self.fail_next = False
+        # Any symbol under test is tradable on this fake account.
+        self.markets = {}
+
+    def load_markets(self):
+        return self.markets
+
+    def market_exists(self, sym):
+        return True
 
     def fetch_balance(self):
         return {"USDT": {"total": self._balance, "free": self._balance}}
@@ -252,6 +260,9 @@ class _LevEx:
         self.created = []
     def fetch_balance(self):
         return {"USDT": {"total": 107.09}, "info": {"totalWalletBalance": "107.09"}}
+    markets = {"UNI/USDT:USDT": {}, "X/USDT:USDT": {}, "DOGE/USDT:USDT": {},
+               "AAA/USDT:USDT": {}, "BBB/USDT:USDT": {}}
+    def load_markets(self): return self.markets
     def fetch_ticker(self, s): return {"last": 7.055}
     def price_to_precision(self, s, p): return f"{float(p):.4f}"
     def amount_to_precision(self, s, a):
@@ -312,3 +323,70 @@ def test_reports_post_rounding_size_and_warns_on_big_shrink():
     assert plan["qty"] == float(int(plan["qty"]))                  # integer lots
     assert plan["notional_usdt"] == pytest.approx(plan["qty"] * 40.0, rel=1e-6)
     assert plan["margin_usdt"] == pytest.approx(plan["notional_usdt"] / 10.0, rel=1e-6)
+
+
+# ── Demo-endpoint failures must be diagnosable ───────────────────────────────
+
+def test_symbol_not_on_trading_account_is_named():
+    """
+    The scanner screens the LIVE market while entries execute on the trading
+    account (often demo), whose symbol list can differ. That mismatch must say
+    so, not surface as a vague "no price".
+    """
+    ex = _LevEx()
+    ex.markets = {"ETH/USDT:USDT": {}}          # UNI absent here
+    svc = _lev_svc(ex)
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("not tradable" in e for e in res["errors"])
+
+
+def test_symbol_alias_is_resolved():
+    """A scanner symbol X/USDT:USDT should match a market listed as X/USDT."""
+    ex = _LevEx()
+    ex.markets = {"UNI/USDT": {}}
+    svc = _lev_svc(ex)
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is True
+    assert res["plan"]["symbol"] == "UNI/USDT"
+
+
+def test_unavailable_market_list_does_not_block():
+    """The exchange is the authority — an unknown market list must not refuse."""
+    ex = _LevEx()
+    ex.markets = {}
+    svc = _lev_svc(ex)
+    assert svc.preview(symbol="UNI/USDT:USDT", side="long")["ok"] is True
+
+
+def test_ticker_failure_reports_the_real_error():
+    ex = _LevEx()
+    def boom(s): raise RuntimeError("Invalid symbol")
+    ex.fetch_ticker = boom
+    svc = _lev_svc(ex)
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("Invalid symbol" in e for e in res["errors"])
+
+
+def test_assumed_leverage_used_only_when_exchange_reports_none():
+    """
+    Demo can report no leverage for a symbol with no open position. An
+    operator-DECLARED value is acceptable; a silent default is not.
+    """
+    from bot.futures_entry import EntryService, EntryLimits
+    ex = _LevEx(lev_field=None, info_lev=None)
+    svc = EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is True
+    assert res["plan"]["leverage"] == pytest.approx(10.0)
+
+
+def test_without_declaration_missing_leverage_still_refuses():
+    ex = _LevEx(lev_field=None, info_lev=None)
+    svc = _lev_svc(ex)                      # assumed_leverage defaults to 0
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("leverage" in e for e in res["errors"])

@@ -742,3 +742,61 @@ def test_entry_and_guardian_agree_on_balance():
     svc = EntryService(_G(), EntryLimits(max_positions=3, max_margin_pct=25,
                                          default_margin_pct=10, default_callback_pct=0.1))
     assert svc.wallet_balance() == pytest.approx(resolve_usdt_balance(payload)[0])
+
+
+# ── One flag drives keys AND endpoint ────────────────────────────────────────
+
+def _cfg_with(env):
+    import os, importlib
+    saved = {k: os.environ.get(k) for k in
+             ["TESTNET", "GUARDIAN_DEMO", "GUARDIAN_TESTNET", "SCANNER_DEMO",
+              "GUARDIAN_ENABLED", "BINANCE_API_KEY_TEST", "BINANCE_API_SECRET_TEST",
+              "BINANCE_API_KEY_LIVE", "BINANCE_API_SECRET_LIVE"]}
+    try:
+        for k in ["TESTNET", "GUARDIAN_DEMO", "GUARDIAN_TESTNET", "SCANNER_DEMO"]:
+            os.environ.pop(k, None)
+        os.environ.update({"BINANCE_API_KEY_TEST": "tk", "BINANCE_API_SECRET_TEST": "ts",
+                           "BINANCE_API_KEY_LIVE": "lk", "BINANCE_API_SECRET_LIVE": "ls"})
+        os.environ.update(env)
+        import bot.config
+        importlib.reload(bot.config)
+        return bot.config.BotConfig()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import bot.config
+        importlib.reload(bot.config)
+
+
+def test_testnet_true_puts_everything_on_demo():
+    """TESTNET picks the keys; the endpoint must follow, not default separately."""
+    c = _cfg_with({"TESTNET": "true"})
+    assert c.testnet is True
+    assert c.guardian_demo is True
+    assert c.scanner_demo is True
+    assert c.api_key == "tk"
+
+
+def test_testnet_false_puts_everything_on_live():
+    """
+    Previously guardian_demo defaulted to True regardless, so TESTNET=false gave
+    LIVE keys pointed at the DEMO endpoint.
+    """
+    c = _cfg_with({"TESTNET": "false"})
+    assert c.testnet is False
+    assert c.guardian_demo is False
+    assert c.scanner_demo is False
+    assert c.api_key == "lk"
+
+
+def test_explicit_guardian_demo_still_overrides():
+    c = _cfg_with({"TESTNET": "true", "GUARDIAN_DEMO": "false"})
+    assert c.guardian_demo is False
+
+
+def test_legacy_guardian_testnet_still_honoured():
+    c = _cfg_with({"TESTNET": "true", "GUARDIAN_TESTNET": "false"})
+    assert c.guardian_demo is False

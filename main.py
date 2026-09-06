@@ -53,6 +53,9 @@ if __name__ == "__main__":
         f"Features: guardian={'ON' if cfg.guardian_enabled else 'off'}"
         f"{' (DRY RUN)' if cfg.guardian_enabled and cfg.guardian_dry_run else ''} | "
         f"scanner={'ON' if cfg.scanner_enabled else 'off'}"
+        f"{' [demo market]' if (cfg.scanner_enabled and cfg.scanner_demo) else ''} | "
+        f"futures env={'DEMO' if cfg.guardian_demo else 'LIVE'} "
+        f"(keys={'TEST' if cfg.testnet else 'LIVE'})"
     )
 
     # Start API server in background (daemon thread — dies with main process)
@@ -91,6 +94,7 @@ if __name__ == "__main__":
                 max_margin_pct=cfg.entry_max_margin_pct,
                 default_margin_pct=cfg.entry_default_margin_pct,
                 default_callback_pct=cfg.entry_default_callback_pct,
+                assumed_leverage=cfg.entry_assumed_leverage,
             )))
             log.warning(
                 f"Futures ENTRY enabled — max {cfg.entry_max_positions} position(s), "
@@ -113,6 +117,8 @@ if __name__ == "__main__":
             short_rsi_min=cfg.scan_short_rsi_min,
             long_rsi_min=cfg.scan_long_rsi_min,
             long_rsi_max=cfg.scan_long_rsi_max,
+            volume_mode=cfg.scan_volume_mode,
+            vol_percentile=cfg.scan_vol_percentile,
         )
         runner = ScanRunner(
             scan_cfg,
@@ -120,6 +126,7 @@ if __name__ == "__main__":
             max_symbols=cfg.scanner_max_symbols,
             socks_proxy=cfg.socks_proxy or None,
             interval=cfg.scanner_interval,
+            demo=cfg.scanner_demo,
         )
         set_scanner(runner)
         runner.start_background()

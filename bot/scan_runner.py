@@ -29,7 +29,7 @@ log = logging.getLogger("scan_runner")
 class ScanRunner:
     def __init__(self, cfg: ScanConfig, timeframe: str = "5m",
                  max_symbols: int = 40, socks_proxy: str | None = None,
-                 interval: int = 120):
+                 interval: int = 120, demo: bool = False):
         self.cfg = cfg
         self.timeframe = timeframe
         self.max_symbols = max_symbols
@@ -44,12 +44,27 @@ class ScanRunner:
             params["proxies"] = {"http": socks_proxy, "https": socks_proxy}
         # No apiKey/secret — public data only, cannot trade.
         self.exchange = ccxt.binanceusdm(params)
+        self.demo = demo
+        if demo:
+            # Screen the SAME environment the account trades on. Screening the
+            # live market while entries execute on demo surfaced candidates that
+            # were not tradable there, and produced "no price" / "no leverage"
+            # errors at entry time.
+            try:
+                self.exchange.enable_demo_trading(True)
+                log.info("Scanner using DEMO market data (demo-fapi.binance.com)")
+            except AttributeError:
+                log.warning("ccxt has no enable_demo_trading(); scanner stays on "
+                            "live market data — candidates may not be tradable "
+                            "on a demo account.")
+                self.demo = False
 
         self._lock = threading.Lock()
         self._last_results: list[tuple[Candidate, Delta]] = []
         self._last_scan_ts: float = 0.0
         self._last_error: str | None = None
         self._universe_size: int = 0
+        self._effective_vol_floor: float = 0.0
         self._last_duration_s: float = 0.0
 
     # ── data ────────────────────────────────────────────────────────────────
@@ -60,13 +75,35 @@ class ScanRunner:
         genuine movers. Returns (symbol, quote_volume, pct_change).
         """
         tickers = self.exchange.fetch_tickers()
+
+        # Percentile mode: derive the volume floor from the universe itself, so
+        # the filter keeps working where absolute volumes are not comparable to
+        # live (demo inflates them).
+        vol_floor = self.cfg.min_24h_vol_usdt
+        if self.cfg.volume_mode == "percentile":
+            vols = []
+            for sym, t in tickers.items():
+                if not (sym.endswith("/USDT:USDT") or sym.endswith("/USDT")):
+                    continue
+                qv = t.get("quoteVolume")
+                if qv:
+                    vols.append(float(qv))
+            if vols:
+                vols.sort()
+                k = (len(vols) - 1) * self.cfg.vol_percentile / 100.0
+                lo, hi = int(k), min(int(k) + 1, len(vols) - 1)
+                vol_floor = vols[lo] + (vols[hi] - vols[lo]) * (k - lo)
+                log.info(f"Volume floor (p{self.cfg.vol_percentile:.0f}) = "
+                         f"{vol_floor/1e6:.1f}M across {len(vols)} symbols")
+        self._effective_vol_floor = vol_floor
+
         out = []
         for sym, t in tickers.items():
             if not sym.endswith("/USDT:USDT") and not sym.endswith("/USDT"):
                 continue
             qv = t.get("quoteVolume") or 0.0
             pct = t.get("percentage")
-            if pct is None or qv < self.cfg.min_24h_vol_usdt:
+            if pct is None or qv < vol_floor:
                 continue
             if abs(pct) < self.cfg.min_abs_change_pct:
                 continue
@@ -200,11 +237,15 @@ class ScanRunner:
                 "last_scan_ts": self._last_scan_ts,
                 "last_scan_ago_s": (time.time() - self._last_scan_ts) if self._last_scan_ts else None,
                 "universe_size": self._universe_size,
+                "demo": self.demo,
                 "scan_duration_s": round(self._last_duration_s, 1),
                 "interval_s": self.interval,
                 "error": self._last_error,
                 "config": {
                     "min_24h_vol_usdt": self.cfg.min_24h_vol_usdt,
+                    "volume_mode": self.cfg.volume_mode,
+                    "vol_percentile": self.cfg.vol_percentile,
+                    "effective_vol_floor": round(self._effective_vol_floor, 0),
                     "min_abs_change_pct": self.cfg.min_abs_change_pct,
                     "short_rsi_min": self.cfg.short_rsi_min,
                     "long_rsi_min": self.cfg.long_rsi_min,

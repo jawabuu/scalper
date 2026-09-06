@@ -81,6 +81,59 @@ def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
     return 0.0, "unresolved"
 
 
+def resolve_price(exchange, symbol: str) -> tuple[float, str]:
+    """
+    Current price for a symbol, from whichever field the endpoint provides.
+
+    Single source of truth for pricing, shared by the guardian and the entry
+    service. Payload shape varies between live and demo — some responses carry
+    no `last` at all — so several fields are tried before falling back to the
+    most recent candle close. Returns (price, source); price is 0.0 if nothing
+    could be read, with the reason in the source string.
+    """
+    try:
+        t = exchange.fetch_ticker(symbol) or {}
+    except Exception as e:
+        return 0.0, f"ticker error: {type(e).__name__}: {e}"
+
+    for field in ("last", "close", "markPrice", "mark", "previousClose"):
+        try:
+            v = float(t.get(field))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v, f"ticker.{field}"
+
+    # Some payloads only carry the book.
+    try:
+        bid, ask = float(t.get("bid")), float(t.get("ask"))
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2, "ticker.bid/ask mid"
+    except (TypeError, ValueError):
+        pass
+
+    info = t.get("info") or {}
+    for field in ("markPrice", "lastPrice", "indexPrice"):
+        try:
+            v = float(info.get(field))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v, f"ticker.info.{field}"
+
+    # Last resort: the most recent candle close.
+    try:
+        raw = exchange.fetch_ohlcv(symbol, "1m", limit=2)
+        if raw:
+            v = float(raw[-1][4])
+            if v > 0:
+                return v, "ohlcv close"
+    except Exception as e:
+        return 0.0, f"no price field; ohlcv fallback failed: {e}"
+
+    return 0.0, "no usable price field in ticker"
+
+
 def _r2(v):
     return None if v is None else round(float(v), 2)
 
@@ -225,10 +278,27 @@ class FuturesGuardian:
             return []
 
     def mark_price(self, pos: FuturesPosition) -> float | None:
-        t = self._ticker(pos.symbol)
+        return self._price_from_ticker(pos.symbol, self._ticker(pos.symbol))
+
+    def _price_from_ticker(self, symbol: str, t: dict | None) -> float | None:
         if not t:
+            price, source = resolve_price(self.exchange, symbol)
+            if price <= 0:
+                log.warning(f"{symbol}: could not read a price ({source})")
+                return None
+            return price
+        for field in ("last", "close", "markPrice"):
+            try:
+                v = float(t.get(field))
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                return v
+        price, source = resolve_price(self.exchange, symbol)
+        if price <= 0:
+            log.warning(f"{symbol}: could not read a price ({source})")
             return None
-        return float(t.get("last") or t.get("close") or 0) or None
+        return price
 
     RANGE_CACHE_TTL_S = 300.0
 

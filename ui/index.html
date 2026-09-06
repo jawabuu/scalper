@@ -1970,7 +1970,7 @@ function renderScan(data) {
     meta.textContent = `(${data.candidates.length} of ${data.universe_size} movers · `
       + `vol>${(c.min_24h_vol_usdt/1e6).toFixed(0)}M · move>${c.min_abs_change_pct}% · `
       + `short RSI>${c.short_rsi_min} · long RSI>${c.long_rsi_min} · ${c.timeframe}`
-      + `${every} · updated ${ago}${dur})`;
+      + `${every} · ${data.demo ? 'demo market' : 'live market'} · updated ${ago}${dur})`;
   }
 
   if (data.error) {

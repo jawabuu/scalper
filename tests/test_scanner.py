@@ -441,3 +441,87 @@ def test_candle_window_has_a_floor_for_indicators():
     from bot.scanner import ScanConfig
     r = ScanRunner(ScanConfig(), timeframe="1h", max_symbols=1, interval=60)
     assert r._candles_for_24h() >= 120        # enough for EMA21 / RSI14
+
+
+# ── Scanner environment must match the trading account ───────────────────────
+
+def test_scanner_uses_demo_endpoint_when_demo():
+    """
+    Screening the live market while entries execute on demo surfaced candidates
+    that were not tradable there ("no price" / "no leverage" at entry). The
+    scanner must screen the same environment the account trades on.
+    """
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner(ScanConfig(), timeframe="3m", max_symbols=5, interval=60, demo=True)
+    assert "demo-fapi" in r.exchange.urls["api"]["fapiPublic"]
+    assert r.demo is True
+
+
+def test_scanner_uses_live_endpoint_when_not_demo():
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner(ScanConfig(), timeframe="3m", max_symbols=5, interval=60, demo=False)
+    assert "demo-fapi" not in r.exchange.urls["api"]["fapiPublic"]
+    assert r.demo is False
+
+
+def test_snapshot_reports_which_market_was_scanned():
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner(ScanConfig(), timeframe="3m", max_symbols=5, interval=60, demo=True)
+    assert r.snapshot()["demo"] is True
+
+
+# ── Volume filtering must survive inflated demo volumes ──────────────────────
+
+def _vol_runner(mode, mult, percentile=60.0):
+    import time
+    from bot.scan_runner import ScanRunner
+    live = {"AAA": 86e6, "BBB": 40e6, "CCC": 200e6, "DDD": 12e6, "EEE": 500e6}
+
+    class Ex:
+        def fetch_tickers(self):
+            return {f"{k}/USDT:USDT": {"quoteVolume": v * mult, "percentage": 12.0,
+                                       "high": 125.0, "low": 100.0}
+                    for k, v in live.items()}
+        def fetch_ohlcv(self, sym, tf, limit=100):
+            cl = [100 + i * 0.5 for i in range(48)]
+            last = cl[-1]
+            cl += [last - i * 0.35 for i in range(1, 7)]
+            now = int(time.time() * 1000)
+            return [[now - (len(cl) - i) * 180000, c, c * 1.002, c * 0.998, c, 1000.0]
+                    for i, c in enumerate(cl)]
+
+    cfg = ScanConfig(min_24h_vol_usdt=50e6, min_abs_change_pct=8.0,
+                     volume_mode=mode, vol_percentile=percentile, long_rsi_min=38.0)
+    r = ScanRunner(cfg, timeframe="3m", max_symbols=10, interval=60)
+    r.exchange = Ex()
+    pairs = r.scan_once()
+    return r, sorted(c.symbol.split("/")[0] for c, _ in pairs)
+
+
+def test_absolute_floor_goes_inert_on_inflated_volumes():
+    """Demo reports ~35x live volume, which lets an absolute floor pass everything."""
+    _, live_syms = _vol_runner("absolute", 1)
+    _, demo_syms = _vol_runner("absolute", 35)
+    assert len(demo_syms) > len(live_syms)
+    assert len(demo_syms) == 5          # filter no longer discriminates
+
+
+def test_percentile_floor_selects_the_same_coins_regardless_of_scale():
+    """Ranking survives a uniform rescale, so percentile mode is environment-agnostic."""
+    _, live_syms = _vol_runner("percentile", 1)
+    _, demo_syms = _vol_runner("percentile", 35)
+    assert live_syms == demo_syms
+    assert live_syms == ["CCC", "EEE"]
+
+
+def test_percentile_floor_scales_with_the_universe():
+    live_r, _ = _vol_runner("percentile", 1)
+    demo_r, _ = _vol_runner("percentile", 35)
+    assert demo_r._effective_vol_floor == pytest.approx(
+        live_r._effective_vol_floor * 35, rel=1e-6)
+
+
+def test_percentile_setting_controls_strictness():
+    _, loose = _vol_runner("percentile", 1, percentile=20.0)
+    _, tight = _vol_runner("percentile", 1, percentile=80.0)
+    assert len(loose) >= len(tight)

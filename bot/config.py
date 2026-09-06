@@ -195,8 +195,13 @@ class BotConfig:
     # Binance retired futures testnet in favour of "demo trading" (separate
     # credentials, routes to demo-fapi.binance.com, mirrors live market data).
     # GUARDIAN_DEMO is the current name; GUARDIAN_TESTNET is still honoured.
+    # Follows TESTNET by default so ONE flag drives both halves: TESTNET picks
+    # which API keys are used, and this picks which endpoint they are sent to.
+    # Letting them default independently allowed live keys to be pointed at the
+    # demo endpoint (or vice versa) — a confusing auth failure at best.
+    # GUARDIAN_DEMO / GUARDIAN_TESTNET still override explicitly.
     guardian_demo: bool = field(default_factory=lambda: _env_bool(
-        "GUARDIAN_DEMO", _env_bool("GUARDIAN_TESTNET", True)))
+        "GUARDIAN_DEMO", _env_bool("GUARDIAN_TESTNET", _env_bool("TESTNET", True))))
     guardian_poll_interval: float = field(default_factory=lambda: _env_float("GUARDIAN_POLL_INTERVAL", 5.0))
     # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
@@ -217,6 +222,9 @@ class BotConfig:
     entry_default_margin_pct: float = field(default_factory=lambda: _env_float("ENTRY_DEFAULT_MARGIN_PCT", 10.0))
     entry_max_margin_pct: float = field(default_factory=lambda: _env_float("ENTRY_MAX_MARGIN_PCT", 25.0))
     entry_default_callback_pct: float = field(default_factory=lambda: _env_float("ENTRY_DEFAULT_CALLBACK_PCT", 0.1))
+    # Fallback leverage when the exchange reports none. Declaring it is an
+    # explicit statement of what is set on Binance — not a silent default.
+    entry_assumed_leverage: float = field(default_factory=lambda: _env_float("ENTRY_ASSUMED_LEVERAGE", 0.0))
 
     # ── Candidate scanner (read-only futures market screen) ─────────────
     # Surfaces potential long/short candidates for operator review. Uses PUBLIC
@@ -225,7 +233,16 @@ class BotConfig:
     scanner_interval: int = field(default_factory=lambda: _env_int("SCANNER_INTERVAL", 120))
     scanner_timeframe: str = field(default_factory=lambda: _env("SCANNER_TIMEFRAME", "5m"))
     scanner_max_symbols: int = field(default_factory=lambda: _env_int("SCANNER_MAX_SYMBOLS", 40))
+    # Scan the same environment the account trades on, so every candidate is
+    # actually tradable. Defaults to follow the guardian; override if needed.
+    scanner_demo: bool = field(default_factory=lambda: _env_bool(
+        "SCANNER_DEMO", _env_bool("GUARDIAN_DEMO",
+        _env_bool("GUARDIAN_TESTNET", _env_bool("TESTNET", True)))))
     scan_min_vol_usdt: float = field(default_factory=lambda: _env_float("SCAN_MIN_VOL_USDT", 50_000_000))
+    # "absolute" or "percentile". Demo reports inflated volumes, which makes an
+    # absolute floor inert — percentile mode stays meaningful in both.
+    scan_volume_mode: str = field(default_factory=lambda: _env("SCAN_VOLUME_MODE", "absolute").lower())
+    scan_vol_percentile: float = field(default_factory=lambda: _env_float("SCAN_VOL_PERCENTILE", 60.0))
     scan_min_change_pct: float = field(default_factory=lambda: _env_float("SCAN_MIN_CHANGE_PCT", 5.0))
     scan_short_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_SHORT_RSI_MIN", 70.0))
     scan_long_rsi_min: float = field(default_factory=lambda: _env_float("SCAN_LONG_RSI_MIN", 50.0))
@@ -323,6 +340,19 @@ class BotConfig:
             assert self.api_key == test_key or not live_key, (
                 "TESTNET=true but the resolved API key matches the LIVE key — "
                 "refusing to start (possible cross-wire)."
+            )
+
+        # Keys and endpoint must describe the same environment. Sending demo
+        # credentials to the live endpoint (or the reverse) fails in ways that
+        # are hard to read, so say so plainly at startup.
+        if self.guardian_enabled and self.testnet != self.guardian_demo:
+            import logging
+            logging.getLogger("config").warning(
+                f"ENVIRONMENT MISMATCH: TESTNET={self.testnet} selects the "
+                f"{'TEST/demo' if self.testnet else 'LIVE'} API keys, but "
+                f"GUARDIAN_DEMO={self.guardian_demo} points them at the "
+                f"{'demo' if self.guardian_demo else 'live'} endpoint. "
+                f"Unset GUARDIAN_DEMO to follow TESTNET, or make them agree."
             )
 
         assert self.strategy in ("breakout", "pullback"), \

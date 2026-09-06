@@ -42,6 +42,10 @@ class EntryLimits:
     default_callback_pct: float = 0.1   # Binance minimum
     min_callback_pct: float = 0.1
     max_callback_pct: float = 10.0
+    # Operator-declared leverage, used ONLY when the exchange reports none
+    # (seen on demo for symbols with no open position). Zero means "not
+    # declared" and the entry is refused rather than sized on a guess.
+    assumed_leverage: float = 0.0
 
 
 @dataclass
@@ -162,6 +166,45 @@ class EntryService:
             log.warning("Could not resolve a positive USDT wallet balance")
         return val
 
+    def _resolve_symbol(self, symbol: str) -> tuple[bool, str, str]:
+        """
+        Check the symbol is tradable on the account we will actually order on.
+
+        Candidates surfaced by the scanner come from the live market feed; the
+        trading account may be demo, whose market list can differ. A couple of
+        common notations are tried before giving up so a scanner symbol like
+        "X/USDT:USDT" still matches a market listed as "X/USDT".
+        """
+        ex = self.guardian.exchange
+        try:
+            if not getattr(ex, "markets", None):
+                ex.load_markets()
+        except Exception as e:
+            return False, f"could not load markets from the trading account: {e}", symbol
+
+        markets = getattr(ex, "markets", None) or {}
+        if not markets:
+            # Could not determine the market list. The exchange is the authority,
+            # not this pre-check, so proceed and let the ticker/order surface a
+            # real error rather than blocking on an unknown.
+            log.warning("market list unavailable; skipping the tradability check")
+            return True, "", symbol
+
+        if symbol in markets:
+            return True, "", symbol
+
+        base = symbol.split("/")[0]
+        for alt in (f"{base}/USDT:USDT", f"{base}/USDT", symbol.replace(":USDT", "")):
+            if alt in markets:
+                log.info(f"resolved {symbol} -> {alt} on the trading account")
+                return True, "", alt
+
+        return False, (
+            f"{symbol} is not tradable on this account "
+            f"({'demo' if getattr(self.guardian, 'demo', False) else 'live'}). "
+            f"The scanner screens the live market, whose symbol list can differ."
+        ), symbol
+
     def symbol_leverage(self, symbol: str) -> float:
         """
         The leverage the operator configured for this symbol on Binance. The
@@ -187,6 +230,14 @@ class EntryService:
         except Exception as e:
             log.warning(f"leverage lookup failed for {symbol}: {e}")
 
+        # Some endpoints (notably demo) do not report leverage for a symbol with
+        # no open position. An OPERATOR-DECLARED value is accepted here — that is
+        # a deliberate statement of what is configured on Binance, unlike the
+        # silent 1.0 default that previously mis-sized an order by 10x.
+        declared = getattr(self.limits, "assumed_leverage", 0) or 0
+        if declared > 0:
+            raw_candidates.append(("ENTRY_ASSUMED_LEVERAGE", declared))
+
         for source, raw in raw_candidates:
             try:
                 lev = float(raw)
@@ -198,7 +249,8 @@ class EntryService:
 
         log.error(
             f"{symbol}: could not resolve leverage — refusing to size an entry. "
-            f"Set leverage for this symbol on Binance first."
+            f"Set leverage for this symbol on Binance, or declare it with "
+            f"ENTRY_ASSUMED_LEVERAGE so sizing has a known basis."
         )
         return 0.0
 
@@ -222,10 +274,25 @@ class EntryService:
         if errors:
             return {"ok": False, "errors": errors}
 
-        ticker = self.guardian.exchange.fetch_ticker(symbol)
+        # The scanner screens the LIVE market while entries execute on the
+        # trading account (demo or live). Those universes are not identical, so
+        # confirm the symbol exists here before anything else — otherwise the
+        # failure surfaces as a vague "no price" further down.
+        ok, why, resolved = self._resolve_symbol(symbol)
+        if not ok:
+            return {"ok": False, "errors": [why]}
+        symbol = resolved
+
+        try:
+            ticker = self.guardian.exchange.fetch_ticker(symbol)
+        except Exception as e:
+            log.warning(f"ticker fetch failed for {symbol}: {e}")
+            return {"ok": False, "errors": [
+                f"could not read a price for {symbol}: {type(e).__name__}: {e}"]}
         price = float(ticker.get("last") or ticker.get("close") or 0)
         if price <= 0:
-            return {"ok": False, "errors": ["could not read a price for this symbol"]}
+            return {"ok": False, "errors": [
+                f"{symbol} returned no usable price (ticker had no last/close)"]}
 
         leverage = self.symbol_leverage(symbol)
         if leverage <= 0:

@@ -34,6 +34,15 @@ import pandas_ta as ta
 @dataclass
 class ScanConfig:
     min_24h_vol_usdt: float = 50_000_000
+    # How the volume floor is applied:
+    #   "absolute"   — vol must exceed min_24h_vol_usdt (correct on live)
+    #   "percentile" — vol must be in the top (100 - vol_percentile)% of the
+    #                  scanned universe. Scale-invariant, so it still
+    #                  discriminates where reported volumes are inflated (demo
+    #                  reports roughly 35x live, which makes an absolute floor
+    #                  inert — every coin passes).
+    volume_mode: str = "absolute"
+    vol_percentile: float = 60.0
     # "Movers only": ignore coins whose 24h change is smaller than this in
     # absolute terms. Top gainers AND top losers both qualify.
     min_abs_change_pct: float = 5.0
