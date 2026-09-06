@@ -63,6 +63,7 @@ class EntryPlan:
     margin_pct: float
     projected_stop_price: float | None = None
     projected_stop_roi: float | None = None
+    leverage_source: str = ""      # "info.leverage" | "assumed" | ...
     token: str = ""
     created_at: float = field(default_factory=time.time)
 
@@ -75,6 +76,8 @@ class EntryPlan:
             "notional_usdt": round(self.notional_usdt, 2),
             "qty": self.qty,
             "leverage": round(self.leverage, 1),
+            "leverage_source": self.leverage_source,
+            "leverage_assumed": self.leverage_source == "assumed",
             "ref_price": self.ref_price,
             "callback_pct": self.callback_pct,
             "wallet_balance": round(self.wallet_balance, 2),
@@ -205,54 +208,90 @@ class EntryService:
             f"The scanner screens the live market, whose symbol list can differ."
         ), symbol
 
-    def symbol_leverage(self, symbol: str) -> float:
+    def symbol_leverage_detail(self, symbol: str) -> tuple[float, str]:
         """
-        The leverage the operator configured for this symbol on Binance. The
-        guardian never sets leverage; it is read so sizing matches reality.
+        Leverage for this symbol, plus the source it came from.
 
-        Two hazards handled here:
+        Hazards handled:
 
         1. ccxt's parsed `leverage` field has been observed reporting 1 on
-           isolated positions, so the RAW `info.leverage` from Binance is
-           preferred — that is the authoritative value.
-        2. On failure this returns 0.0, NOT 1.0. A silent 1.0 sized an entry at
-           a tenth of the intended notional (which then floored to the minimum
-           lot), producing a position a fraction of the requested size. Zero
-           makes the plan invalid so the entry is REFUSED instead of mis-sized.
+           isolated positions, so the RAW `info.leverage` is preferred.
+        2. Demo does not report leverage for a symbol with no open position.
+           A configured ENTRY_ASSUMED_LEVERAGE is used then, but the source is
+           returned as "assumed" so the preview can label it — sizing is only
+           correct if that value matches what is set on Binance.
+        3. If nothing resolves and nothing is declared, this returns 0.0 so the
+           entry is REFUSED. A silent 1.0 previously mis-sized an order 10x.
         """
-        raw_candidates: list[tuple[str, object]] = []
+        candidates: list[tuple[str, object]] = []
+        ex = self.guardian.exchange
         try:
-            for p in self.guardian.exchange.fetch_positions([symbol]):
+            for p in ex.fetch_positions([symbol]):
                 info = p.get("info") or {}
-                # Raw Binance value first — the parsed field is less reliable.
-                raw_candidates.append(("info.leverage", info.get("leverage")))
-                raw_candidates.append(("leverage", p.get("leverage")))
+                candidates.append(("info.leverage", info.get("leverage")))
+                candidates.append(("leverage", p.get("leverage")))
         except Exception as e:
             log.warning(f"leverage lookup failed for {symbol}: {e}")
 
-        # Some endpoints (notably demo) do not report leverage for a symbol with
-        # no open position. An OPERATOR-DECLARED value is accepted here — that is
-        # a deliberate statement of what is configured on Binance, unlike the
-        # silent 1.0 default that previously mis-sized an order by 10x.
-        declared = getattr(self.limits, "assumed_leverage", 0) or 0
-        if declared > 0:
-            raw_candidates.append(("ENTRY_ASSUMED_LEVERAGE", declared))
+        # ccxt's fetch_positions_risk DROPS any position with entryPrice <= 0,
+        # so a symbol with no open position is filtered out and its leverage
+        # goes with it — on live and demo alike. Query the raw endpoint that
+        # ccxt is filtering, which reports leverage for every symbol.
+        if not any(v for _, v in candidates):
+            market_id = None
+            try:
+                market_id = ex.market_id(symbol)
+            except Exception:
+                market_id = symbol.split("/")[0] + "USDT"
+            for meth in ("fapiPrivateV3GetPositionRisk",
+                         "fapiPrivateV2GetPositionRisk",
+                         "fapiPrivateGetPositionRisk"):
+                fn = getattr(ex, meth, None)
+                if fn is None:
+                    continue
+                try:
+                    rows = fn({"symbol": market_id})
+                    for row in (rows if isinstance(rows, list) else [rows]):
+                        if (row or {}).get("leverage"):
+                            candidates.append((meth, row.get("leverage")))
+                    if any(v for _, v in candidates):
+                        break
+                except Exception as e:
+                    log.debug(f"{meth} failed for {symbol}: {e}")
 
-        for source, raw in raw_candidates:
+        if not any(v for _, v in candidates):
+            try:
+                if hasattr(ex, "fetch_leverage"):
+                    lv = ex.fetch_leverage(symbol)
+                    val = (lv.get("leverage") or (lv.get("info") or {}).get("leverage")) \
+                        if isinstance(lv, dict) else lv
+                    candidates.append(("fetch_leverage", val))
+            except Exception as e:
+                log.debug(f"fetch_leverage unavailable for {symbol}: {e}")
+
+        for source, raw in candidates:
             try:
                 lev = float(raw)
             except (TypeError, ValueError):
                 continue
             if lev > 0:
                 log.info(f"{symbol}: leverage {lev:g}x (from {source})")
-                return lev
+                return lev, source
 
-        log.error(
-            f"{symbol}: could not resolve leverage — refusing to size an entry. "
-            f"Set leverage for this symbol on Binance, or declare it with "
-            f"ENTRY_ASSUMED_LEVERAGE so sizing has a known basis."
-        )
-        return 0.0
+        declared = getattr(self.limits, "assumed_leverage", 0) or 0
+        if declared > 0:
+            log.warning(
+                f"{symbol}: exchange reported no leverage — ASSUMING {declared:g}x "
+                f"(ENTRY_ASSUMED_LEVERAGE). Sizing is only correct if this matches "
+                f"the leverage set on Binance for this symbol."
+            )
+            return float(declared), "assumed"
+
+        log.error(f"{symbol}: could not resolve leverage and none is declared")
+        return 0.0, ""
+
+    def symbol_leverage(self, symbol: str) -> float:
+        return self.symbol_leverage_detail(symbol)[0]
 
     def _account_state(self, symbol: str) -> tuple[int, bool]:
         positions = self.guardian.fetch_positions()
@@ -294,7 +333,7 @@ class EntryService:
             return {"ok": False, "errors": [
                 f"{symbol} returned no usable price (ticker had no last/close)"]}
 
-        leverage = self.symbol_leverage(symbol)
+        leverage, lev_source = self.symbol_leverage_detail(symbol)
         if leverage <= 0:
             return {"ok": False, "errors": [
                 "could not read this symbol's leverage from Binance — refusing "
@@ -332,7 +371,8 @@ class EntryService:
         plan = EntryPlan(
             symbol=symbol, side=side, order_side=order_side_for(side),
             margin_usdt=margin, notional_usdt=notional, qty=qty,
-            leverage=leverage, ref_price=price, callback_pct=callback_pct,
+            leverage=leverage, leverage_source=lev_source,
+            ref_price=price, callback_pct=callback_pct,
             wallet_balance=balance, margin_pct=margin_pct,
             projected_stop_price=float(self.guardian.exchange.price_to_precision(symbol, stop_price)),
             projected_stop_roi=stop_roi,
@@ -340,6 +380,10 @@ class EntryService:
         )
         self._pending[plan.token] = plan
         self._prune()
+        if lev_source == "assumed":
+            size_warnings.insert(0, (
+                f"leverage {leverage:g}x is ASSUMED (the exchange reported none) "
+                f"— confirm this matches the leverage set on Binance for {symbol}"))
         if size_warnings:
             for w in size_warnings:
                 log.warning(f"{symbol}: {w}")

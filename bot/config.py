@@ -224,7 +224,11 @@ class BotConfig:
     entry_default_callback_pct: float = field(default_factory=lambda: _env_float("ENTRY_DEFAULT_CALLBACK_PCT", 0.1))
     # Fallback leverage when the exchange reports none. Declaring it is an
     # explicit statement of what is set on Binance — not a silent default.
-    entry_assumed_leverage: float = field(default_factory=lambda: _env_float("ENTRY_ASSUMED_LEVERAGE", 0.0))
+    # Demo does not report leverage for a symbol with no open position, which
+    # blocked entries entirely. Default to 10x — it must match what is actually
+    # configured on Binance, so the preview labels the value as ASSUMED to make
+    # a mismatch visible before confirming.
+    entry_assumed_leverage: float = field(default_factory=lambda: _env_float("ENTRY_ASSUMED_LEVERAGE", 10.0))
 
     # ── Candidate scanner (read-only futures market screen) ─────────────
     # Surfaces potential long/short candidates for operator review. Uses PUBLIC

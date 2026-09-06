@@ -657,7 +657,6 @@ class _RangeEx(FakeExchange):
 def test_range_uses_ticker_when_present():
     ex = _RangeEx(hilo=True, positions=[_raw_pos("long")], price=100.0)
     g = _guardian(ex)
-    g._range_cache = {}; g._range_cache_ttl = 300.0
     hi, lo = g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
     assert (hi, lo) == (110.0, 90.0)
     assert ex.ohlcv_calls == 0          # no extra call needed
@@ -670,7 +669,6 @@ def test_range_falls_back_to_candles_when_ticker_omits_them():
     """
     ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
     g = _guardian(ex)
-    g._range_cache = {}; g._range_cache_ttl = 300.0
     hi, lo = g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
     assert (hi, lo) == (110.0, 90.0)
     assert ex.ohlcv_calls == 1
@@ -680,7 +678,6 @@ def test_range_fallback_is_cached():
     """The guardian polls every ~5s; the fallback must not fetch klines each time."""
     ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
     g = _guardian(ex)
-    g._range_cache = {}; g._range_cache_ttl = 300.0
     for _ in range(5):
         g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
     assert ex.ohlcv_calls == 1
@@ -689,7 +686,6 @@ def test_range_fallback_is_cached():
 def test_position_meta_carries_distances_to_both_extremes():
     ex = _RangeEx(hilo=True, positions=[_raw_pos("long", entry=100.0)], price=100.0)
     g = _guardian(ex)
-    g._range_cache = {}; g._range_cache_ttl = 300.0
     g.run_cycle()
     meta = g._pos_meta["DOGE/USDT:USDT"]
     assert meta["high_24h"] == 110.0 and meta["low_24h"] == 90.0
@@ -800,3 +796,41 @@ def test_explicit_guardian_demo_still_overrides():
 def test_legacy_guardian_testnet_still_honoured():
     c = _cfg_with({"TESTNET": "true", "GUARDIAN_TESTNET": "false"})
     assert c.guardian_demo is False
+
+
+# ── An unavailable 24h range must explain itself ─────────────────────────────
+
+def test_range_source_records_ticker_origin():
+    ex = _RangeEx(hilo=True, positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(ex)
+    g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert g._range_source["X/USDT:USDT"] == "ticker"
+
+
+def test_range_source_records_candle_fallback():
+    ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
+    g = _guardian(ex)
+    g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert g._range_source["X/USDT:USDT"] == "candles"
+
+
+def test_range_source_records_the_failure_reason():
+    """
+    The fallback failure was logged at debug and swallowed, so the range simply
+    read n/a with no way to tell why. It must now say what went wrong.
+    """
+    ex = _RangeEx(hilo=False, positions=[_raw_pos("long")], price=100.0)
+    def boom(symbol, timeframe, limit=288):
+        raise RuntimeError("Invalid symbol")
+    ex.fetch_ohlcv = boom
+    g = _guardian(ex)
+    hi, lo = g._range_24h("X/USDT:USDT", ex.fetch_ticker("X"))
+    assert (hi, lo) == (None, None)
+    assert "Invalid symbol" in g._range_source["X/USDT:USDT"]
+
+
+def test_range_method_is_defined_once():
+    """A duplicated definition silently shadowed the first — keep it singular."""
+    import inspect, bot.futures_guardian as m
+    src = inspect.getsource(m)
+    assert src.count("def _range_24h(") == 1

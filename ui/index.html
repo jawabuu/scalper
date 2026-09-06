@@ -1900,7 +1900,7 @@ async function previewEntry(symbol, side) {
     setEl('entry-detail', `
       <div class="entry-row"><span class="k">Direction</span><span class="v dir-${p.side}">${p.side.toUpperCase()} (${p.order_side})</span></div>
       <div class="entry-row"><span class="k">Reference price</span><span class="v">${p.ref_price}</span></div>
-      <div class="entry-row"><span class="k">Leverage</span><span class="v">${p.leverage}x</span></div>
+      <div class="entry-row"><span class="k">Leverage</span><span class="v">${p.leverage}x${p.leverage_assumed ? ' <span class="rq rq-weak">assumed</span>' : ''}</span></div>
       <div class="entry-row"><span class="k">Margin</span><span class="v">$${p.margin_usdt} (${p.margin_pct}% of $${p.wallet_balance})</span></div>
       <div class="entry-row"><span class="k">Position size</span><span class="v">$${p.notional_usdt} · ${p.qty}</span></div>
       <div class="entry-row"><span class="k">Trailing callback</span><span class="v">${p.callback_pct}%</span></div>
@@ -2069,7 +2069,9 @@ function toggleGuard() {
 // 24h high it fell from — the extreme that matters for that side.
 function rangeContext(s) {
   if (s.range_pos_24h === null || s.range_pos_24h === undefined) {
-    return '<span class="rq rq-unknown">n/a</span>';
+    const why = s.range_source && s.range_source !== 'unknown' ? s.range_source : '';
+    return `<span class="rq rq-unknown" title="${why}">n/a</span>`
+         + (why ? ` <span class="scan-note">${why}</span>` : '');
   }
   const pct = Math.round(s.range_pos_24h * 100);
   const bar = `<span class="range-bar"><span class="range-dot" style="left:${Math.min(51, Math.max(0, pct * 0.51))}px"></span></span>`;

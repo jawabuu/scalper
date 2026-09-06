@@ -390,3 +390,87 @@ def test_without_declaration_missing_leverage_still_refuses():
     res = svc.preview(symbol="UNI/USDT:USDT", side="long")
     assert res["ok"] is False
     assert any("leverage" in e for e in res["errors"])
+
+
+# ── Assumed leverage must be labelled, never silent ──────────────────────────
+
+def test_assumed_leverage_default_lets_demo_entries_size():
+    """Demo reports no leverage for a symbol with no position; 10x default unblocks it."""
+    from bot.futures_entry import EntryService, EntryLimits
+    ex = _LevEx(lev_field=None, info_lev=None)
+    svc = EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["ok"] is True
+    assert res["plan"]["leverage"] == pytest.approx(10.0)
+
+
+def test_assumed_leverage_is_flagged_in_the_plan_and_warnings():
+    """A guess must be visible before confirming, not discovered after the fill."""
+    from bot.futures_entry import EntryService, EntryLimits
+    ex = _LevEx(lev_field=None, info_lev=None)
+    svc = EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    res = svc.preview(symbol="UNI/USDT:USDT", side="long")
+    assert res["plan"]["leverage_assumed"] is True
+    assert res["plan"]["leverage_source"] == "assumed"
+    assert any("ASSUMED" in w for w in res.get("warnings", []))
+
+
+def test_reported_leverage_is_not_flagged_as_assumed():
+    ex = _LevEx(lev_field=1, info_lev="10")     # exchange does report it
+    svc = _lev_svc(ex)
+    plan = svc.preview(symbol="UNI/USDT:USDT", side="long")["plan"]
+    assert plan["leverage"] == pytest.approx(10.0)
+    assert plan["leverage_assumed"] is False
+    assert plan["leverage_source"] == "info.leverage"
+
+
+# ── ccxt filters out zero-size positions, hiding leverage ────────────────────
+
+def test_raw_position_risk_recovers_leverage_ccxt_filtered_out():
+    """
+    ccxt's fetch_positions_risk drops rows with entryPrice <= 0, so a symbol
+    with no open position loses its leverage — on LIVE as well as demo. The raw
+    positionRisk endpoint still reports it and must be preferred over assuming.
+    """
+    from bot.futures_entry import EntryService, EntryLimits
+
+    class Ex(_LevEx):
+        def __init__(self):
+            super().__init__(lev_field=None, info_lev=None)
+            self.raw_called = False
+        def market_id(self, s): return "UNIUSDT"
+        def fetch_positions(self, symbols=None): return []      # ccxt filtered
+        def fapiPrivateV3GetPositionRisk(self, params):
+            self.raw_called = True
+            return [{"symbol": "UNIUSDT", "leverage": "20", "entryPrice": "0.0"}]
+
+    ex = Ex()
+    svc = EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    lev, src = svc.symbol_leverage_detail("UNI/USDT:USDT")
+    assert ex.raw_called
+    assert lev == pytest.approx(20.0)          # the REAL value, not the assumed 10
+    assert src == "fapiPrivateV3GetPositionRisk"
+
+
+def test_assumption_only_used_when_raw_endpoint_also_fails():
+    from bot.futures_entry import EntryService, EntryLimits
+
+    class Ex(_LevEx):
+        def __init__(self):
+            super().__init__(lev_field=None, info_lev=None)
+        def market_id(self, s): return "UNIUSDT"
+        def fetch_positions(self, symbols=None): return []
+        def fapiPrivateV3GetPositionRisk(self, params):
+            raise RuntimeError("endpoint unavailable")
+
+    svc = EntryService(_LevGuardian(Ex()), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    lev, src = svc.symbol_leverage_detail("UNI/USDT:USDT")
+    assert lev == pytest.approx(10.0) and src == "assumed"

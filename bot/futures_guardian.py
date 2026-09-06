@@ -207,7 +207,9 @@ class FuturesGuardian:
         # the guardian polls every few seconds and must not refetch 24h of
         # klines that often.
         self._range_cache: dict[str, tuple[float, float, float]] = {}
-        self._range_cache_ttl: float = 300.0
+        # symbol -> where the 24h range came from, or why it is missing. Shown
+        # in the snapshot so an "n/a" is diagnosable without server logs.
+        self._range_source: dict[str, str] = {}
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -315,12 +317,14 @@ class FuturesGuardian:
         lo = (ticker or {}).get("low")
         try:
             if hi and lo and float(hi) > float(lo):
+                self._range_source[symbol] = "ticker"
                 return float(hi), float(lo)
         except (TypeError, ValueError):
             pass
 
         cached = self._range_cache.get(symbol)
         if cached and (time.time() - cached[2]) < self.RANGE_CACHE_TTL_S:
+            self._range_source[symbol] = "candles (cached)"
             return cached[0], cached[1]
 
         try:
@@ -332,46 +336,15 @@ class FuturesGuardian:
                 if highs and lows:
                     h, l = float(max(highs)), float(min(lows))
                     self._range_cache[symbol] = (h, l, time.time())
+                    self._range_source[symbol] = "candles"
                     return h, l
+            self._range_source[symbol] = "empty candle response"
+            log.warning(f"{symbol}: 24h range fallback returned no candles")
         except Exception as e:
-            log.debug(f"24h range fallback failed for {symbol}: {e}")
-        return None, None
-
-    def _range_24h(self, symbol: str, ticker: dict | None) -> tuple[float | None, float | None]:
-        """
-        24h high/low for a symbol.
-
-        Prefers the ticker, but some payloads omit high/low — in which case the
-        range is derived from candles instead, so an open position always shows
-        where it sits relative to its daily extremes. The derived value is
-        cached because it needs a klines call and would otherwise run on every
-        poll (default every 5s).
-        """
-        hi = (ticker or {}).get("high")
-        lo = (ticker or {}).get("low")
-        try:
-            if hi and lo and float(hi) > float(lo):
-                return float(hi), float(lo)
-        except (TypeError, ValueError):
-            pass
-
-        now = time.time()
-        cached = self._range_cache.get(symbol)
-        if cached and now - cached[2] < self._range_cache_ttl:
-            return cached[0], cached[1]
-
-        try:
-            # 5m candles: 288 spans a full 24h in a single request.
-            raw = self.exchange.fetch_ohlcv(symbol, "5m", limit=288)
-            if raw:
-                highs = [r[2] for r in raw if r[2] is not None]
-                lows = [r[3] for r in raw if r[3] is not None]
-                if highs and lows:
-                    h, l = float(max(highs)), float(min(lows))
-                    self._range_cache[symbol] = (h, l, now)
-                    return h, l
-        except Exception as e:
-            log.debug(f"24h range fallback failed for {symbol}: {e}")
+            # WARNING, not debug: this was swallowed silently and the range just
+            # showed "n/a" with no way to tell why.
+            self._range_source[symbol] = f"{type(e).__name__}: {e}"
+            log.warning(f"{symbol}: 24h range fallback failed: {type(e).__name__}: {e}")
         return None, None
 
     def _ticker(self, symbol: str) -> dict | None:
@@ -828,6 +801,7 @@ class FuturesGuardian:
                     "pct_below_24h_high": _r2(self._pos_meta.get(sym, {}).get("pct_below_24h_high")),
                     "high_24h": self._pos_meta.get(sym, {}).get("high_24h"),
                     "low_24h": self._pos_meta.get(sym, {}).get("low_24h"),
+                    "range_source": self._range_source.get(sym, "unknown"),
                 }
                 for sym, s in self._states.items()
             }

@@ -65,6 +65,9 @@ class ScanRunner:
         self._last_error: str | None = None
         self._universe_size: int = 0
         self._effective_vol_floor: float = 0.0
+        # How many symbols needed the candle fallback for their 24h range —
+        # a high count means the ticker feed is not supplying high/low.
+        self._range_misses: int = 0
         self._last_duration_s: float = 0.0
 
     # ── data ────────────────────────────────────────────────────────────────
@@ -157,6 +160,7 @@ class ScanRunner:
     def scan_once(self) -> list[tuple[Candidate, Delta]]:
         started = time.time()
         candidates: list[Candidate] = []
+        self._range_misses = 0
         try:
             movers = self._prefilter()
         except Exception as e:
@@ -181,8 +185,15 @@ class ScanRunner:
                     try:
                         h = h if h is not None else float(df["high"].max())
                         l = l if l is not None else float(df["low"].min())
-                    except Exception:
-                        pass
+                        self._range_misses += 1
+                    except Exception as e:
+                        # Was silently swallowed, leaving the range as "n/a"
+                        # with no way to tell why.
+                        log.warning(f"{sym}: 24h range fallback failed: "
+                                    f"{type(e).__name__}: {e}")
+                if h is None or l is None:
+                    log.warning(f"{sym}: no 24h high/low available "
+                                f"(ticker high={hi!r} low={lo!r})")
                 c = evaluate_symbol(sym, df, qv, pct, self.cfg,
                                     high_24h=h, low_24h=l)
             except Exception as e:
@@ -238,6 +249,7 @@ class ScanRunner:
                 "last_scan_ago_s": (time.time() - self._last_scan_ts) if self._last_scan_ts else None,
                 "universe_size": self._universe_size,
                 "demo": self.demo,
+                "range_fallbacks": self._range_misses,
                 "scan_duration_s": round(self._last_duration_s, 1),
                 "interval_s": self.interval,
                 "error": self._last_error,
