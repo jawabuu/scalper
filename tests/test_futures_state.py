@@ -133,3 +133,45 @@ def test_persistence_disabled_when_no_path():
     g = _guardian("")
     g._states["X"] = GuardState()
     g.save_state()              # must be a no-op, not an error
+
+
+# ── Diagnostics for the sized-stop handoff ───────────────────────────────────
+
+def test_writability_is_verified_at_startup(path):
+    g = _guardian(path)
+    assert g.verify_state_path() is True
+
+
+def test_unwritable_path_is_reported_not_silent():
+    g = _guardian("/proc/nope/definitely/not/writable/s.json")
+    assert g.verify_state_path() is False
+
+
+def test_disabled_persistence_is_reported():
+    g = _guardian("")
+    assert g.verify_state_path() is False
+
+
+def test_cap_log_is_not_repeated_every_cycle(path):
+    """
+    Margin drifts with unrealised PnL, so the cap recomputes each cycle and
+    logged an almost-identical line every few seconds.
+    """
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(path)
+    g._wallet_balance_cached = 4428.0
+    for margin in (492.0, 492.4, 491.6, 492.2):
+        pos = FuturesPosition("ROSE/USDT:USDT", "short", 0.007395, 1330629.0, 20, margin)
+        g._cap_stop_to_budget(pos, 17.6)
+    capped = [a for a in g._actions if a["action"] == "stop_capped"]
+    assert len(capped) == 1, f"logged {len(capped)} times for a stable level"
+
+
+def test_cap_log_repeats_when_the_level_moves_materially(path):
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(path)
+    g._wallet_balance_cached = 4428.0
+    for margin in (492.0, 900.0):        # a real change in the capped level
+        pos = FuturesPosition("ROSE/USDT:USDT", "short", 0.007395, 1330629.0, 20, margin)
+        g._cap_stop_to_budget(pos, 17.6)
+    assert len([a for a in g._actions if a["action"] == "stop_capped"]) == 2

@@ -214,6 +214,8 @@ class FuturesGuardian:
         # in the snapshot so an "n/a" is diagnosable without server logs.
         self._range_source: dict[str, str] = {}
         self._risk_overshoots: dict[str, dict] = {}
+        self._capped_stop_reported: dict[str, float] = {}
+        self._stop_source_reported: set = set()
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
         # Extra order ids when a stop had to be split across the per-order cap.
         self._split_stop_ids: dict[str, list[str]] = {}
@@ -492,7 +494,19 @@ class FuturesGuardian:
             sized = (self._pos_meta.get(pos.symbol, {})
                      .get("entry_context") or {}).get("sized_stop_roi")
         if sized:
+            if pos.symbol not in self._stop_source_reported:
+                self._stop_source_reported.add(pos.symbol)
+                log.info(f"{pos.symbol}: stop {float(sized):.1f}% ROI from the "
+                         f"SIZED handoff (entry and guardian agree)")
             return float(sized)
+
+        if pos.symbol not in self._stop_source_reported:
+            self._stop_source_reported.add(pos.symbol)
+            log.warning(
+                f"{pos.symbol}: no sized stop recorded — deriving from a fresh "
+                f"ATR read. This position was opened before the handoff existed, "
+                f"or its state was lost. The budget cap is the safety net."
+            )
 
         a = self.atr_pct(pos.symbol)
         roi = atr_stop_roi(a, pos.effective_leverage, self.cfg)
@@ -530,15 +544,21 @@ class FuturesGuardian:
         if capped >= stop_roi:
             return stop_roi
 
-        log.warning(
-            f"{pos.symbol}: stop {stop_roi:.1f}% ROI on {pos.margin:.2f} margin "
-            f"would risk {pos.margin * stop_roi / 100:.2f} vs a {budget:.2f} "
-            f"budget — tightening to {capped:.1f}% ROI "
-            f"({pos.margin * capped / 100:.2f} at risk)."
-        )
-        self._record(pos.symbol, "stop_capped",
-                     f"{stop_roi:.1f}% -> {capped:.1f}% ROI to hold risk at "
-                     f"{budget:.2f} USDT")
+        # Margin drifts with unrealised PnL, so this recomputes every cycle and
+        # would otherwise log an almost-identical line every few seconds. Report
+        # it once, and again only if the level moves meaningfully.
+        prev = self._capped_stop_reported.get(pos.symbol)
+        if prev is None or abs(prev - capped) >= 0.5:
+            log.warning(
+                f"{pos.symbol}: stop {stop_roi:.1f}% ROI on {pos.margin:.2f} margin "
+                f"would risk {pos.margin * stop_roi / 100:.2f} vs a {budget:.2f} "
+                f"budget — tightening to {capped:.1f}% ROI "
+                f"({pos.margin * capped / 100:.2f} at risk)."
+            )
+            self._record(pos.symbol, "stop_capped",
+                         f"{stop_roi:.1f}% -> {capped:.1f}% ROI to hold risk at "
+                         f"{budget:.2f} USDT")
+            self._capped_stop_reported[pos.symbol] = capped
         if capped > max_stop_roi * 1.05:
             log.error(
                 f"{pos.symbol}: even the {floor:.1f}% minimum stop risks "
@@ -921,6 +941,32 @@ class FuturesGuardian:
             log.info(f"{sym}: restored peak {st.peak_roi:+.1f}% ROI, "
                      f"armed={st.armed}, trail={bool(st.native_trail_id)}")
 
+    def verify_state_path(self) -> bool:
+        """
+        Confirm the state file can actually be written.
+
+        Persistence failing silently is the difference between a position
+        keeping the stop it was sized for and getting a fresh ATR guess after a
+        restart, so this is checked once at startup rather than discovered from
+        a mis-sized trade.
+        """
+        if not self.state_path:
+            log.warning("Futures state persistence DISABLED (no path set) — "
+                        "sized stops and the daily-loss baseline will not "
+                        "survive a restart.")
+            return False
+        from . import futures_state
+        ok = futures_state.save(self.state_path, states={}, pos_meta={},
+                                closed_trades=[], safety={})
+        if ok:
+            log.info(f"Futures state persistence OK -> {self.state_path}")
+        else:
+            log.error(
+                f"Futures state NOT writable at {self.state_path} — sized stops "
+                f"and the daily-loss baseline will be lost on restart. Check the "
+                f"volume mount is writable.")
+        return ok
+
     def save_state(self):
         if not self.state_path:
             return
@@ -965,6 +1011,8 @@ class FuturesGuardian:
                 self._record(sym, "closed", "position no longer open")
                 del self._states[sym]
                 self._pos_meta.pop(sym, None)
+                self._capped_stop_reported.pop(sym, None)
+                self._stop_source_reported.discard(sym)
 
         # Cancel any protective stop left resting after the position closed.
         # An orphaned reduce-only stop is not harmless: if a NEW position is

@@ -97,6 +97,7 @@ if __name__ == "__main__":
         # they were sized for and their peak ROI, instead of being re-derived.
         if cfg.futures_state_path:
             guardian.load_state(cfg.futures_state_path)
+            guardian.verify_state_path()
         set_guardian(guardian)
         guardian.start_background()
 
