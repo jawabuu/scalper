@@ -356,6 +356,36 @@ class AutoTrader:
                           "symbol": symbol, "detail": detail})
         self._log = self._log[-40:]
 
+    def safety_snapshot(self) -> dict:
+        """SafetyState in a persistable form — the daily halt must survive a restart."""
+        return {
+            "day_start_balance": self.state.day_start_balance,
+            "day_key": self.state.day_key,
+            "recent_entry_times": list(self.state.recent_entry_times),
+            "symbol_blocked_until": dict(self.state.symbol_blocked_until),
+            "failed_entry_rsi": dict(self.state.failed_entry_rsi),
+            "reentries_today": dict(self.state.reentries_today),
+            "halted_reason": self.state.halted_reason,
+        }
+
+    def restore_safety(self, data: dict):
+        """
+        Reinstate the safety counters. Without this a restart rebases the daily
+        loss baseline, so a bad day could be reset simply by redeploying.
+        """
+        if not data:
+            return
+        s = self.state
+        s.day_start_balance = float(data.get("day_start_balance") or 0.0)
+        s.day_key = data.get("day_key") or ""
+        s.recent_entry_times = list(data.get("recent_entry_times") or [])
+        s.symbol_blocked_until = dict(data.get("symbol_blocked_until") or {})
+        s.failed_entry_rsi = dict(data.get("failed_entry_rsi") or {})
+        s.reentries_today = dict(data.get("reentries_today") or {})
+        s.halted_reason = data.get("halted_reason")
+        if s.halted_reason:
+            _log.warning(f"Auto-trade remains HALTED after restart: {s.halted_reason}")
+
     def snapshot(self) -> dict:
         return {
             "enabled": self.cfg.enabled,

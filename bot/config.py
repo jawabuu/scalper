@@ -238,6 +238,10 @@ class BotConfig:
     guardian_demo: bool = field(default_factory=lambda: _env_bool(
         "GUARDIAN_DEMO", _env_bool("GUARDIAN_TESTNET", _env_bool("TESTNET", True))))
     guardian_poll_interval: float = field(default_factory=lambda: _env_float("GUARDIAN_POLL_INTERVAL", 5.0))
+    # Persists restart-critical futures state: sized stops, position peaks, the
+    # daily-loss baseline, cooldowns and trade history. Empty disables it.
+    futures_state_path: str = field(default_factory=lambda: _env(
+        "FUTURES_STATE_PATH", "/app/logs/futures_state.json"))
     # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
     guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))

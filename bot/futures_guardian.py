@@ -213,9 +213,12 @@ class FuturesGuardian:
         # symbol -> where the 24h range came from, or why it is missing. Shown
         # in the snapshot so an "n/a" is diagnosable without server logs.
         self._range_source: dict[str, str] = {}
+        self._risk_overshoots: dict[str, dict] = {}
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
         # Extra order ids when a stop had to be split across the per-order cap.
         self._split_stop_ids: dict[str, list[str]] = {}
+        # Where restart-critical state is persisted. Empty disables it.
+        self.state_path: str = getattr(self, "state_path", "")
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -391,6 +394,37 @@ class FuturesGuardian:
             log.warning(f"{symbol}: ATR lookup failed: {type(e).__name__}: {e}")
             return None
 
+    def _check_risk_invariant(self, pos: FuturesPosition, stop_roi: float):
+        """
+        Assert the loss at the placed stop matches the configured risk budget.
+
+        Sizing and stop placement are computed in different components at
+        different times. When they disagree the position is silently oversized
+        — one trade risked 2.8x its budget before anyone noticed. This is the
+        backstop: it cannot prevent the mismatch, but it makes it loud the
+        moment a stop is placed rather than when the loss lands.
+        """
+        budget_pct = getattr(self, "risk_pct", 0.0)
+        wallet = self._wallet_balance_cached
+        if not budget_pct or wallet <= 0 or not pos.margin:
+            return
+        budget = wallet * budget_pct / 100.0
+        loss = pos.margin * abs(stop_roi) / 100.0
+        if budget > 0 and loss > budget * 1.25:
+            msg = (f"RISK OVERSHOOT: stop at {-abs(stop_roi):.1f}% ROI on "
+                   f"{pos.margin:.2f} margin risks {loss:.2f} USDT, but the "
+                   f"budget is {budget:.2f} ({budget_pct}% of {wallet:.2f}) "
+                   f"— {loss/budget:.1f}x. Sizing and stop disagree.")
+            log.error(f"{pos.symbol}: {msg}")
+            self._record(pos.symbol, "RISK_OVERSHOOT",
+                         f"{loss:.2f} at risk vs {budget:.2f} budget "
+                         f"({loss/budget:.1f}x)")
+            with self._lock:
+                self._risk_overshoots[pos.symbol] = {
+                    "loss_at_stop": round(loss, 2), "budget": round(budget, 2),
+                    "ratio": round(loss / budget, 2), "stop_roi": round(stop_roi, 2),
+                }
+
     def _capture_entry_context(self, pos: FuturesPosition, price: float,
                                range_pos: float | None) -> dict:
         """
@@ -464,6 +498,54 @@ class FuturesGuardian:
         roi = atr_stop_roi(a, pos.effective_leverage, self.cfg)
         if roi is None:
             return self.cfg.initial_stop_roi
+        return roi
+
+    def _cap_stop_to_budget(self, pos: FuturesPosition, stop_roi: float) -> float:
+        """
+        Tighten a stop that would risk more than the configured budget.
+
+        The budget and the position's ACTUAL margin uniquely determine the
+        widest acceptable stop: loss = margin x stop_roi, so the cap is simply
+        budget / margin. When sizing and stop placement disagree, this recovers
+        the stop the position was really sized for rather than trusting an ATR
+        reading taken at a different moment.
+
+        Tightening is always safe in risk terms, but a tighter stop sits closer
+        to the noise, so it is floored at atr_stop_min_roi. If even that floor
+        exceeds the budget the position is simply too large for it, which is
+        reported rather than silently accepted.
+        """
+        budget_pct = getattr(self, "risk_pct", 0.0)
+        wallet = self._wallet_balance_cached
+        if not budget_pct or wallet <= 0 or not pos.margin:
+            return stop_roi
+
+        budget = wallet * budget_pct / 100.0
+        max_stop_roi = budget / pos.margin * 100.0
+        if stop_roi <= max_stop_roi * 1.05:
+            return stop_roi          # already within budget
+
+        floor = self.cfg.atr_stop_min_roi or 0.0
+        capped = max(max_stop_roi, floor)
+        if capped >= stop_roi:
+            return stop_roi
+
+        log.warning(
+            f"{pos.symbol}: stop {stop_roi:.1f}% ROI on {pos.margin:.2f} margin "
+            f"would risk {pos.margin * stop_roi / 100:.2f} vs a {budget:.2f} "
+            f"budget — tightening to {capped:.1f}% ROI "
+            f"({pos.margin * capped / 100:.2f} at risk)."
+        )
+        self._record(pos.symbol, "stop_capped",
+                     f"{stop_roi:.1f}% -> {capped:.1f}% ROI to hold risk at "
+                     f"{budget:.2f} USDT")
+        if capped > max_stop_roi * 1.05:
+            log.error(
+                f"{pos.symbol}: even the {floor:.1f}% minimum stop risks "
+                f"{pos.margin * capped / 100:.2f} vs a {budget:.2f} budget — "
+                f"the position is too large for the risk setting."
+            )
+        return capped
         if abs(roi - self.cfg.initial_stop_roi) > 0.5:
             log.info(f"{pos.symbol}: ATR {a:.2f}% -> initial stop {roi:.0f}% ROI "
                      f"(fixed default would be {self.cfg.initial_stop_roi:.0f}%)")
@@ -685,9 +767,11 @@ class FuturesGuardian:
         prev_order_id = state.stop_order_id
         prev_stop_roi = state.stop_roi
         was_armed = state.armed
+        _stop_roi_used = self._cap_stop_to_budget(pos, self.effective_stop_roi(pos))
+        self._check_risk_invariant(pos, _stop_roi_used)
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
-            initial_stop_override=self.effective_stop_roi(pos))
+            initial_stop_override=_stop_roi_used)
 
         # ── Armed phase: Binance owns the trail ──────────────────────────────
         # Once a native trailing stop is resting the exchange tracks the peak
@@ -814,6 +898,41 @@ class FuturesGuardian:
 
     # ── cycle ───────────────────────────────────────────────────────────────
 
+    def load_state(self, path: str):
+        """Restore state from a previous run. Best-effort; never blocks startup."""
+        from . import futures_state
+        self.state_path = path
+        data = futures_state.load(path)
+        if not data:
+            return
+        restored = futures_state.restore_states(data)
+        with self._lock:
+            self._states.update(restored)
+            for sym, m in (data.get("pos_meta") or {}).items():
+                meta = self._pos_meta.setdefault(sym, {})
+                if m.get("entry_context"):
+                    meta["entry_context"] = m["entry_context"]
+                if m.get("opened_seen_at"):
+                    meta["opened_seen_at"] = m["opened_seen_at"]
+            if not self._closed_trades:
+                self._closed_trades = list(data.get("closed_trades") or [])
+        self._restored_safety = data.get("safety") or {}
+        for sym, st in restored.items():
+            log.info(f"{sym}: restored peak {st.peak_roi:+.1f}% ROI, "
+                     f"armed={st.armed}, trail={bool(st.native_trail_id)}")
+
+    def save_state(self):
+        if not self.state_path:
+            return
+        from . import futures_state
+        with self._lock:
+            states = dict(self._states)
+            meta = dict(self._pos_meta)
+            trades = list(self._closed_trades)
+        futures_state.save(self.state_path, states=states, pos_meta=meta,
+                           closed_trades=trades,
+                           safety=getattr(self, "_safety_snapshot", lambda: {})())
+
     def run_cycle(self):
         try:
             positions = self.fetch_positions()
@@ -864,6 +983,7 @@ class FuturesGuardian:
 
         self._last_cycle_ts = time.time()
         self._last_error = None
+        self.save_state()
 
     def _record_closed_trade(self, symbol: str, state: GuardState, meta: dict):
         """
@@ -1124,6 +1244,7 @@ class FuturesGuardian:
                     "high_24h": self._pos_meta.get(sym, {}).get("high_24h"),
                     "low_24h": self._pos_meta.get(sym, {}).get("low_24h"),
                     "range_source": self._range_source.get(sym, "unknown"),
+                    "risk_overshoot": self._risk_overshoots.get(sym),
                 }
                 for sym, s in self._states.items()
             }

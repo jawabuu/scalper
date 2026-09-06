@@ -91,6 +91,12 @@ if __name__ == "__main__":
             poll_interval=cfg.guardian_poll_interval,
             socks_proxy=cfg.socks_proxy or None,
         )
+        # The guardian needs the risk budget to police the sizing/stop invariant.
+        guardian.risk_pct = cfg.entry_risk_pct
+        # Restore before the first cycle so discovered positions keep the stop
+        # they were sized for and their peak ROI, instead of being re-derived.
+        if cfg.futures_state_path:
+            guardian.load_state(cfg.futures_state_path)
         set_guardian(guardian)
         guardian.start_background()
 
@@ -181,6 +187,10 @@ if __name__ == "__main__":
                     max_open_positions=cfg.entry_max_positions,
                 )
                 auto = AutoTrader(auto_cfg, scan_runner, entry_service, guardian)
+                # The guardian owns the state file; give it a way to snapshot
+                # the auto-trader's safety counters alongside its own state.
+                guardian._safety_snapshot = auto.safety_snapshot
+                auto.restore_safety(getattr(guardian, "_restored_safety", {}))
                 set_auto_trader(auto)
 
                 def _auto_loop():

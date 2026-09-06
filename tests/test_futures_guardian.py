@@ -1340,3 +1340,134 @@ def test_trail_log_reports_the_rate_actually_sent():
     assert armed, "trail should have armed"
     assert "1.0%" not in armed[0]["detail"]
     assert "ROI" in armed[0]["detail"]
+
+
+# ── Risk invariant backstop ──────────────────────────────────────────────────
+
+def test_risk_overshoot_is_detected_and_recorded():
+    """
+    Sizing and stop placement happen in different components at different
+    times. When they disagree the position is silently oversized — LDO risked
+    2.8x its budget. This makes it loud at stop-placement time.
+    """
+    fake = FakeExchange(positions=[_raw_pos("short", entry=0.4311,
+                                            contracts=32900.0, lev=20,
+                                            margin=709.33)],
+                        price=0.4311)
+    g = _guardian(fake)
+    g.risk_pct = 1.0
+    g._wallet_balance_cached = 4729.0
+    from bot.futures_guard import FuturesPosition
+    pos = FuturesPosition("DOGE/USDT:USDT", "short", 0.4311, 32900.0, 20, 709.33)
+    g._check_risk_invariant(pos, 18.82)
+
+    over = g._risk_overshoots.get("DOGE/USDT:USDT")
+    assert over is not None
+    assert over["ratio"] == pytest.approx(2.8, abs=0.1)
+    assert any(a["action"] == "RISK_OVERSHOOT" for a in g._actions)
+
+
+def test_correctly_sized_position_raises_no_overshoot():
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(FakeExchange())
+    g.risk_pct = 1.0
+    g._wallet_balance_cached = 4729.0
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 11500.0, 20, 251.28)
+    g._check_risk_invariant(pos, 18.82)
+    assert g._risk_overshoots == {}
+
+
+def test_invariant_is_silent_without_a_risk_budget():
+    """Manually opened positions have no budget — no false alarms."""
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(FakeExchange())
+    g._wallet_balance_cached = 4729.0
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 32900.0, 20, 709.33)
+    g._check_risk_invariant(pos, 18.82)
+    assert g._risk_overshoots == {}
+
+
+def test_small_overshoot_within_tolerance_is_not_flagged():
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(FakeExchange())
+    g.risk_pct = 1.0
+    g._wallet_balance_cached = 4729.0
+    # 10% over budget — inside the 1.25x tolerance
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 12000.0, 20, 276.0)
+    g._check_risk_invariant(pos, 18.82)
+    assert g._risk_overshoots == {}
+
+
+# ── Stop is capped to the risk budget ────────────────────────────────────────
+
+def _budget_guardian(wallet=4729.0, risk_pct=1.0, min_roi=4.0):
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(atr_stop_mult=1.5, atr_stop_min_roi=min_roi, atr_stop_max_roi=30)
+    g = _guardian(FakeExchange(), cfg=cfg)
+    g.risk_pct = risk_pct
+    g._wallet_balance_cached = wallet
+    return g
+
+
+def test_oversized_position_gets_a_tighter_stop():
+    """
+    Budget and actual margin uniquely determine the widest acceptable stop, so
+    a sizing/stop disagreement can be corrected rather than merely reported.
+    """
+    from bot.futures_guard import FuturesPosition
+    g = _budget_guardian()
+    pos = FuturesPosition("LDO/USDT:USDT", "short", 0.4311, 32900.0, 20, 709.33)
+    capped = g._cap_stop_to_budget(pos, 18.82)
+    assert capped == pytest.approx(6.67, abs=0.05)
+    assert pos.margin * capped / 100 == pytest.approx(47.29, abs=0.5)
+    assert any(a["action"] == "stop_capped" for a in g._actions)
+
+
+def test_correctly_sized_position_is_untouched():
+    from bot.futures_guard import FuturesPosition
+    g = _budget_guardian()
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 11500.0, 20, 251.28)
+    assert g._cap_stop_to_budget(pos, 18.82) == pytest.approx(18.82)
+
+
+def test_cap_never_widens_a_stop():
+    """Only ever tightens — a generous budget must not loosen protection."""
+    from bot.futures_guard import FuturesPosition
+    g = _budget_guardian(wallet=100000.0)
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 11500.0, 20, 251.28)
+    assert g._cap_stop_to_budget(pos, 10.0) == pytest.approx(10.0)
+
+
+def test_cap_is_floored_at_the_minimum_stop():
+    """A stop tighter than the floor sits inside the noise — refuse to go there."""
+    from bot.futures_guard import FuturesPosition
+    g = _budget_guardian(min_roi=4.0)
+    huge = FuturesPosition("X/USDT:USDT", "short", 0.4311, 200000.0, 20, 4000.0)
+    capped = g._cap_stop_to_budget(huge, 25.0)
+    assert capped == pytest.approx(4.0)      # floored, not 1.2%
+
+
+def test_manual_position_without_budget_is_not_capped():
+    from bot.futures_guard import FuturesPosition
+    g = _guardian(FakeExchange())
+    g._wallet_balance_cached = 4729.0        # no risk_pct set
+    pos = FuturesPosition("X/USDT:USDT", "short", 0.4311, 32900.0, 20, 709.33)
+    assert g._cap_stop_to_budget(pos, 18.82) == pytest.approx(18.82)
+
+
+def test_capped_stop_is_actually_placed():
+    """The cap must reach the order, not just the log."""
+    fake = FakeExchange(positions=[_raw_pos("short", entry=0.4311,
+                                            contracts=32900.0, lev=20,
+                                            margin=709.33)], price=0.4311)
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(atr_stop_mult=1.5, atr_stop_min_roi=4, atr_stop_max_roi=30)
+    g = _guardian(fake, cfg=cfg)
+    g.risk_pct = 1.0
+    g.run_cycle()
+    stops = [o for o in fake.created if o["type"] == "STOP_MARKET"]
+    assert stops
+    trigger = float(stops[0]["params"]["stopPrice"])
+    # a 6.7% ROI stop at 20x is ~0.33% of price, not ~0.95%
+    move = abs(trigger - 0.4311) / 0.4311 * 100
+    assert move < 0.6, f"stop placed {move:.2f}% away — cap did not reach the order"

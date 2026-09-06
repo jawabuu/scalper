@@ -2622,7 +2622,10 @@ function renderGuardian(g) {
                 : '<span style="color:var(--muted)">initial</span>'));
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
-        : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`;
+        : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`
+          + (s.risk_overshoot
+             ? ` <span class="rq rq-weak" title="risks $${s.risk_overshoot.loss_at_stop} vs $${s.risk_overshoot.budget} budget">${s.risk_overshoot.ratio}x risk</span>`
+             : '');
       const cur = (s.current_roi === null || s.current_roi === undefined)
         ? '—'
         : `<span class="${s.current_roi >= 0 ? 'pos' : 'neg'}">${s.current_roi >= 0 ? '+' : ''}${s.current_roi}%</span>`;
