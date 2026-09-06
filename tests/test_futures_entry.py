@@ -120,7 +120,8 @@ def test_rejects_when_symbol_already_has_position():
     errs = validate_request(side="short", margin_pct=10.0, callback_pct=0.1,
                             wallet_balance=100, open_positions=0,
                             symbol_has_position=True, limits=EntryLimits())
-    assert any("already open" in e for e in errs)
+    # Wording widened when resting entry orders started counting as committed.
+    assert any("already exists on this symbol" in e for e in errs)
 
 
 def test_rejects_at_position_limit():
@@ -672,3 +673,113 @@ def test_risk_is_honoured_when_the_stop_is_clamped_to_max():
     assert abs(plan["projected_stop_roi"]) == pytest.approx(30.0)
     # loss at that stop must be ~1% of the wallet, not 30% of a flat position
     assert plan["projected_stop_loss_usdt"] == pytest.approx(107.0 * 0.01, rel=0.05)
+
+
+# ── Resting entry orders must block duplicates ───────────────────────────────
+
+class _PendingEx(_LevEx):
+    markets = {"BR/USDT:USDT": {}}
+    def __init__(self):
+        super().__init__(lev_field=None, info_lev="20")
+        self.orders = []
+    def load_markets(self): return self.markets
+    def market(self, s): return {"limits": {"amount": {"max": 1e12}}}
+    def market_id(self, s): return "BRUSDT"
+    def fetch_balance(self): return {"info": {"totalWalletBalance": "4000.0"}}
+    def fetch_ticker(self, s): return {"last": 0.23614}
+    def amount_to_precision(self, s, a): return f"{float(a):.0f}"
+    def fetch_open_orders(self, s): return self.orders
+    def fetch_ohlcv(self, s, tf, limit=120):
+        p = 0.23614
+        return [[0, p, p * 1.002, p * 0.998, p, 10.0] for _ in range(limit)]
+    def fetch_positions(self, symbols=None):
+        return [{"symbol": "BR/USDT:USDT", "info": {"leverage": "20"}}] if symbols else []
+
+
+def _pending_svc(ex):
+    from bot.futures_entry import EntryService, EntryLimits
+    return EntryService(_LevGuardian(ex), EntryLimits(
+        max_positions=6, max_margin_pct=15, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0))
+
+
+def test_resting_entry_order_blocks_a_second_entry():
+    """
+    A trailing-stop entry rests until price reaches it, so it is not a
+    position. The duplicate guard only checked positions, so the same candidate
+    re-qualified each scan and stacked orders — several then filled together,
+    producing a position several times the intended size.
+    """
+    ex = _PendingEx()
+    ex.orders = [{"id": "E1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    res = _pending_svc(ex).preview(symbol="BR/USDT:USDT", side="long")
+    assert res["ok"] is False
+    assert any("resting entry order" in e for e in res["errors"])
+
+
+def test_protective_orders_do_not_block_entry():
+    """Reduce-only stops are protection, not commitment — they must not block."""
+    ex = _PendingEx()
+    ex.orders = [{"id": "S1", "reduceOnly": True, "symbol": "BR/USDT:USDT"}]
+    assert _pending_svc(ex).preview(symbol="BR/USDT:USDT", side="long")["ok"] is True
+
+
+def test_reduce_only_read_from_info_when_absent_at_top_level():
+    ex = _PendingEx()
+    ex.orders = [{"id": "S1", "info": {"reduceOnly": "true"}, "symbol": "BR/USDT:USDT"}]
+    assert _pending_svc(ex).preview(symbol="BR/USDT:USDT", side="long")["ok"] is True
+
+
+def test_no_orders_means_entry_allowed():
+    ex = _PendingEx()
+    ex.orders = []
+    assert _pending_svc(ex).preview(symbol="BR/USDT:USDT", side="long")["ok"] is True
+
+
+def test_repeated_scans_place_only_one_order():
+    ex = _PendingEx()
+    svc = _pending_svc(ex)
+    placed = 0
+    for _ in range(4):
+        r = svc.preview(symbol="BR/USDT:USDT", side="long")
+        if r.get("ok"):
+            svc.execute(r["plan"]["token"])
+            ex.orders.append({"id": f"E{placed}", "reduceOnly": False,
+                              "symbol": "BR/USDT:USDT"})
+            placed += 1
+    assert placed == 1, f"{placed} orders stacked for one candidate"
+
+
+def test_local_guard_blocks_duplicate_when_exchange_query_is_stale():
+    """
+    Binance showed three BR entries filling in the same second. The exchange
+    query is the primary guard, but a stale or failing reply must not allow a
+    second order — the cost is a position several times the intended size.
+    """
+    ex = _PendingEx()
+    ex.fetch_open_orders = lambda s: []      # exchange reports nothing (stale)
+    svc = _pending_svc(ex)
+    first = svc.preview(symbol="BR/USDT:USDT", side="long")
+    assert first["ok"] is True
+    svc.execute(first["plan"]["token"])
+    second = svc.preview(symbol="BR/USDT:USDT", side="long")
+    assert second["ok"] is False
+
+
+def test_local_guard_expires():
+    ex = _PendingEx()
+    ex.fetch_open_orders = lambda s: []
+    svc = _pending_svc(ex)
+    svc._note_pending("BR/USDT:USDT")
+    assert svc._recently_placed("BR/USDT:USDT")
+    svc._recent_entries["BR/USDT:USDT"] -= svc.RECENT_ENTRY_TTL_S + 1
+    assert not svc._recently_placed("BR/USDT:USDT")
+
+
+def test_local_guard_cleared_on_close():
+    ex = _PendingEx()
+    svc = _pending_svc(ex)
+    svc._note_pending("BR/USDT:USDT")
+    svc.clear_pending("BR/USDT:USDT")
+    assert not svc._recently_placed("BR/USDT:USDT")

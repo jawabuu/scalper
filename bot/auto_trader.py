@@ -505,7 +505,25 @@ class AutoTrader:
             return
 
         roll_day(self.state, balance)
+
+        # Evaluate the daily loss EVERY cycle, not only when a candidate is
+        # being considered. Previously the drawdown was checked inside the
+        # per-candidate loop, so a scan with no candidates performed no check
+        # and the halt could lag well past its limit.
+        self._check_daily_drawdown(balance)
+
         open_syms = {p.symbol for p in positions}
+        # Also skip symbols with a resting entry order. The entry service
+        # refuses these too, but checking here avoids a pointless preview and
+        # keeps the log readable.
+        for row in rows:
+            sym = row.get("symbol", "")
+            if sym not in open_syms:
+                try:
+                    if self.entry.pending_entry_orders(sym):
+                        open_syms.add(sym)
+                except Exception:
+                    pass
 
         for row in rows:
             symbol = row.get("symbol", "")
@@ -579,9 +597,35 @@ class AutoTrader:
             else:
                 self._record("execute_failed", str(res.get("error")), symbol)
 
+    def _check_daily_drawdown(self, balance: float):
+        """
+        Halt as soon as the limit is breached, independent of candidate flow.
+
+        This bounds NEW entries only — it cannot unwind positions already open,
+        so the realised drawdown can still exceed the limit by roughly the
+        exposure outstanding when it fires. That is inherent, but the halt
+        should at least not be late.
+        """
+        if self.state.halted_reason or not self.cfg.daily_loss_limit_pct:
+            return
+        start = self.state.day_start_balance
+        if start <= 0:
+            return
+        dd = (start - balance) / start * 100
+        if dd >= self.cfg.daily_loss_limit_pct:
+            self.state.halted_reason = (
+                f"daily loss limit hit: down {dd:.1f}% from {start:.2f} — "
+                f"auto-trade halted until tomorrow (UTC) or a manual reset")
+            _log.error(f"AUTO-TRADE HALTED: {self.state.halted_reason}")
+            self._record("halted", self.state.halted_reason)
+
     def note_closed_trade(self, symbol: str, realised: float | None,
                           entry_rsi: float | None = None):
         """Apply the post-loss cooldown when a position closes down."""
+        try:
+            self.entry.clear_pending(symbol)
+        except Exception:
+            pass
         if realised is not None and realised < 0:
             record_loss(self.state, symbol, self.cfg,
                         entry_rsi=entry_rsi or self.state.failed_entry_rsi.get(symbol))

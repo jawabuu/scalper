@@ -86,6 +86,54 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
     return _atomic_write(path, payload)
 
 
+def reset(path: str, mode: str) -> str:
+    """
+    Clear persisted state before it is loaded.
+
+    Two levels, because "start the analysis fresh" and "forget everything" are
+    different intentions:
+
+      "history" — drop closed trades only. Open positions keep the stop they
+                  were sized for, their peak ROI and the daily-loss baseline.
+                  This is what you want after bad data contaminated the record.
+      "all"     — drop everything, including open-position state. Those
+                  positions will be rediscovered and their stops re-derived.
+
+    The old file is renamed rather than deleted, so a reset triggered by a
+    stray flag is recoverable.
+    """
+    mode = (mode or "").strip().lower()
+    if mode not in ("history", "all"):
+        return ""
+    if not path or not os.path.exists(path):
+        log.warning(f"FUTURES_STATE_RESET={mode} but no state file at {path}")
+        return ""
+
+    backup = f"{path}.{time.strftime('%Y%m%d-%H%M%S')}.bak"
+    try:
+        if mode == "all":
+            os.replace(path, backup)
+            log.warning(f"FUTURES_STATE_RESET=all — cleared ALL persisted state. "
+                        f"Previous state archived at {backup}. Open positions "
+                        f"will be rediscovered and their stops re-derived.")
+            return backup
+
+        with open(path) as fh:
+            data = json.load(fh)
+        dropped = len(data.get("closed_trades") or [])
+        import shutil
+        shutil.copy2(path, backup)
+        data["closed_trades"] = []
+        _atomic_write(path, data)
+        log.warning(f"FUTURES_STATE_RESET=history — dropped {dropped} closed "
+                    f"trade(s); open positions and the daily baseline kept. "
+                    f"Previous state archived at {backup}.")
+        return backup
+    except Exception as e:
+        log.error(f"could not reset futures state at {path}: {e}")
+        return ""
+
+
 def load(path: str) -> dict:
     """
     Read persisted state. Returns {} when absent or unreadable — a missing or

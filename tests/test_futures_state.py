@@ -175,3 +175,63 @@ def test_cap_log_repeats_when_the_level_moves_materially(path):
         pos = FuturesPosition("ROSE/USDT:USDT", "short", 0.007395, 1330629.0, 20, margin)
         g._cap_stop_to_budget(pos, 17.6)
     assert len([a for a in g._actions if a["action"] == "stop_capped"]) == 2
+
+
+# ── Startup reset flag ───────────────────────────────────────────────────────
+
+def _seed(path):
+    futures_state.save(
+        path, states={}, pos_meta={},
+        closed_trades=[{"symbol": f"T{i}", "final_roi": 1.0} for i in range(5)],
+        safety={"day_start_balance": 4494.25, "halted_reason": "daily loss limit hit"})
+    data = json.load(open(path))
+    data["states"] = {"BR/USDT:USDT": {"peak_roi": 12.0, "armed": True}}
+    data["pos_meta"] = {"BR/USDT:USDT": {"entry_context": {"sized_stop_roi": 6.67}}}
+    futures_state._atomic_write(path, data)
+
+
+def test_history_reset_drops_trades_but_keeps_positions(path):
+    """
+    Contaminated trade history is the reason to reset — open positions should
+    keep the stop they were sized for, and the daily baseline should stand.
+    """
+    _seed(path)
+    futures_state.reset(path, "history")
+    data = futures_state.load(path)
+    assert data["closed_trades"] == []
+    assert "BR/USDT:USDT" in data["states"]
+    assert data["pos_meta"]["BR/USDT:USDT"]["entry_context"]["sized_stop_roi"] == 6.67
+    assert data["safety"]["day_start_balance"] == pytest.approx(4494.25)
+
+
+def test_history_reset_preserves_the_halt(path):
+    """Resetting the record must not hand back a fresh daily allowance."""
+    _seed(path)
+    futures_state.reset(path, "history")
+    assert futures_state.load(path)["safety"]["halted_reason"]
+
+
+def test_all_reset_clears_everything(path):
+    _seed(path)
+    futures_state.reset(path, "all")
+    assert not os.path.exists(path)
+    assert futures_state.load(path) == {}
+
+
+def test_reset_archives_rather_than_deletes(path):
+    _seed(path)
+    backup = futures_state.reset(path, "all")
+    assert backup and os.path.exists(backup)
+    with open(backup) as fh:
+        assert len(json.load(fh)["closed_trades"]) == 5
+
+
+def test_unset_or_invalid_mode_does_nothing(path):
+    _seed(path)
+    for mode in ("", None, "yes", "true"):
+        futures_state.reset(path, mode)
+    assert len(futures_state.load(path)["closed_trades"]) == 5
+
+
+def test_reset_with_no_file_is_harmless(path):
+    assert futures_state.reset(path, "all") == ""

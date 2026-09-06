@@ -148,7 +148,8 @@ def validate_request(*, side: str, margin_pct: float, callback_pct: float,
     if callback_pct > limits.max_callback_pct:
         errs.append(f"callback {callback_pct}% above the {limits.max_callback_pct}% maximum")
     if symbol_has_position:
-        errs.append("a position is already open on this symbol")
+        errs.append("a position or a resting entry order already exists on "
+                    "this symbol")
     if open_positions >= limits.max_positions:
         errs.append(f"already at the {limits.max_positions}-position limit")
     return errs
@@ -167,6 +168,9 @@ class EntryService:
         self.guardian = guardian
         self.limits = limits or EntryLimits()
         self._pending: dict[str, EntryPlan] = {}
+        # Per-instance, not class-level: a shared mutable default would leak
+        # state between services (and between tests).
+        self._recent_entries: dict[str, float] = {}
 
     # -- account reads
     def wallet_balance(self) -> float:
@@ -327,9 +331,65 @@ class EntryService:
     def symbol_leverage(self, symbol: str) -> float:
         return self.symbol_leverage_detail(symbol)[0]
 
+    # Symbols with an entry order placed by THIS process, and when. A second
+    # line of defence behind the exchange query: fetch_open_orders can be slow
+    # or briefly stale, and the cost of one duplicate slipping through is a
+    # position several times the intended size (BR filled 3 stacked orders in
+    # the same second). Expires so a never-filled order cannot block a symbol
+    # forever.
+    RECENT_ENTRY_TTL_S = 900.0
+
+    def _note_pending(self, symbol: str):
+        self._recent_entries[symbol] = time.time()
+
+    def _recently_placed(self, symbol: str) -> bool:
+        ts = self._recent_entries.get(symbol)
+        if ts is None:
+            return False
+        if time.time() - ts > self.RECENT_ENTRY_TTL_S:
+            self._recent_entries.pop(symbol, None)
+            return False
+        return True
+
+    def clear_pending(self, symbol: str):
+        """Called when a symbol's position closes, so it can be traded again."""
+        self._recent_entries.pop(symbol, None)
+
+    def pending_entry_orders(self, symbol: str) -> list:
+        """
+        Entry orders already RESTING on this symbol.
+
+        A trailing-stop entry waits for price to reach it, so it is not a
+        position. The duplicate guard only checked positions, which meant the
+        same candidate re-qualified every scan and stacked another order —
+        several then filled together, producing a position multiples of the
+        intended size. Protective orders are reduce-only and are ignored here.
+        """
+        try:
+            orders = self.guardian.exchange.fetch_open_orders(symbol)
+        except Exception as e:
+            log.warning(f"{symbol}: could not read open orders: {e}")
+            return []
+        pending = []
+        for o in orders or []:
+            info = o.get("info") or {}
+            reduce_only = o.get("reduceOnly")
+            if reduce_only is None:
+                reduce_only = str(info.get("reduceOnly", "")).lower() == "true"
+            if not reduce_only:
+                pending.append(o)
+        return pending
+
     def _account_state(self, symbol: str) -> tuple[int, bool]:
         positions = self.guardian.fetch_positions()
-        return len(positions), any(p.symbol == symbol for p in positions)
+        has = any(p.symbol == symbol for p in positions)
+        # Count a resting entry order as "already committed" to this symbol,
+        # and fall back to this process's own record if the exchange query is
+        # stale or fails.
+        if not has and (self.pending_entry_orders(symbol)
+                        or self._recently_placed(symbol)):
+            has = True
+        return len(positions), has
 
     # -- step 1
     def preview(self, symbol: str, side: str, margin_pct: float | None = None,
@@ -509,6 +569,10 @@ class EntryService:
                 f"callback={plan.callback_pct}% margin={plan.margin_usdt:.2f} "
                 f"notional={plan.notional_usdt:.2f}"
             )
+            # Record it in dry run too: dry run exists to mirror live
+            # behaviour, and without this the duplicate guard would be
+            # exercised only on the live path.
+            self._note_pending(plan.symbol)
             return {"ok": True, "dry_run": True, "plan": plan.as_dict(),
                     "message": "Dry run — no order sent."}
 
@@ -528,6 +592,7 @@ class EntryService:
             f"qty={plan.qty} callback={plan.callback_pct}% "
             f"margin={plan.margin_usdt:.2f} notional={plan.notional_usdt:.2f}"
         )
+        self._note_pending(plan.symbol)
         # Record the stop this order was sized for. The fill may be minutes
         # away, by which time a recomputed ATR would disagree.
         try:

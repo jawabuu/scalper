@@ -97,6 +97,13 @@ if __name__ == "__main__":
         # Restore before the first cycle so discovered positions keep the stop
         # they were sized for and their peak ROI, instead of being re-derived.
         if cfg.futures_state_path:
+            if cfg.futures_state_reset:
+                from bot import futures_state as _fs
+                _fs.reset(cfg.futures_state_path, cfg.futures_state_reset)
+                log.warning(
+                    "FUTURES_STATE_RESET is set — this runs on EVERY restart "
+                    "while present. Remove it from the environment once the "
+                    "cleanup has happened.")
             guardian.load_state(cfg.futures_state_path)
             guardian.verify_state_path()
         set_guardian(guardian)

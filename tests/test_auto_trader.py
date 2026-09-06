@@ -367,3 +367,60 @@ def test_loss_limits_remain_env_only():
                 "max_open_positions", "max_reentries_per_symbol"):
         applied, errors = a.update_rules({key: 999})
         assert applied == {} and any("safety limit" in e for e in errors)
+
+
+# ── The halt must not lag behind the limit ───────────────────────────────────
+
+def _at(balance_start):
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.cfg = AutoTradeConfig(enabled=True, daily_loss_limit_pct=5.0)
+    a.state = SafetyState()
+    a._log = []
+    roll_day(a.state, balance_start)
+    return a
+
+
+def test_halt_fires_without_any_candidates():
+    """
+    The drawdown was only evaluated inside the per-candidate loop, so a scan
+    with no candidates performed no check and the halt lagged — one run reached
+    -9.4% against a 5% limit.
+    """
+    a = _at(4494.25)
+    a._check_daily_drawdown(4260.0)          # -5.2%
+    assert a.state.halted_reason
+    assert "5.2%" in a.state.halted_reason
+
+
+def test_halt_not_triggered_inside_the_limit():
+    a = _at(4494.25)
+    a._check_daily_drawdown(4300.0)          # -4.3%
+    assert a.state.halted_reason is None
+
+
+def test_halt_is_not_re_reported_once_set():
+    a = _at(4494.25)
+    a._check_daily_drawdown(4260.0)
+    first = a.state.halted_reason
+    a._check_daily_drawdown(4000.0)
+    assert a.state.halted_reason == first
+    assert len([r for r in a._log if r["action"] == "halted"]) == 1
+
+
+def test_halt_blocks_entries_once_set():
+    a = _at(4494.25)
+    a._check_daily_drawdown(4260.0)
+    ok, why = check_safety(a.state, a.cfg, balance=4260.0,
+                           open_positions=0, symbol="X")
+    assert not ok and "daily loss limit" in why
+
+
+def test_no_baseline_means_no_false_halt():
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.cfg = AutoTradeConfig(daily_loss_limit_pct=5.0)
+    a.state = SafetyState()          # day_start_balance still 0
+    a._log = []
+    a._check_daily_drawdown(100.0)
+    assert a.state.halted_reason is None

@@ -242,6 +242,11 @@ class BotConfig:
     # daily-loss baseline, cooldowns and trade history. Empty disables it.
     futures_state_path: str = field(default_factory=lambda: _env(
         "FUTURES_STATE_PATH", "/app/logs/futures_state.json"))
+    # One-shot cleanup on startup: "history" drops closed trades only (keeps
+    # open positions and the daily baseline); "all" drops everything. The old
+    # file is archived, not deleted. Leave UNSET in normal operation — it
+    # applies on every restart while it is set.
+    futures_state_reset: str = field(default_factory=lambda: _env("FUTURES_STATE_RESET", ""))
     # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
     guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))
