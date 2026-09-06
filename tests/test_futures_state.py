@@ -235,3 +235,126 @@ def test_unset_or_invalid_mode_does_nothing(path):
 
 def test_reset_with_no_file_is_harmless(path):
     assert futures_state.reset(path, "all") == ""
+
+
+# ── State files must not cross environments ──────────────────────────────────
+
+def test_demo_refuses_state_written_by_live(path):
+    """
+    Two containers sharing a volume read each other's state — the demo
+    dashboard showed live data and vice versa.
+    """
+    live = futures_state.identity(False, "liveKEY789012")
+    demo = futures_state.identity(True, "demoKEY123456")
+    futures_state.save(path, states={}, pos_meta={},
+                       closed_trades=[{"symbol": "LIVE"}], safety={}, owner=live)
+    assert futures_state.load(path, owner=demo) == {}
+
+
+def test_matching_owner_loads_normally(path):
+    live = futures_state.identity(False, "liveKEY789012")
+    futures_state.save(path, states={}, pos_meta={},
+                       closed_trades=[{"symbol": "LIVE"}], safety={}, owner=live)
+    assert len(futures_state.load(path, owner=live)["closed_trades"]) == 1
+
+
+def test_demo_and_live_identities_differ():
+    assert futures_state.identity(True, "k") != futures_state.identity(False, "k")
+
+
+def test_different_accounts_in_same_mode_differ():
+    """Two live containers on different accounts must not share state either."""
+    assert (futures_state.identity(False, "accountAAA")
+            != futures_state.identity(False, "accountBBB"))
+
+
+def test_legacy_file_without_owner_is_adopted(path):
+    """Files written before owners existed should still load, not be discarded."""
+    futures_state.save(path, states={}, pos_meta={},
+                       closed_trades=[{"symbol": "OLD"}], safety={})
+    data = futures_state.load(path, owner=futures_state.identity(True, "k"))
+    assert len(data["closed_trades"]) == 1
+
+
+def test_empty_env_value_falls_back_to_default():
+    """
+    Compose's `- VAR` form passes an EMPTY string when the host does not define
+    the variable. Honouring that literally disabled persistence entirely.
+    """
+    import os
+    import importlib
+    saved = os.environ.get("FUTURES_STATE_PATH")
+    os.environ.update({"BINANCE_API_KEY_TEST": "k", "BINANCE_API_SECRET_TEST": "s"})
+    try:
+        os.environ["FUTURES_STATE_PATH"] = ""
+        import bot.config
+        importlib.reload(bot.config)
+        assert bot.config.BotConfig().futures_state_path.endswith(".json")
+    finally:
+        if saved is None:
+            os.environ.pop("FUTURES_STATE_PATH", None)
+        else:
+            os.environ["FUTURES_STATE_PATH"] = saved
+        import bot.config
+        importlib.reload(bot.config)
+
+
+# ── The writability check must not destroy what it checks ────────────────────
+
+def _real_guardian(path):
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g.exchange = None
+    g.dry_run = True
+    g.demo = True
+    g.atr_timeframe = "3m"
+    g._init_runtime_state()
+    g.risk_pct = 1.0
+    g.state_owner = ""
+    g.state_path = path
+    return g
+
+
+def test_verify_does_not_wipe_the_state_file(path):
+    """
+    verify_state_path proved writability by SAVING EMPTY STATE to the real
+    path, and ran after load_state — so every startup read the file and then
+    overwrote it with nothing.
+    """
+    _seed(path)
+    g = _real_guardian(path)
+    g.load_state(path)
+    assert g.verify_state_path() is True
+
+    on_disk = json.load(open(path))
+    assert len(on_disk["closed_trades"]) == 5
+    assert on_disk["states"], "position state wiped by the writability check"
+    assert on_disk["safety"]["halted_reason"], "daily halt wiped"
+
+
+def test_verify_leaves_no_probe_file_behind(path):
+    _seed(path)
+    g = _real_guardian(path)
+    g.verify_state_path()
+    assert not os.path.exists(path + ".probe")
+
+
+def test_verify_reports_unwritable_without_touching_state(path):
+    _seed(path)
+    g = _real_guardian("/proc/nope/not/writable/s.json")
+    assert g.verify_state_path() is False
+    assert len(json.load(open(path))["closed_trades"]) == 5
+
+
+def test_state_survives_a_full_startup_sequence(path):
+    """reset(history) -> load -> verify must leave positions and safety intact."""
+    _seed(path)
+    futures_state.reset(path, "history")
+    g = _real_guardian(path)
+    g.load_state(path)
+    g.verify_state_path()
+    on_disk = json.load(open(path))
+    assert on_disk["closed_trades"] == []          # history intentionally cleared
+    assert on_disk["states"]                        # positions kept
+    assert on_disk["safety"]["day_start_balance"]   # baseline kept

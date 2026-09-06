@@ -1606,3 +1606,53 @@ def test_no_duplicate_trade_records_for_one_position():
         g.run_cycle()
     symbols = [t["symbol"] for t in g.closed_trades()]
     assert symbols.count("DOGE/USDT:USDT") == 1, f"recorded {len(symbols)} times"
+
+
+# ── Which backend answered ───────────────────────────────────────────────────
+
+def test_instance_identity_reports_the_futures_environment():
+    """
+    Two instances behind separate hostnames look identical in the UI. A swapped
+    nginx upstream then serves one dashboard while showing the other bot's
+    data, which is only detectable from the numbers being wrong.
+    """
+    import bot.api as api
+    prev = api._guardian
+
+    class G:
+        demo = True
+        state_owner = "demo:abc12345"
+
+    try:
+        api._guardian = G()
+        ident = api._instance_identity()
+        assert ident["futures_env"] == "demo"
+        assert ident["state_owner"] == "demo:abc12345"
+        assert ident["host"]
+    finally:
+        api._guardian = prev
+
+
+def test_instance_identity_distinguishes_live():
+    import bot.api as api
+    prev = api._guardian
+
+    class G:
+        demo = False
+        state_owner = "live:xyz98765"
+
+    try:
+        api._guardian = G()
+        assert api._instance_identity()["futures_env"] == "live"
+    finally:
+        api._guardian = prev
+
+
+def test_instance_identity_without_a_guardian_is_unknown():
+    import bot.api as api
+    prev = api._guardian
+    try:
+        api._guardian = None
+        assert api._instance_identity()["futures_env"] == "unknown"
+    finally:
+        api._guardian = prev

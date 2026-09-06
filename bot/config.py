@@ -20,12 +20,20 @@ def _strip_inline_comment(raw: str) -> str:
 
 
 def _env(key: str, default: str = "") -> str:
+    """
+    Read a string setting, treating an EMPTY value as unset.
+
+    Compose's `- VAR` form (no `=`) passes the variable through from the host,
+    and when the host does not define it the container receives an empty
+    string. Honouring that literally disabled persistence on an instance whose
+    compose listed `- FUTURES_STATE_PATH` with no value, so an empty value
+    falls back to the default instead.
+    """
     raw = os.environ.get(key)
     if raw is None:
         return default
-    # A value that is ONLY a comment is treated as unset.
     cleaned = _strip_inline_comment(raw)
-    return cleaned if cleaned or not raw.strip().startswith("#") else default
+    return cleaned if cleaned else default
 
 
 def _env_float(key: str, default: float) -> float:

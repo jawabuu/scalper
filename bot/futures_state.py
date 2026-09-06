@@ -57,11 +57,23 @@ def _atomic_write(path: str, payload: dict) -> bool:
         return False
 
 
+def identity(demo: bool, account_hint: str = "") -> str:
+    """
+    Which environment/account a state file belongs to.
+
+    Two containers sharing a volume would otherwise read each other's state —
+    the demo instance loading live trades and positions, and vice versa. The
+    file records who wrote it so the wrong reader can refuse it.
+    """
+    return f"{'demo' if demo else 'live'}:{(account_hint or '')[:8]}"
+
+
 def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
-         safety: dict | None = None) -> bool:
+         safety: dict | None = None, owner: str = "") -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
+        "owner": owner,
         "saved_at": time.time(),
         # Only the fields that change behaviour on reload — not caches, which
         # are cheap to rebuild and stale by definition.
@@ -134,10 +146,14 @@ def reset(path: str, mode: str) -> str:
         return ""
 
 
-def load(path: str) -> dict:
+def load(path: str, owner: str = "") -> dict:
     """
     Read persisted state. Returns {} when absent or unreadable — a missing or
     corrupt file must not stop the bot starting.
+
+    A file written by a DIFFERENT environment is refused outright. Sharing one
+    volume between the demo and live containers would otherwise have each
+    loading the other's positions and trade history.
     """
     if not path or not os.path.exists(path):
         return {}
@@ -147,6 +163,18 @@ def load(path: str) -> dict:
         if data.get("schema") != SCHEMA:
             log.warning(f"futures state schema {data.get('schema')} != {SCHEMA}; ignoring")
             return {}
+        stored = data.get("owner") or ""
+        if owner and stored and stored != owner:
+            log.error(
+                f"REFUSING futures state at {path}: written by '{stored}' but "
+                f"this instance is '{owner}'. The demo and live containers are "
+                f"sharing a state file — give each its own FUTURES_STATE_PATH "
+                f"or an unshared volume. Starting with empty state."
+            )
+            return {}
+        if owner and not stored:
+            log.warning(f"futures state at {path} has no owner recorded; "
+                        f"adopting it as '{owner}'")
         age = time.time() - float(data.get("saved_at") or 0)
         log.info(f"Restored futures state from {path} "
                  f"({len(data.get('states') or {})} position(s), "

@@ -31,6 +31,7 @@ import time
 
 import ccxt
 
+from .futures_state import identity as futures_state_identity
 from .futures_guard import (
     FuturesPosition, GuardState, GuardConfig,
     roi_pct, price_for_roi, stop_side,
@@ -151,6 +152,9 @@ class FuturesGuardian:
         self.demo = demo
         # ATR must be measured on the timeframe actually traded.
         self.atr_timeframe = atr_timeframe or "3m"
+        # Identifies which environment owns the state file, so a demo and a
+        # live container sharing a volume cannot load each other's state.
+        self.state_owner = futures_state_identity(demo, api_key)
         self.dry_run = dry_run
         self.poll_interval = poll_interval
 
@@ -222,6 +226,7 @@ class FuturesGuardian:
         self._split_stop_ids: dict[str, list[str]] = {}
         # Where restart-critical state is persisted. Empty disables it.
         self.state_path: str = getattr(self, "state_path", "")
+        self.state_owner: str = getattr(self, "state_owner", "")
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -958,7 +963,7 @@ class FuturesGuardian:
         """Restore state from a previous run. Best-effort; never blocks startup."""
         from . import futures_state
         self.state_path = path
-        data = futures_state.load(path)
+        data = futures_state.load(path, owner=self.state_owner)
         if not data:
             return
         restored = futures_state.restore_states(data)
@@ -981,27 +986,32 @@ class FuturesGuardian:
         """
         Confirm the state file can actually be written.
 
-        Persistence failing silently is the difference between a position
-        keeping the stop it was sized for and getting a fresh ATR guess after a
-        restart, so this is checked once at startup rather than discovered from
-        a mis-sized trade.
+        Writes a throwaway probe file beside the real one. The previous version
+        proved writability by SAVING EMPTY STATE to the real path — and ran
+        after load_state, so every startup read the file and then immediately
+        overwrote it with nothing. Restored trades, position records and the
+        daily-loss baseline were destroyed on disk each boot.
         """
         if not self.state_path:
             log.warning("Futures state persistence DISABLED (no path set) — "
                         "sized stops and the daily-loss baseline will not "
                         "survive a restart.")
             return False
-        from . import futures_state
-        ok = futures_state.save(self.state_path, states={}, pos_meta={},
-                                closed_trades=[], safety={})
-        if ok:
+        import os
+        probe = f"{self.state_path}.probe"
+        try:
+            os.makedirs(os.path.dirname(probe) or ".", exist_ok=True)
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.unlink(probe)
             log.info(f"Futures state persistence OK -> {self.state_path}")
-        else:
+            return True
+        except Exception as e:
             log.error(
-                f"Futures state NOT writable at {self.state_path} — sized stops "
-                f"and the daily-loss baseline will be lost on restart. Check the "
-                f"volume mount is writable.")
-        return ok
+                f"Futures state NOT writable at {self.state_path}: {e} — sized "
+                f"stops and the daily-loss baseline will be lost on restart. "
+                f"Check the volume mount is writable.")
+            return False
 
     def save_state(self):
         if not self.state_path:
@@ -1012,7 +1022,7 @@ class FuturesGuardian:
             meta = dict(self._pos_meta)
             trades = list(self._closed_trades)
         futures_state.save(self.state_path, states=states, pos_meta=meta,
-                           closed_trades=trades,
+                           closed_trades=trades, owner=self.state_owner,
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):

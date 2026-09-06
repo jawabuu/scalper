@@ -846,6 +846,7 @@
     <span class="logo">⬡ Scalper</span>
     <span class="badge badge-ok" id="mode-badge">CONNECTING</span>
     <span class="badge" id="strategy-badge" style="display:none"></span>
+    <span class="badge" id="instance-badge" style="display:none" title="which backend answered"></span>
     <span class="view-switch" id="view-switch">
       <button id="view-spot" onclick="setView('spot')">SPOT</button>
       <button id="view-futures" onclick="setView('futures')">FUTURES</button>
@@ -1857,6 +1858,17 @@ async function api(path, method='GET') {
 
 function applyStrategyView(status) {
   const strat = status.strategy || 'breakout';
+  // Show which backend is answering. A swapped nginx upstream otherwise looks
+  // identical to a correctly wired one until you notice the data is wrong.
+  const ib = document.getElementById('instance-badge');
+  if (ib && status.instance) {
+    const env = status.instance.futures_env;
+    const label = status.instance.service || status.instance.host || env;
+    ib.textContent = `${label} · ${env}`;
+    ib.className = 'badge ' + (env === 'live' ? 'badge-live' : 'badge-testnet');
+    ib.style.display = '';
+  }
+
   const sb = document.getElementById('strategy-badge');
   if (sb) {
     // Clear the inline display rather than setting one, so the mobile rule
@@ -2672,8 +2684,13 @@ function renderGuardian(g) {
     const trail = c.use_native_trail
       ? `native trail ${c.trail_callback_pct}% price`
       : `callback ${c.callback_roi}% ROI`;
-    meta.innerHTML = `${mode} &nbsp;(stop -${c.initial_stop_roi}% ROI · arm +${c.arm_roi}% · `
-      + `${trail} · ${g.demo ? 'demo' : 'LIVE ACCOUNT'} · ${ago})`;
+    // Environment is the single most important thing to be sure of, so it
+    // leads the line rather than sitting in the middle of it.
+    const envTag = g.demo
+      ? '<span class="guard-flag gf-dry">DEMO ACCOUNT</span>'
+      : '<span class="guard-flag gf-live">LIVE ACCOUNT</span>';
+    meta.innerHTML = `${envTag} ${mode} &nbsp;(stop -${c.initial_stop_roi}% ROI · `
+      + `arm +${c.arm_roi}% · ${trail} · ${ago})`;
   }
 
   const syms = Object.keys(g.states || {});

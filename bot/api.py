@@ -34,6 +34,19 @@ _guardian = None
 _auto = None
 
 
+def _instance_identity() -> dict:
+    """Who is actually answering this request."""
+    import os
+    import socket
+    demo = getattr(_guardian, "demo", None)
+    return {
+        "host": socket.gethostname(),
+        "service": os.environ.get("INSTANCE_NAME", ""),
+        "futures_env": ("unknown" if demo is None else ("demo" if demo else "live")),
+        "state_owner": getattr(_guardian, "state_owner", ""),
+    }
+
+
 def set_auto_trader(auto):
     """Attach the auto-trader so the dashboard can toggle and inspect it."""
     global _auto
@@ -266,6 +279,10 @@ def create_app(engine) -> FastAPI:
         return {
             "running":          True,
             "version":          __version__,
+            # Which backend answered. When two instances are fronted by
+            # separate hostnames, a swapped nginx upstream is otherwise
+            # invisible — the UI looks right while showing another bot's data.
+            "instance":         _instance_identity(),
             "testnet":          _engine.cfg.testnet,
             "strategy":         _engine.cfg.strategy,
             "kill_switch":      _engine.kill_switch,
