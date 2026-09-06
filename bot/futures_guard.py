@@ -96,6 +96,11 @@ class GuardConfig:
     # callback_pct * L in ROI terms, so its ROI cost depends on the position's
     # leverage and cannot be validated at startup — it is checked at arm time.
     trail_callback_pct: float = 1.0
+    # Preferred way to express the trail: a give-back in ROI%, converted to the
+    # PRICE percentage Binance wants using the position's own leverage. A fixed
+    # price callback means a different ROI give-back at 10x than at 20x, so the
+    # same config behaves differently per account. 0 = use trail_callback_pct.
+    trail_callback_roi: float = 0.0
     use_native_trail: bool = True
     # ── Volatility-scaled initial stop ──────────────────────────────────
     # 0 disables (fixed initial_stop_roi is used). When set, the initial stop
@@ -266,9 +271,24 @@ def is_armed(state: GuardState, cfg: GuardConfig) -> bool:
     return state.peak_roi >= (cfg.arm_roi - _ROI_EPS)
 
 
+def trail_callback_price_pct(leverage: float, cfg: GuardConfig) -> float:
+    """
+    The callbackRate to send Binance, as a PRICE percentage.
+
+    When trail_callback_roi is set the give-back is specified in ROI terms and
+    converted here, so the same config gives the same ROI give-back whatever
+    leverage the account uses. Clamped to Binance's 0.1%-5% range.
+    """
+    if cfg.trail_callback_roi and leverage > 0:
+        pct = cfg.trail_callback_roi / leverage
+    else:
+        pct = cfg.trail_callback_pct
+    return max(0.1, min(5.0, round(pct, 2)))
+
+
 def callback_roi_at(leverage: float, cfg: GuardConfig) -> float:
     """The native trail's give-back expressed in ROI% for a given leverage."""
-    return cfg.trail_callback_pct * max(leverage, 0.0)
+    return trail_callback_price_pct(leverage, cfg) * max(leverage, 0.0)
 
 
 def trail_locks_in(leverage: float, cfg: GuardConfig) -> float:

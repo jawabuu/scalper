@@ -1081,3 +1081,138 @@ def test_unparseable_numeric_env_falls_back_instead_of_crashing():
         assert _env_float("_T_BAD", 2.5) == pytest.approx(2.5)
     finally:
         os.environ.pop("_T_BAD", None)
+
+
+# ── Per-order quantity cap (-4005) ───────────────────────────────────────────
+
+def test_oversized_stop_is_split_across_the_order_cap():
+    """
+    A low-priced coin needs a huge contract count, so a legitimate position can
+    exceed Binance's per-ORDER cap. One oversized stop is rejected with -4005,
+    leaving the position unprotected — split it instead.
+    """
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            return {"limits": {"amount": {"max": 200000.0}}}
+
+    fake = Ex(positions=[_raw_pos("short", entry=0.01303, contracts=652939.0)],
+              price=0.01303)
+    g = _guardian(fake)
+    g.run_cycle()
+
+    stops = [o for o in fake.created if o["type"] == "STOP_MARKET"]
+    assert len(stops) >= 4                       # 652939 / 200000
+    assert all(o["params"]["reduceOnly"] for o in stops)
+    assert sum(o["amount"] for o in stops) == pytest.approx(652939.0, rel=0.01)
+
+
+def test_normal_size_still_uses_a_single_stop():
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            return {"limits": {"amount": {"max": 200000.0}}}
+
+    fake = Ex(positions=[_raw_pos("short", entry=100.0, contracts=10.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    assert len([o for o in fake.created if o["type"] == "STOP_MARKET"]) == 1
+
+
+def test_missing_market_limits_does_not_block():
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            raise RuntimeError("no market info")
+    fake = Ex(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    assert fake.created, "must still place a stop when limits are unknown"
+
+
+# ── Leverage-independent trail callback ──────────────────────────────────────
+
+def test_trail_callback_gives_same_roi_at_any_leverage():
+    """
+    A fixed PRICE callback gives a different ROI give-back at 10x than at 20x,
+    so the same config behaved differently per account.
+    """
+    from bot.futures_guard import GuardConfig, trail_callback_price_pct
+    cfg = GuardConfig(arm_roi=8.0, callback_roi=5.0, trail_callback_roi=5.0)
+    for lev in (5, 10, 20):
+        px = trail_callback_price_pct(lev, cfg)
+        assert px * lev == pytest.approx(5.0, abs=0.6)
+
+
+def test_trail_callback_clamped_to_exchange_range():
+    from bot.futures_guard import GuardConfig, trail_callback_price_pct
+    cfg = GuardConfig(trail_callback_roi=5.0)
+    assert trail_callback_price_pct(100, cfg) >= 0.1     # very high leverage
+    cfg2 = GuardConfig(trail_callback_roi=200.0)
+    assert trail_callback_price_pct(1, cfg2) <= 5.0      # very low leverage
+
+
+def test_price_callback_still_honoured_when_roi_not_set():
+    from bot.futures_guard import GuardConfig, trail_callback_price_pct
+    cfg = GuardConfig(trail_callback_pct=1.0, trail_callback_roi=0.0)
+    assert trail_callback_price_pct(10, cfg) == pytest.approx(1.0)
+
+
+# ── Closing must also respect the per-order cap ──────────────────────────────
+
+def test_close_splits_across_the_order_cap():
+    """
+    Closing sent the whole position as one MARKET order, which a large position
+    on a low-priced coin exceeds (-4005) — so closing from the dashboard failed
+    and had to be done on Binance.
+    """
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            return {"limits": {"amount": {"max": 200000.0}}}
+
+    fake = Ex(positions=[_raw_pos("short", entry=0.01303, contracts=652939.0)],
+              price=0.01303)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake.created.clear()
+
+    res = g.close_position("DOGE/USDT:USDT")
+    assert res["ok"] is True
+    closes = [o for o in fake.created if o["type"] == "MARKET"]
+    assert len(closes) >= 4
+    assert all(o["params"]["reduceOnly"] for o in closes)
+    assert sum(o["amount"] for o in closes) == pytest.approx(652939.0, rel=0.01)
+
+
+def test_close_reports_partial_when_a_chunk_fails():
+    """A failure mid-close must not be reported as a clean close."""
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            return {"limits": {"amount": {"max": 200000.0}}}
+
+    fake = Ex(positions=[_raw_pos("short", entry=0.01303, contracts=652939.0)],
+              price=0.01303)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake.created.clear()
+
+    calls = {"n": 0}
+    original = fake.create_order
+    def fail_third(**kw):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise RuntimeError("rejected")
+        return original(**kw)
+    fake.create_order = fail_third
+
+    res = g.close_position("DOGE/USDT:USDT")
+    assert res["ok"] is False
+    assert res["partially_closed_qty"] > 0
+
+
+def test_normal_close_is_a_single_order():
+    class Ex(FakeExchange):
+        def market(self, symbol):
+            return {"limits": {"amount": {"max": 200000.0}}}
+    fake = Ex(positions=[_raw_pos("short", entry=100.0, contracts=10.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle(); fake.created.clear()
+    g.close_position("DOGE/USDT:USDT")
+    assert len([o for o in fake.created if o["type"] == "MARKET"]) == 1

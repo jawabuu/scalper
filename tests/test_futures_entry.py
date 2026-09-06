@@ -543,3 +543,48 @@ def test_stop_roi_is_clamped():
         atr_stop_min_roi=4.0, atr_stop_max_roi=30.0))
     plan = svc.preview(symbol="X/USDT:USDT", side="long")["plan"]
     assert 4.0 <= abs(plan["projected_stop_roi"]) <= 30.0
+
+
+# ── Entry must not create a position larger than the order cap ───────────────
+
+def test_entry_size_trimmed_to_the_per_order_cap():
+    """
+    A position above the per-ORDER cap cannot have a single stop or close order
+    placed. The entry must never create one.
+    """
+    class Ex(_LevEx):
+        markets = {"X/USDT:USDT": {}}
+        def __init__(self):
+            super().__init__(lev_field=None, info_lev="20")
+        def load_markets(self): return self.markets
+        def market_id(self, s): return "XUSDT"
+        def market(self, s): return {"limits": {"amount": {"max": 200000.0}}}
+        def fetch_balance(self): return {"info": {"totalWalletBalance": "1700.0"}}
+        def fetch_ticker(self, s): return {"last": 0.01303}
+        def amount_to_precision(self, s, a): return f"{float(a):.0f}"
+
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(_LevGuardian(Ex()), EntryLimits(
+        max_positions=6, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0))
+    plan = svc.preview(symbol="X/USDT:USDT", side="short")["plan"]
+    assert plan["qty"] <= 200000.0, "entry sized beyond the per-order cap"
+
+
+def test_entry_unaffected_when_below_the_cap():
+    class Ex(_LevEx):
+        markets = {"X/USDT:USDT": {}}
+        def __init__(self):
+            super().__init__(lev_field=None, info_lev="10")
+        def load_markets(self): return self.markets
+        def market_id(self, s): return "XUSDT"
+        def market(self, s): return {"limits": {"amount": {"max": 200000.0}}}
+        def fetch_balance(self): return {"info": {"totalWalletBalance": "107.0"}}
+        def fetch_ticker(self, s): return {"last": 7.055}
+
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(_LevGuardian(Ex()), EntryLimits(
+        max_positions=3, max_margin_pct=25, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=10.0))
+    plan = svc.preview(symbol="X/USDT:USDT", side="short")["plan"]
+    assert plan["qty"] == pytest.approx(15.0, abs=1.0)

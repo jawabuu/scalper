@@ -248,6 +248,10 @@ class BotConfig:
     # would engage the trail at/below entry — checked per position at arm time.
     guard_trail_callback_pct: float = field(default_factory=lambda: _env_float("GUARD_TRAIL_CALLBACK_PCT", 1.0))
     guard_use_native_trail: bool = field(default_factory=lambda: _env_bool("GUARD_USE_NATIVE_TRAIL", True))
+    # Preferred: express the trail give-back in ROI%. It is converted to the
+    # price percentage Binance wants using each position's own leverage, so the
+    # behaviour is identical at 10x and 20x. 0 = fall back to the price percent.
+    guard_trail_callback_roi: float = field(default_factory=lambda: _env_float("GUARD_TRAIL_CALLBACK_ROI", 0.0))
     # Volatility-scaled stop + sizing. 0 disables (fixed stop, flat % margin).
     # When set, stop = mult x ATR and the position is sized so the loss at that
     # stop equals ENTRY_RISK_PCT of the wallet — constant risk across coins.

@@ -77,6 +77,7 @@ if __name__ == "__main__":
             callback_roi=cfg.guard_callback_roi,
             trail_callback_pct=cfg.guard_trail_callback_pct,
             use_native_trail=cfg.guard_use_native_trail,
+            trail_callback_roi=cfg.guard_trail_callback_roi,
             atr_stop_mult=cfg.atr_stop_mult,
             atr_stop_min_roi=cfg.atr_stop_min_roi,
             atr_stop_max_roi=cfg.atr_stop_max_roi,

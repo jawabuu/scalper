@@ -398,6 +398,20 @@ class EntryService:
             qty_raw = notional / price
         else:
             margin, notional, qty_raw = compute_size(balance, margin_pct, leverage, price)
+        # Never size beyond the exchange's per-ORDER quantity cap. A position
+        # above it cannot have a single protective stop placed (-4005), which is
+        # how a position ended up unprotected while the guardian retried.
+        try:
+            m = self.guardian.exchange.market(symbol)
+            max_qty = (((m or {}).get("limits") or {}).get("amount") or {}).get("max")
+            if max_qty and qty_raw > float(max_qty):
+                log.warning(
+                    f"{symbol}: size {qty_raw:g} exceeds the per-order cap "
+                    f"{float(max_qty):g} — trimming so the stop can be placed")
+                qty_raw = float(max_qty)
+        except Exception:
+            pass
+
         qty = float(self.guardian.exchange.amount_to_precision(symbol, qty_raw))
         if qty <= 0:
             return {"ok": False, "errors": ["computed quantity rounds to zero — margin too small"]}

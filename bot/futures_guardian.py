@@ -36,6 +36,7 @@ from .futures_guard import (
     roi_pct, price_for_roi, stop_side,
     adopt_state, is_protective_stop, evaluate,
     callback_roi_at, trail_locks_in, is_armed, atr_stop_roi,
+    trail_callback_price_pct,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -211,6 +212,8 @@ class FuturesGuardian:
         # in the snapshot so an "n/a" is diagnosable without server logs.
         self._range_source: dict[str, str] = {}
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
+        # Extra order ids when a stop had to be split across the per-order cap.
+        self._split_stop_ids: dict[str, list[str]] = {}
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -410,6 +413,21 @@ class FuturesGuardian:
 
     # ── writing (the only two methods that mutate the account) ──────────────
 
+    def market_max_qty(self, symbol: str) -> float | None:
+        """
+        The exchange's per-order quantity cap for this symbol, if published.
+
+        Low-priced coins need a huge contract count for a given notional, so a
+        legitimate position size can exceed the per-ORDER cap and the protective
+        stop is rejected with -4005 — leaving the position unprotected.
+        """
+        try:
+            m = self.exchange.market(symbol)
+            mx = (((m or {}).get("limits") or {}).get("amount") or {}).get("max")
+            return float(mx) if mx else None
+        except Exception:
+            return None
+
     def _place_stop(self, pos: FuturesPosition, stop_price: float) -> str | None:
         """
         Place a reduce-only STOP_MARKET that closes `pos` at `stop_price`.
@@ -418,8 +436,16 @@ class FuturesGuardian:
         to open or enlarge a position, whatever else goes wrong.
         """
         price_str = self.exchange.price_to_precision(pos.symbol, stop_price)
-        qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
         side = stop_side(pos)
+
+        # A position can be larger than the per-order cap. Placing one oversized
+        # stop is rejected outright, so split it into several reduce-only stops
+        # at the same trigger — together they still close the whole position.
+        max_qty = self.market_max_qty(pos.symbol)
+        if max_qty and pos.qty > max_qty:
+            return self._place_split_stops(pos, stop_price, max_qty, side)
+
+        qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
 
         if self.dry_run:
             log.info(f"[DRY RUN] would place {side} STOP_MARKET reduceOnly "
@@ -436,6 +462,39 @@ class FuturesGuardian:
                  f"trigger={price_str} id={oid}")
         return oid
 
+    def _place_split_stops(self, pos: FuturesPosition, stop_price: float,
+                           max_qty: float, side: str) -> str | None:
+        """Place several reduce-only stops when one would exceed the order cap."""
+        remaining = pos.qty
+        ids: list[str] = []
+        price_str = self.exchange.price_to_precision(pos.symbol, stop_price)
+        n = 0
+        while remaining > 0 and n < 20:
+            chunk = min(remaining, max_qty)
+            qty_str = self.exchange.amount_to_precision(pos.symbol, chunk)
+            if float(qty_str) <= 0:
+                break
+            if self.dry_run:
+                log.info(f"[DRY RUN] would place {side} STOP_MARKET reduceOnly "
+                         f"{qty_str} {pos.symbol} trigger={price_str} (split)")
+                ids.append(f"dry-split-{n}")
+            else:
+                order = self.exchange.create_order(
+                    symbol=pos.symbol, type="STOP_MARKET", side=side,
+                    amount=float(qty_str), price=None,
+                    params={"stopPrice": float(price_str), "reduceOnly": True},
+                )
+                ids.append(str(order.get("id") or order.get("orderId") or ""))
+            remaining -= float(qty_str)
+            n += 1
+        if not ids:
+            return None
+        log.warning(
+            f"{pos.symbol}: position {pos.qty:g} exceeds the per-order cap "
+            f"{max_qty:g} — placed {len(ids)} split stops at {price_str}")
+        self._split_stop_ids[pos.symbol] = ids
+        return ids[0]
+
     def _place_native_trail(self, pos: FuturesPosition) -> str | None:
         """
         Place Binance's own TRAILING_STOP_MARKET for the armed phase.
@@ -448,8 +507,8 @@ class FuturesGuardian:
         position's leverage; that is why the lock-in check happens here rather
         than at startup.
         """
-        cb = self.cfg.trail_callback_pct
         lev = pos.effective_leverage
+        cb = trail_callback_price_pct(lev, self.cfg)
         locked = trail_locks_in(lev, self.cfg)
         if locked <= 0:
             log.warning(
@@ -866,25 +925,52 @@ class FuturesGuardian:
             return {"ok": False, "error": f"no open position on {symbol}"}
 
         side = stop_side(pos)          # the side that closes this position
-        qty = float(self.exchange.amount_to_precision(symbol, pos.qty))
 
+        # Split across the per-order quantity cap, same as the protective stop.
+        # A single oversized MARKET order is rejected with -4005, which is why
+        # closing from the dashboard failed and had to be done on Binance.
+        max_qty = self.market_max_qty(symbol)
+        chunks: list[float] = []
+        remaining = pos.qty
+        if max_qty and remaining > max_qty:
+            while remaining > 0 and len(chunks) < 20:
+                c = float(self.exchange.amount_to_precision(symbol,
+                                                            min(remaining, max_qty)))
+                if c <= 0:
+                    break
+                chunks.append(c)
+                remaining -= c
+        else:
+            chunks = [float(self.exchange.amount_to_precision(symbol, pos.qty))]
+
+        qty = sum(chunks)
         if self.dry_run:
-            log.info(f"[DRY RUN] would close {symbol}: {side} MARKET reduceOnly {qty}")
+            log.info(f"[DRY RUN] would close {symbol}: {side} MARKET reduceOnly "
+                     f"{qty} in {len(chunks)} order(s)")
             self._record(symbol, "close_dry_run", f"{side} MARKET {qty}")
             return {"ok": True, "dry_run": True, "symbol": symbol,
                     "side": side, "qty": qty, "message": "Dry run — no order sent."}
 
-        try:
-            order = self.exchange.create_order(
-                symbol=symbol, type="MARKET", side=side, amount=qty,
-                price=None, params={"reduceOnly": True},
-            )
-        except Exception as e:
-            log.error(f"close failed for {symbol}: {e}")
-            self._record(symbol, "close_failed", str(e))
-            return {"ok": False, "error": str(e)}
+        ids: list[str] = []
+        for c in chunks:
+            try:
+                order = self.exchange.create_order(
+                    symbol=symbol, type="MARKET", side=side, amount=c,
+                    price=None, params={"reduceOnly": True},
+                )
+                ids.append(str(order.get("id") or order.get("orderId") or ""))
+            except Exception as e:
+                log.error(f"close failed for {symbol}: {e}")
+                self._record(symbol, "close_failed", str(e))
+                # Report partial success honestly rather than claiming a clean
+                # close — some of the position may already be flat.
+                return {"ok": False, "error": str(e),
+                        "partially_closed_qty": sum(chunks[:len(ids)]),
+                        "order_ids": ids}
 
-        oid = str(order.get("id") or order.get("orderId") or "")
+        oid = ids[0] if ids else ""
+        if len(ids) > 1:
+            log.warning(f"{symbol}: closed in {len(ids)} orders (per-order cap)")
         log.warning(f"CLOSED {symbol} by operator: {side} MARKET reduceOnly qty={qty} id={oid}")
         self._record(symbol, "closed_by_operator", f"{side} MARKET {qty} id={oid}")
 
