@@ -266,6 +266,10 @@ class BotConfig:
         "ATR_TIMEFRAME", _env("SCANNER_TIMEFRAME", "3m")))
     atr_stop_min_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MIN_ROI", 4.0))
     atr_stop_max_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MAX_ROI", 30.0))
+    # Close a position discovered ALREADY past its stop. The loss level has been
+    # breached, so closing is what the stop was for; trailing it instead protects
+    # nothing. Set false to only report and leave it open.
+    guard_close_if_past_stop: bool = field(default_factory=lambda: _env_bool("GUARD_CLOSE_IF_PAST_STOP", True))
     entry_risk_pct: float = field(default_factory=lambda: _env_float("ENTRY_RISK_PCT", 1.0))
 
     # ── Unattended auto-trading ─────────────────────────────────────────

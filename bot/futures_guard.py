@@ -110,6 +110,12 @@ class GuardConfig:
     atr_stop_mult: float = 0.0
     atr_stop_min_roi: float = 4.0
     atr_stop_max_roi: float = 30.0
+    # When a position is discovered ALREADY worse than its stop, the exchange
+    # rejects the stop ("would trigger immediately"). Trailing it instead
+    # protects nothing — the loss level has already been breached and closing
+    # is exactly what the stop existed to do. False leaves it unprotected and
+    # only reports, which is what let one loss reach 3.3x its budget.
+    close_if_past_stop: bool = True
 
 
     # Only move a resting stop if the new level differs by at least this much

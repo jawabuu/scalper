@@ -81,6 +81,7 @@ if __name__ == "__main__":
             atr_stop_mult=cfg.atr_stop_mult,
             atr_stop_min_roi=cfg.atr_stop_min_roi,
             atr_stop_max_roi=cfg.atr_stop_max_roi,
+            close_if_past_stop=cfg.guard_close_if_past_stop,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,

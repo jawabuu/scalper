@@ -215,6 +215,7 @@ class FuturesGuardian:
         self._range_source: dict[str, str] = {}
         self._risk_overshoots: dict[str, dict] = {}
         self._capped_stop_reported: dict[str, float] = {}
+        self._missing_counts: dict[str, int] = {}
         self._stop_source_reported: set = set()
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
         # Extra order ids when a stop had to be split across the per-order cap.
@@ -314,6 +315,8 @@ class FuturesGuardian:
         return price
 
     RANGE_CACHE_TTL_S = 300.0
+    # Consecutive cycles a position must be absent before it counts as closed.
+    MISSING_CONFIRMATIONS = 3
     # Candle timeframe for ATR. Must match the timeframe the strategy trades:
     # a 15m ATR is ~2.2x a 3m ATR, so stops sized off 15m were more than twice
     # as wide as the 3m chart justified (FORM: 24.4% ROI where 10.9% was right).
@@ -788,6 +791,7 @@ class FuturesGuardian:
         prev_stop_roi = state.stop_roi
         was_armed = state.armed
         _stop_roi_used = self._cap_stop_to_budget(pos, self.effective_stop_roi(pos))
+        stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
@@ -857,6 +861,38 @@ class FuturesGuardian:
                     # already moved past it — which means it is IN PROFIT and
                     # its gains are exactly what needs protecting. Fall back to
                     # a trailing stop rather than leaving it naked.
+                    # Which side of the stop are we on? Past it in the WINNING
+                    # direction means gains to protect — trail. Past it in the
+                    # LOSING direction means the stop level has been breached
+                    # and the position should already be closed.
+                    breached = cur <= -abs(stop_roi_used)
+                    if breached:
+                        log.error(
+                            f"{pos.symbol}: already at {cur:+.1f}% ROI, past its "
+                            f"{-abs(stop_roi_used):+.1f}% stop — the stop level has "
+                            f"been breached."
+                        )
+                        if self.cfg.close_if_past_stop:
+                            res = self.close_position(pos.symbol)
+                            self._record(
+                                pos.symbol, "closed_past_stop",
+                                f"discovered at {cur:+.1f}% ROI, past the "
+                                f"{-abs(stop_roi_used):+.1f}% stop — closed "
+                                f"({'ok' if res.get('ok') else res.get('error')})")
+                            state.unprotected_reason = None
+                            with self._lock:
+                                self._states[pos.symbol] = state
+                            return
+                        state.unprotected_reason = (
+                            f"at {cur:+.1f}% ROI, already past its "
+                            f"{-abs(stop_roi_used):+.1f}% stop and NOT closed "
+                            f"(close_if_past_stop is off)")
+                        self._record(pos.symbol, "UNPROTECTED",
+                                     state.unprotected_reason)
+                        with self._lock:
+                            self._states[pos.symbol] = state
+                        return
+
                     trail_id = None
                     if self.cfg.use_native_trail and not state.native_trail_id:
                         try:
@@ -999,12 +1035,42 @@ class FuturesGuardian:
             log.debug(f"balance fetch failed: {e}")
 
         live_symbols = {p.symbol for p in positions}
+        with self._lock:
+            tracked = len(self._states)
+        if tracked and not positions:
+            # Every tracked position vanishing at once is far more likely to be
+            # an API hiccup than a simultaneous close.
+            log.warning(
+                f"fetch_positions returned NO positions while tracking {tracked} "
+                f"— treating as a transient reply, not a mass close.")
 
         # Forget state for positions that have closed (stopped out or closed by
         # the operator) so a future position on the same symbol starts fresh.
         with self._lock:
-            gone = [(sym, self._states[sym], self._pos_meta.get(sym, {}))
-                    for sym in list(self._states) if sym not in live_symbols]
+            # A symbol missing from ONE fetch_positions response is not proof it
+            # closed. A transient or partial reply used to trigger the full
+            # close path: a phantom trade recorded, state wiped, and the
+            # protective stop cancelled as orphaned — leaving a position that
+            # was still open now unprotected. One position was recorded closed
+            # twice while its loss grew from 141 to 240 USDT. Require the
+            # absence to repeat before believing it.
+            gone = []
+            for sym in list(self._states):
+                if sym in live_symbols:
+                    self._missing_counts.pop(sym, None)
+                    continue
+                n = self._missing_counts.get(sym, 0) + 1
+                self._missing_counts[sym] = n
+                if n < self.MISSING_CONFIRMATIONS:
+                    log.warning(
+                        f"{sym}: absent from the position list "
+                        f"({n}/{self.MISSING_CONFIRMATIONS}) — holding state and "
+                        f"its stop until confirmed. A transient reply must not "
+                        f"look like a close."
+                    )
+                    continue
+                gone.append((sym, self._states[sym], self._pos_meta.get(sym, {})))
+                self._missing_counts.pop(sym, None)
             for sym, st, meta in gone:
                 self._record_closed_trade(sym, st, meta)
                 log.info(f"{sym}: position gone — clearing guard state")
@@ -1013,6 +1079,7 @@ class FuturesGuardian:
                 self._pos_meta.pop(sym, None)
                 self._capped_stop_reported.pop(sym, None)
                 self._stop_source_reported.discard(sym)
+                self._missing_counts.pop(sym, None)
 
         # Cancel any protective stop left resting after the position closed.
         # An orphaned reduce-only stop is not harmless: if a NEW position is

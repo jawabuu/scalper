@@ -239,7 +239,8 @@ def test_state_cleared_when_position_closes():
     g.run_cycle()
     assert "DOGE/USDT:USDT" in g._states
     fake._positions = []               # position closed externally
-    g.run_cycle()
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
     assert "DOGE/USDT:USDT" not in g._states
 
 
@@ -413,7 +414,8 @@ def test_closed_trade_recorded_when_position_disappears():
     fake._price = price_for_roi(pos, 30.0)          # run into profit
     g.run_cycle()
     fake._positions = []                            # stop triggers / closed
-    g.run_cycle()
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
 
     hist = g.closed_trades()
     assert len(hist) == 1
@@ -450,7 +452,8 @@ def test_stop_cancelled_when_position_disappears():
     assert not fake.cancelled
 
     fake._positions = []          # position closed externally
-    g.run_cycle()
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
 
     assert any(oid == stop_id for oid, _ in fake.cancelled), \
         "orphaned stop was not cancelled"
@@ -466,7 +469,8 @@ def test_orphan_cancel_failure_is_not_fatal():
     g.run_cycle()
     fake.cancel_order = boom
     fake._positions = []
-    g.run_cycle()                  # must not raise
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()              # must not raise
     assert "DOGE/USDT:USDT" not in g._states
 
 
@@ -475,7 +479,8 @@ def test_orphan_stop_not_cancelled_in_dry_run():
     g = _guardian(fake, dry_run=True)
     g.run_cycle()
     fake._positions = []
-    g.run_cycle()
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
     assert fake.cancelled == []
 
 
@@ -1471,3 +1476,133 @@ def test_capped_stop_is_actually_placed():
     # a 6.7% ROI stop at 20x is ~0.33% of price, not ~0.95%
     move = abs(trigger - 0.4311) / 0.4311 * 100
     assert move < 0.6, f"stop placed {move:.2f}% away — cap did not reach the order"
+
+
+# ── Past the stop: winning vs losing are different situations ────────────────
+
+def _rejecting_exchange(positions, price):
+    class Ex(FakeExchange):
+        def create_order(self, **kw):
+            if kw.get("type") == "STOP_MARKET":
+                raise RuntimeError("Order would immediately trigger")
+            return FakeExchange.create_order(self, **kw)
+    return Ex(positions=positions, price=price)
+
+
+def test_position_past_its_stop_in_LOSS_is_closed():
+    """
+    The trailing fallback assumed 'past the stop' meant in profit. A position
+    past it in the LOSING direction trails below an already-underwater price and
+    protects nothing — BR ran to 3.3x its budget that way. The stop level has
+    been breached, so close.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=8, callback_roi=5,
+                      atr_stop_mult=0.0, close_if_past_stop=True)
+    fake = _rejecting_exchange([_raw_pos("long", entry=100.0)], 100.0)
+    g = _guardian(fake, cfg=cfg)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, -25.0)      # well past a -10% stop
+    g.run_cycle()
+
+    closes = [o for o in fake.created if o["type"] == "MARKET"]
+    trails = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    assert closes, "a breached stop must close the position"
+    assert not trails, "must not trail a losing position past its stop"
+    assert any(a["action"] == "closed_past_stop" for a in g._actions)
+
+
+def test_position_past_its_stop_in_PROFIT_is_trailed():
+    """The original case remains: gains past the stop are protected by trailing."""
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=8, callback_roi=5,
+                      trail_callback_roi=5.0, atr_stop_mult=0.0,
+                      close_if_past_stop=True)
+    fake = _rejecting_exchange([_raw_pos("short", entry=100.0)], 100.0)
+    g = _guardian(fake, cfg=cfg)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)       # in profit
+    g.run_cycle()
+
+    trails = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    closes = [o for o in fake.created if o["type"] == "MARKET"]
+    assert trails, "a profitable position past its stop should be trailed"
+    assert not closes, "must not close a winning position"
+
+
+def test_breach_can_be_left_open_when_configured():
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, atr_stop_mult=0.0,
+                      close_if_past_stop=False)
+    fake = _rejecting_exchange([_raw_pos("long", entry=100.0)], 100.0)
+    g = _guardian(fake, cfg=cfg)
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, -25.0)
+    g.run_cycle()
+    assert not [o for o in fake.created if o["type"] == "MARKET"]
+    assert any(a["action"] == "UNPROTECTED" for a in g._actions)
+
+
+# ── A transient reply must not look like a close ─────────────────────────────
+
+def test_single_missing_cycle_does_not_close_or_cancel():
+    """
+    BR was recorded closed at -13.89% while still open, its stop cancelled as
+    orphaned, then re-adopted and closed AGAIN at -23.62%. One position, two
+    trade records, loss growing across the gap — caused by trusting a single
+    fetch_positions reply.
+    """
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23614)], price=0.23614)
+    g = _guardian(fake)
+    g.run_cycle()
+    stop_id = fake.created[0]["id"]
+
+    fake._positions = []            # one transient empty reply
+    g.run_cycle()
+
+    assert "DOGE/USDT:USDT" in g._states, "state wiped on a single absence"
+    assert fake.cancelled == [], "protective stop cancelled on a single absence"
+    assert g.closed_trades() == [], "phantom closed trade recorded"
+
+
+def test_position_reappearing_clears_the_missing_count():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23614)], price=0.23614)
+    g = _guardian(fake)
+    g.run_cycle()
+    raw = fake._positions
+    fake._positions = []
+    g.run_cycle()
+    assert g._missing_counts.get("DOGE/USDT:USDT") == 1
+    fake._positions = raw           # it was there all along
+    g.run_cycle()
+    assert "DOGE/USDT:USDT" not in g._missing_counts
+    assert g.closed_trades() == []
+
+
+def test_close_is_recorded_once_confirmed():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23614)], price=0.23614)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert len(g.closed_trades()) == 1
+    assert "DOGE/USDT:USDT" not in g._states
+
+
+def test_no_duplicate_trade_records_for_one_position():
+    """Two records for one position is the signature of the phantom close."""
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23614)], price=0.23614)
+    g = _guardian(fake)
+    g.run_cycle()
+    raw = fake._positions
+    for _ in range(2):              # flicker, then return
+        fake._positions = []
+        g.run_cycle()
+        fake._positions = raw
+        g.run_cycle()
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    symbols = [t["symbol"] for t in g.closed_trades()]
+    assert symbols.count("DOGE/USDT:USDT") == 1, f"recorded {len(symbols)} times"
