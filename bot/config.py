@@ -320,6 +320,11 @@ class BotConfig:
     # configured on Binance, so the preview labels the value as ASSUMED to make
     # a mismatch visible before confirming.
     entry_assumed_leverage: float = field(default_factory=lambda: _env_float("ENTRY_ASSUMED_LEVERAGE", 10.0))
+    # How long an unfilled entry order may rest before the bot cancels it. A
+    # GTC order that never fills blocks its symbol and, if it eventually
+    # triggers, opens a position sized for conditions long past.
+    entry_order_ttl_s: float = field(default_factory=lambda: max(
+        60.0, _env_float("ENTRY_ORDER_TTL_S", 900.0)))
 
     # ── Candidate scanner (read-only futures market screen) ─────────────
     # Surfaces potential long/short candidates for operator review. Uses PUBLIC
@@ -458,6 +463,15 @@ class BotConfig:
                 f"{'demo' if self.guardian_demo else 'live'} endpoint. "
                 f"Unset GUARDIAN_DEMO to follow TESTNET, or make them agree."
             )
+
+        raw_ttl = _env_float("ENTRY_ORDER_TTL_S", 900.0)
+        if raw_ttl < 60.0:
+            import logging
+            logging.getLogger("config").warning(
+                f"ENTRY_ORDER_TTL_S={raw_ttl:g} is below the 60s floor and has "
+                f"been raised to 60. A shorter life would cancel entry orders "
+                f"before they could plausibly fill, and 0 or less would cancel "
+                f"every one on the next cycle.")
 
         assert self.strategy in ("breakout", "pullback"), \
             f"STRATEGY must be 'breakout' or 'pullback', got {self.strategy!r}"

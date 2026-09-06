@@ -171,6 +171,11 @@ class EntryService:
         # Per-instance, not class-level: a shared mutable default would leak
         # state between services (and between tests).
         self._recent_entries: dict[str, float] = {}
+        # Entry orders THIS bot placed: symbol -> [(order_id, placed_at)].
+        # Only these may be cancelled automatically — the operator's own
+        # trailing-stop entries are non-reduce-only too, and cancelling one
+        # would destroy their entry method.
+        self._placed_orders: dict[str, list] = {}
 
     # -- account reads
     def wallet_balance(self) -> float:
@@ -354,6 +359,66 @@ class EntryService:
     def clear_pending(self, symbol: str):
         """Called when a symbol's position closes, so it can be traded again."""
         self._recent_entries.pop(symbol, None)
+
+    def bot_placed_orders(self, symbol: str) -> list:
+        return list(self._placed_orders.get(symbol) or [])
+
+    def forget_order(self, symbol: str, order_id: str):
+        rows = self._placed_orders.get(symbol) or []
+        self._placed_orders[symbol] = [r for r in rows if r.get("id") != order_id]
+        if not self._placed_orders[symbol]:
+            self._placed_orders.pop(symbol, None)
+
+    def export_placed_orders(self) -> dict:
+        return {k: list(v) for k, v in self._placed_orders.items()}
+
+    def import_placed_orders(self, data: dict):
+        """Restore after a restart, so stale orders remain reapable."""
+        self._placed_orders = {k: list(v) for k, v in (data or {}).items()}
+
+    def reap_stale_entry_orders(self, ttl_s: float,
+                                symbols_with_positions: set) -> list:
+        """
+        Cancel entry orders this bot placed that should no longer rest.
+
+        Two cases:
+          * older than ttl_s and still unfilled — it would open a position
+            sized for a wallet and volatility that no longer apply, and it
+            blocks the symbol from being traded again in the meantime;
+          * the symbol now HAS a position — a leftover entry would add to it.
+
+        Orders the bot did not place are never touched.
+        """
+        cancelled = []
+        now = time.time()
+        for symbol, rows in list(self._placed_orders.items()):
+            try:
+                resting = {str(o.get("id")) for o in
+                           (self.guardian.exchange.fetch_open_orders(symbol) or [])}
+            except Exception as e:
+                log.warning(f"{symbol}: could not list open orders to reap: {e}")
+                continue
+
+            for row in list(rows):
+                oid = str(row.get("id"))
+                if oid not in resting:
+                    self.forget_order(symbol, oid)      # filled or already gone
+                    continue
+                age = now - float(row.get("placed_at") or now)
+                has_pos = symbol in symbols_with_positions
+                if not has_pos and age < ttl_s:
+                    continue
+                reason = ("position already open" if has_pos
+                          else f"unfilled after {age/60:.0f}m")
+                try:
+                    self.guardian.exchange.cancel_order(oid, symbol)
+                    log.warning(f"{symbol}: cancelled stale entry order {oid} "
+                                f"({reason})")
+                    cancelled.append((symbol, oid, reason))
+                except Exception as e:
+                    log.warning(f"{symbol}: could not cancel {oid}: {e}")
+                self.forget_order(symbol, oid)
+        return cancelled
 
     def pending_entry_orders(self, symbol: str) -> list:
         """
@@ -593,6 +658,10 @@ class EntryService:
             f"margin={plan.margin_usdt:.2f} notional={plan.notional_usdt:.2f}"
         )
         self._note_pending(plan.symbol)
+        if oid:
+            self._placed_orders.setdefault(plan.symbol, []).append(
+                {"id": oid, "placed_at": time.time(),
+                 "qty": plan.qty, "side": plan.order_side})
         # Record the stop this order was sized for. The fill may be minutes
         # away, by which time a recomputed ATR would disagree.
         try:

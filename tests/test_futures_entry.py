@@ -783,3 +783,160 @@ def test_local_guard_cleared_on_close():
     svc._note_pending("BR/USDT:USDT")
     svc.clear_pending("BR/USDT:USDT")
     assert not svc._recently_placed("BR/USDT:USDT")
+
+
+# ── Stale entry orders must be reaped ────────────────────────────────────────
+
+class _ReapEx(_PendingEx):
+    def __init__(self):
+        super().__init__()
+        self.cancelled = []
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append((str(oid), symbol))
+        self.orders = [o for o in self.orders if str(o.get("id")) != str(oid)]
+
+
+def _reap_svc(ex):
+    from bot.futures_entry import EntryService, EntryLimits
+    g = _LevGuardian(ex)
+    g.dry_run = False
+    return EntryService(g, EntryLimits(
+        max_positions=6, max_margin_pct=15, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0))
+
+
+def test_unfilled_entry_order_is_cancelled_after_ttl():
+    """
+    A GTC entry that never fills blocks its symbol from being traded again and,
+    if it eventually triggers, opens a position sized for conditions long past.
+    """
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = [{"id": "E1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
+                                            "placed_at": time.time() - 1800}]}
+    svc.reap_stale_entry_orders(ttl_s=900, symbols_with_positions=set())
+    assert ("E1", "BR/USDT:USDT") in ex.cancelled
+
+
+def test_fresh_entry_order_is_left_alone():
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = [{"id": "E1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1", "placed_at": time.time()}]}
+    svc.reap_stale_entry_orders(ttl_s=900, symbols_with_positions=set())
+    assert ex.cancelled == []
+
+
+def test_leftover_entry_cancelled_once_a_position_exists():
+    """Otherwise it can trigger and ADD to the position — stacking again."""
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = [{"id": "E1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1", "placed_at": time.time()}]}
+    svc.reap_stale_entry_orders(ttl_s=900,
+                                symbols_with_positions={"BR/USDT:USDT"})
+    assert ("E1", "BR/USDT:USDT") in ex.cancelled
+
+
+def test_orders_the_bot_did_not_place_are_never_cancelled():
+    """
+    The operator's own trailing-stop entries are non-reduce-only too.
+    Cancelling one would destroy their entry method.
+    """
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = [{"id": "MANUAL-1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc._placed_orders = {}                      # bot placed nothing
+    svc.reap_stale_entry_orders(ttl_s=0, symbols_with_positions={"BR/USDT:USDT"})
+    assert ex.cancelled == []
+
+
+def test_filled_order_is_forgotten_not_cancelled():
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = []                                # it filled
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
+                                            "placed_at": time.time() - 1800}]}
+    svc.reap_stale_entry_orders(ttl_s=900, symbols_with_positions=set())
+    assert ex.cancelled == []
+    assert svc.bot_placed_orders("BR/USDT:USDT") == []
+
+
+def test_placed_orders_survive_a_restart_round_trip():
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1", "placed_at": 123.0}]}
+    exported = svc.export_placed_orders()
+    svc2 = _reap_svc(_ReapEx())
+    svc2.import_placed_orders(exported)
+    assert svc2.bot_placed_orders("BR/USDT:USDT")[0]["id"] == "E1"
+
+
+def test_reaped_symbol_becomes_tradable_again():
+    import time
+    ex = _ReapEx()
+    svc = _reap_svc(ex)
+    ex.orders = [{"id": "E1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
+                                            "placed_at": time.time() - 1800}]}
+    assert svc.preview(symbol="BR/USDT:USDT", side="long")["ok"] is False
+    svc.reap_stale_entry_orders(ttl_s=900, symbols_with_positions=set())
+    svc.clear_pending("BR/USDT:USDT")
+    assert svc.preview(symbol="BR/USDT:USDT", side="long")["ok"] is True
+
+
+# ── ENTRY_ORDER_TTL_S bounds ─────────────────────────────────────────────────
+
+def _ttl_with(value):
+    import os
+    import importlib
+    saved = os.environ.get("ENTRY_ORDER_TTL_S")
+    os.environ.update({"BINANCE_API_KEY_TEST": "k", "BINANCE_API_SECRET_TEST": "s"})
+    try:
+        if value is None:
+            os.environ.pop("ENTRY_ORDER_TTL_S", None)
+        else:
+            os.environ["ENTRY_ORDER_TTL_S"] = value
+        import bot.config
+        importlib.reload(bot.config)
+        return bot.config.BotConfig().entry_order_ttl_s
+    finally:
+        if saved is None:
+            os.environ.pop("ENTRY_ORDER_TTL_S", None)
+        else:
+            os.environ["ENTRY_ORDER_TTL_S"] = saved
+        import bot.config
+        importlib.reload(bot.config)
+
+
+def test_ttl_zero_is_floored_not_honoured():
+    """0 would cancel every entry order on the next cycle, making entry impossible."""
+    assert _ttl_with("0") == pytest.approx(60.0)
+
+
+def test_negative_ttl_is_floored():
+    assert _ttl_with("-60") == pytest.approx(60.0)
+
+
+def test_short_ttl_is_floored():
+    assert _ttl_with("30") == pytest.approx(60.0)
+
+
+def test_normal_values_pass_through():
+    assert _ttl_with("300") == pytest.approx(300.0)
+    assert _ttl_with("1800") == pytest.approx(1800.0)
+
+
+def test_unset_uses_the_default():
+    assert _ttl_with(None) == pytest.approx(900.0)
+
+
+def test_inline_comment_is_stripped():
+    assert _ttl_with("600   # 10 minutes") == pytest.approx(600.0)

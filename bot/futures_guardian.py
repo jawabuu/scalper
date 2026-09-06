@@ -227,6 +227,9 @@ class FuturesGuardian:
         # Where restart-critical state is persisted. Empty disables it.
         self.state_path: str = getattr(self, "state_path", "")
         self.state_owner: str = getattr(self, "state_owner", "")
+        self._entry_service = getattr(self, "_entry_service", None)
+        # How long an unfilled entry order may rest before it is cancelled.
+        self.entry_order_ttl_s: float = getattr(self, "entry_order_ttl_s", 900.0)
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -978,6 +981,7 @@ class FuturesGuardian:
             if not self._closed_trades:
                 self._closed_trades = list(data.get("closed_trades") or [])
         self._restored_safety = data.get("safety") or {}
+        self._restored_placed_orders = data.get("placed_orders") or {}
         for sym, st in restored.items():
             log.info(f"{sym}: restored peak {st.peak_roi:+.1f}% ROI, "
                      f"armed={st.armed}, trail={bool(st.native_trail_id)}")
@@ -1021,8 +1025,11 @@ class FuturesGuardian:
             states = dict(self._states)
             meta = dict(self._pos_meta)
             trades = list(self._closed_trades)
+        entry = getattr(self, "_entry_service", None)
+        placed = entry.export_placed_orders() if entry is not None else {}
         futures_state.save(self.state_path, states=states, pos_meta=meta,
                            closed_trades=trades, owner=self.state_owner,
+                           placed_orders=placed,
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -1105,6 +1112,17 @@ class FuturesGuardian:
                 self.manage_position(pos)
             except Exception as e:
                 log.warning(f"manage_position failed for {pos.symbol}: {e}")
+
+        # Reap entry orders this bot placed that should no longer rest: stale
+        # unfilled ones (which block their symbol and would open a position
+        # sized for conditions that have passed), and any left over on a symbol
+        # that now has a position (which would add to it).
+        entry = getattr(self, "_entry_service", None)
+        if entry is not None:
+            try:
+                entry.reap_stale_entry_orders(self.entry_order_ttl_s, live_symbols)
+            except Exception as e:
+                log.warning(f"entry-order reap failed: {e}")
 
         self._last_cycle_ts = time.time()
         self._last_error = None

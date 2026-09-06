@@ -69,7 +69,8 @@ def identity(demo: bool, account_hint: str = "") -> str:
 
 
 def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
-         safety: dict | None = None, owner: str = "") -> bool:
+         safety: dict | None = None, owner: str = "",
+         placed_orders: dict | None = None) -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
@@ -94,6 +95,9 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         },
         "closed_trades": list(closed_trades or [])[-200:],
         "safety": safety or {},
+        # Entry orders this bot placed, so stale ones stay reapable after a
+        # restart rather than resting forever and blocking their symbol.
+        "placed_orders": placed_orders or {},
     }
     return _atomic_write(path, payload)
 

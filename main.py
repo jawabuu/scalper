@@ -126,6 +126,11 @@ if __name__ == "__main__":
                 risk_pct=cfg.entry_risk_pct,
             ))
             set_entry_service(entry_service)
+            # The guardian drives the reap loop and owns persistence.
+            guardian._entry_service = entry_service
+            guardian.entry_order_ttl_s = cfg.entry_order_ttl_s
+            entry_service.import_placed_orders(
+                getattr(guardian, "_restored_placed_orders", {}))
             log.warning(
                 f"Futures ENTRY enabled — max {cfg.entry_max_positions} position(s), "
                 f"margin {cfg.entry_default_margin_pct}% (cap {cfg.entry_max_margin_pct}%), "
