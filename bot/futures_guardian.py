@@ -816,6 +816,10 @@ class FuturesGuardian:
                     self._clear_pending_cancel(symbol, oid)
                     done += 1
                 except Exception as e:
+                    if self._cancel_algo_order(oid, symbol):
+                        self._clear_pending_cancel(symbol, oid)
+                        done += 1
+                        continue
                     self._cancel_attempts[oid] = n + 1
                     if self._cancel_attempts[oid] == self.MAX_CANCEL_ATTEMPTS:
                         log.error(
@@ -845,6 +849,10 @@ class FuturesGuardian:
             # a cancel, so treating it as success dropped it from tracking and
             # orphaned it permanently. Count the attempts instead and keep it
             # queued; a retry costs one request and may succeed.
+            # These stops are ALGO orders, so a regular cancel misses them.
+            if self._cancel_algo_order(order_id, pos.symbol):
+                self._clear_pending_cancel(pos.symbol, order_id)
+                return True
             n = self._cancel_attempts.get(order_id, 0) + 1
             self._cancel_attempts[order_id] = n
             gone = self._order_already_gone(e)
@@ -1618,6 +1626,62 @@ class FuturesGuardian:
             out["attempts"].append(row)
         return out
 
+    def _algo_orders(self) -> list:
+        """Open ALGO orders — the book conditional and trailing stops live in."""
+        for name in ("fapiPrivateGetOpenAlgoOrders", "fapiPrivateGetAllAlgoOrders"):
+            fn = getattr(self.exchange, name, None)
+            if fn is None:
+                continue
+            try:
+                res = fn() or []
+            except Exception as e:
+                log.debug(f"{name} failed: {e}")
+                continue
+            # Binance wraps the list; accept either shape.
+            if isinstance(res, dict):
+                res = (res.get("orders") or res.get("data")
+                       or res.get("algoOrders") or [])
+            if res:
+                return list(res)
+        return []
+
+    def _cancel_any(self, order_id: str, symbol: str) -> bool:
+        """
+        Cancel an order that may live in EITHER book.
+
+        Conditional and trailing stops are algo orders, so a regular cancel
+        returns -2011 for them — which means "not in the book I searched",
+        not "does not exist". Always try both before concluding anything.
+        """
+        if self.dry_run:
+            log.info(f"[DRY RUN] would cancel {order_id} on {symbol}")
+            return True
+        try:
+            self.exchange.cancel_order(order_id, symbol)
+            return True
+        except Exception as e:
+            if self._cancel_algo_order(order_id, symbol):
+                return True
+            log.debug(f"{symbol}: cancel {order_id} failed in both books: {e}")
+            return False
+
+    def _cancel_algo_order(self, order_id: str, symbol: str) -> bool:
+        """
+        Cancel via the ALGO book. A regular DELETE /fapi/v1/order returns -2011
+        for these, which reads as "already gone" but simply means the order is
+        not in the book being searched.
+        """
+        fn = getattr(self.exchange, "fapiPrivateDeleteAlgoOrder", None)
+        if fn is None:
+            return False
+        try:
+            fn({"algoId": order_id})
+            log.info(f"Cancelled ALGO order {order_id} on {symbol}")
+            return True
+        except Exception as e:
+            log.debug(f"algo cancel {order_id} failed: {e}")
+            return False
+
     def _all_open_orders_raw(self) -> list:
         """
         Every open order on the account, from the exchange directly.
@@ -1661,6 +1725,12 @@ class FuturesGuardian:
         for label, call in (
                 ("unified", lambda: self.exchange.fetch_open_orders()),
                 ("raw fapi", lambda: self.exchange.fapiPrivateGetOpenOrders()),
+                # Conditional and trailing stops are ALGO orders on Binance
+                # futures — placed via POST /fapi/v1/algoOrder and held in a
+                # SEPARATE book. They never appear in /fapi/v1/openOrders,
+                # which is why every listing returned zero while orders were
+                # plainly resting on the exchange.
+                ("algo", lambda: self._algo_orders()),
         ):
             try:
                 got = call() or []
@@ -1711,10 +1781,13 @@ class FuturesGuardian:
             ro = ro.strip().lower() == "true"
         ro = bool(ro)
         return {
-            "id": str(o.get("id") or info.get("orderId") or ""),
+            # Algo orders identify themselves with algoId, not orderId.
+            "id": str(o.get("id") or info.get("orderId")
+                      or info.get("algoId") or o.get("algoId") or ""),
             "symbol": sym,
             "type": (o.get("type") or info.get("origType")
-                     or info.get("type") or "").upper(),
+                     or info.get("type") or info.get("algoType")
+                     or info.get("strategyType") or "").upper(),
             "reduce_only": ro,
             "ts": o.get("timestamp") or float(info.get("time") or 0),
             "qty": o.get("amount") or info.get("origQty"),
@@ -1894,18 +1967,14 @@ class FuturesGuardian:
             if "STOP" not in otype and "TRAILING" not in otype:
                 continue                     # not a protective stop
             oid = o["id"]
-            try:
-                self.exchange.cancel_order(oid, sym)
+            if self._cancel_any(oid, sym):
                 log.warning(f"{sym}: cancelled ORPHANED protective stop {oid} "
                             f"— no open position to protect")
                 self._record(sym, "orphan_stop_swept", f"id={oid} (no position)")
                 cancelled.append((sym, oid))
-            except Exception as e:
-                msg = str(e).lower()
-                if "unknown order" in msg or "-2011" in msg:
-                    log.debug(f"{sym}: orphan {oid} already gone")
-                else:
-                    log.warning(f"{sym}: could not cancel orphan {oid}: {e}")
+                self._clear_pending_cancel(sym, oid)
+            else:
+                self._queue_pending_cancel(sym, oid)
         # Now trim any live position down to a single protective stop.
         for sym, rows in surplus.items():
             if len(rows) < 2:
@@ -1916,16 +1985,13 @@ class FuturesGuardian:
                 if "STOP" not in otype and "TRAILING" not in otype:
                     continue
                 oid = o["id"]
-                try:
-                    self.exchange.cancel_order(oid, sym)
+                if self._cancel_any(oid, sym):
                     log.warning(f"{sym}: cancelled SURPLUS protective stop {oid} "
                                 f"— position already has a newer one")
                     self._record(sym, "surplus_stop_swept", f"id={oid}")
                     cancelled.append((sym, oid))
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "unknown order" not in msg and "-2011" not in msg:
-                        log.warning(f"{sym}: could not cancel surplus {oid}: {e}")
+                else:
+                    self._queue_pending_cancel(sym, oid)
 
         if cancelled:
             log.warning(f"orphan-stop sweep cancelled {len(cancelled)} order(s)")
@@ -1954,6 +2020,9 @@ class FuturesGuardian:
             # Often the stop is what closed the position — but -2011 has been
             # seen on orders still resting, so report failure and let the
             # caller queue it.
+            if self._cancel_algo_order(order_id, symbol):
+                self._record(symbol, "orphan_stop_cancelled", f"id={order_id} (algo)")
+                return True
             log.debug(f"orphaned stop {order_id} on {symbol} not cancellable: {e}")
             return False
 

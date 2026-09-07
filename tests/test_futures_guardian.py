@@ -2411,3 +2411,96 @@ def test_queue_is_persisted_and_restored():
     g.state_owner = ""
     g.load_state(path)
     assert g._pending_cancels["REZ/USDT:USDT"] == ["1000000196098048"]
+
+
+# ── Conditional stops live in the ALGO book ──────────────────────────────────
+
+class _AlgoBookEx(FakeExchange):
+    """
+    The real venue: trailing and conditional stops are placed via
+    POST /fapi/v1/algoOrder and held in a SEPARATE book. They never appear in
+    /fapi/v1/openOrders, and a regular cancel returns -2011 for them.
+    """
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.cancelled = []
+        self.options = {"defaultType": "future",
+                        "fetchOpenOrders": {"warnWithoutSymbol": False}}
+        self.urls = {"api": {"fapiPrivate": "x"}}
+        self.algo = [
+            {"algoId": "A1", "symbol": "REZUSDT", "algoType": "STOP_MARKET",
+             "reduceOnly": "true", "bookTime": 1000},
+            {"algoId": "A2", "symbol": "CATIUSDT", "algoType": "STOP_MARKET",
+             "reduceOnly": "true", "bookTime": 900},
+            {"algoId": "A3", "symbol": "CATIUSDT", "algoType": "STOP_MARKET",
+             "reduceOnly": "true", "bookTime": 100},
+            {"algoId": "A4", "symbol": "CYSUSDT",
+             "algoType": "TRAILING_STOP_MARKET", "reduceOnly": "false",
+             "bookTime": 800},
+        ]
+        self.markets_by_id = {f"{b}USDT": [{"symbol": f"{b}/USDT:USDT"}]
+                              for b in ("REZ", "CATI", "CYS")}
+    def fetch_open_orders(self, symbol=None, since=None, limit=None, params=None):
+        return []
+    def fapiPrivateGetOpenOrders(self, params=None):
+        return []
+    def fapiPrivateGetOpenAlgoOrders(self, params=None):
+        return {"orders": self.algo}
+    def fapiPrivateDeleteAlgoOrder(self, params=None):
+        aid = str((params or {}).get("algoId"))
+        if not any(a["algoId"] == aid for a in self.algo):
+            raise RuntimeError("not found")
+        self.algo = [a for a in self.algo if a["algoId"] != aid]
+        self.cancelled.append(aid)
+        return {"success": True}
+    def cancel_order(self, oid, symbol):
+        raise RuntimeError('binanceusdm {"code":-2011,"msg":"Unknown order sent."}')
+    def fetch_positions(self, symbols=None):
+        return []
+
+
+def test_algo_book_orders_are_discovered():
+    """
+    Every listing returned zero while stops were plainly resting, because the
+    stops were algo orders and the bot only queried the regular book.
+    """
+    g = _guardian(_AlgoBookEx())
+    assert len(g._all_open_orders_raw()) == 4
+
+
+def test_algo_orders_normalise_with_algoId_and_algoType():
+    g = _guardian(_AlgoBookEx())
+    o = g._normalise_order({"algoId": "A9", "symbol": "REZUSDT",
+                            "algoType": "STOP_MARKET", "reduceOnly": "true"})
+    assert o["id"] == "A9"
+    assert o["symbol"] == "REZ/USDT:USDT"
+    assert o["type"] == "STOP_MARKET"
+    assert o["reduce_only"] is True
+
+
+def test_orphaned_algo_stops_are_cancelled():
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    res = g.reap_orphan_stops()
+    assert sorted(o for _, o in res) == ["A1", "A2", "A3"]
+
+
+def test_algo_entry_order_is_not_cancelled_by_the_stop_sweep():
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    g.reap_orphan_stops()
+    assert "A4" in [a["algoId"] for a in ex.algo]
+
+
+def test_cancel_any_falls_through_to_the_algo_book():
+    """-2011 from the regular book means 'not here', not 'does not exist'."""
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    assert g._cancel_any("A1", "REZ/USDT:USDT") is True
+    assert "A1" in ex.cancelled
+
+
+def test_cancel_any_reports_failure_when_neither_book_has_it():
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    assert g._cancel_any("NOPE", "REZ/USDT:USDT") is False
