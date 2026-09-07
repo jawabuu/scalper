@@ -1868,3 +1868,93 @@ def test_trail_id_is_tracked_for_close_cleanup():
     g = _arm(fake)
     trail_id = g._states["DOGE/USDT:USDT"].native_trail_id
     assert trail_id in g._all_stop_ids.get("DOGE/USDT:USDT", [])
+
+
+# ── Orphaned protective stops ────────────────────────────────────────────────
+
+class _OrphanEx(FakeExchange):
+    """Mirrors an observed account: 3 positions, 11 resting orders."""
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.orders = [
+            ("EPIC/USDT:USDT", "STOP_MARKET", True),
+            ("CYS/USDT:USDT", "TRAILING_STOP_MARKET", False),
+            ("WLD/USDT:USDT", "STOP_MARKET", True),
+            ("TRADOOR/USDT:USDT", "STOP_MARKET", True),
+            ("ON/USDT:USDT", "STOP_MARKET", True),
+            ("APR/USDT:USDT", "STOP_MARKET", True),
+            ("TAKE/USDT:USDT", "STOP_MARKET", True),
+            ("APR/USDT:USDT", "STOP_MARKET", True),
+            ("COTI/USDT:USDT", "STOP_MARKET", True),
+            ("APR/USDT:USDT", "STOP_MARKET", True),
+            ("ON/USDT:USDT", "STOP_MARKET", True),
+        ]
+        self.cancelled = []
+    def fetch_open_orders(self, symbol=None):
+        return [{"id": f"o{i}", "symbol": s, "type": t, "reduceOnly": ro}
+                for i, (s, t, ro) in enumerate(self.orders)
+                if symbol is None or s == symbol]
+    def fetch_positions(self, symbols=None):
+        return [{"symbol": s, "side": "long", "entryPrice": 1.0,
+                 "contracts": 100.0, "leverage": 20, "initialMargin": 5.0}
+                for s in ("EPIC/USDT:USDT", "TRADOOR/USDT:USDT", "CYS/USDT:USDT")]
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append((symbol, str(oid)))
+
+
+def test_orphaned_stops_are_swept():
+    """
+    A reduce-only stop with no position cannot protect anything, but can fire
+    against a FUTURE position on the same symbol. Eight accumulated across five
+    symbols, three of them on one symbol.
+    """
+    ex = _OrphanEx()
+    g = _guardian(ex)
+    res = g.reap_orphan_stops()
+    assert len(res) == 8
+    swept = {s for s, _ in res}
+    assert swept == {"WLD/USDT:USDT", "ON/USDT:USDT", "APR/USDT:USDT",
+                     "TAKE/USDT:USDT", "COTI/USDT:USDT"}
+
+
+def test_stops_protecting_real_positions_are_kept():
+    ex = _OrphanEx()
+    g = _guardian(ex)
+    g.reap_orphan_stops()
+    kept = {s for s, _ in ex.cancelled}
+    assert "EPIC/USDT:USDT" not in kept
+    assert "TRADOOR/USDT:USDT" not in kept
+
+
+def test_entry_orders_are_never_swept_by_this():
+    """CYS's non-reduce-only entry is not this sweep's business."""
+    ex = _OrphanEx()
+    g = _guardian(ex)
+    g.reap_orphan_stops()
+    assert "CYS/USDT:USDT" not in {s for s, _ in ex.cancelled}
+
+
+def test_non_stop_reduce_only_orders_are_left_alone():
+    class Ex(_OrphanEx):
+        def __init__(self):
+            super().__init__()
+            self.orders = [("XYZ/USDT:USDT", "LIMIT", True)]
+    ex = Ex()
+    g = _guardian(ex)
+    assert g.reap_orphan_stops() == []
+
+
+def test_sweep_survives_an_unknown_order_reply():
+    class Ex(_OrphanEx):
+        def cancel_order(self, oid, symbol):
+            raise RuntimeError('binanceusdm {"code":-2011,"msg":"Unknown order sent."}')
+    g = _guardian(Ex())
+    assert g.reap_orphan_stops() == []      # nothing recorded, no exception
+
+
+def test_sweep_can_be_disabled():
+    ex = _OrphanEx()
+    g = _guardian(ex)
+    g.sweep_orphan_stops = False
+    g.run_cycle()
+    assert not any(s.startswith("APR") for s, _ in ex.cancelled)

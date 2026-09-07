@@ -119,6 +119,18 @@ class GuardConfig:
     # is exactly what the stop existed to do. False leaves it unprotected and
     # only reports, which is what let one loss reach 3.3x its budget.
     close_if_past_stop: bool = True
+    # ── Breakeven step ──────────────────────────────────────────────────
+    # Once peak ROI reaches breakeven_at_roi, the stop moves to
+    # breakeven_stop_roi instead of sitting at the initial loss level. A trade
+    # that showed a real gain should not be allowed to run all the way back to
+    # its stop. This sits BELOW the trail: the trail still arms at arm_roi with
+    # its own give-back, so winner behaviour is unchanged above that point.
+    # 0 disables the step.
+    breakeven_at_roi: float = 0.0
+    # Where the stop goes. Exactly 0 is entry price, which still loses the
+    # round-trip fee — at 20x that is roughly 2% ROI, so a small positive
+    # value is closer to true breakeven.
+    breakeven_stop_roi: float = 0.0
 
 
     # Only move a resting stop if the new level differs by at least this much
@@ -138,6 +150,16 @@ class GuardConfig:
         assert self.initial_stop_roi > 0, "initial_stop_roi must be positive"
         assert self.arm_roi > 0, "arm_roi must be positive"
         assert self.callback_roi > 0, "callback_roi must be positive"
+        if self.breakeven_at_roi:
+            assert self.breakeven_at_roi < self.arm_roi, (
+                f"GUARD_BREAKEVEN_AT_ROI ({self.breakeven_at_roi}) must be below "
+                f"GUARD_ARM_ROI ({self.arm_roi}) — the breakeven step is a stage "
+                f"before the trail, not a replacement for it.")
+            assert self.breakeven_stop_roi < self.breakeven_at_roi, (
+                f"GUARD_BREAKEVEN_STOP_ROI ({self.breakeven_stop_roi}) must be "
+                f"below GUARD_BREAKEVEN_AT_ROI ({self.breakeven_at_roi}), or the "
+                f"stop would sit above the price that triggered it.")
+
         assert self.callback_roi < self.arm_roi, (
             f"callback_roi ({self.callback_roi}) must be LESS than arm_roi "
             f"({self.arm_roi}) — otherwise arming the trail puts the stop at or "
@@ -324,6 +346,13 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
     """
     if is_armed(state, cfg):
         return state.peak_roi - cfg.callback_roi
+
+    # Breakeven step: the trade has shown a real gain, so stop giving it back
+    # all the way to the initial loss level. Only ever tightens — the caller's
+    # monotonic check prevents this from loosening an already-higher stop.
+    if cfg.breakeven_at_roi and state.peak_roi >= cfg.breakeven_at_roi:
+        return cfg.breakeven_stop_roi
+
     initial = initial_stop_override if initial_stop_override else cfg.initial_stop_roi
     return -initial
 

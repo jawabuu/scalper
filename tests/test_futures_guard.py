@@ -252,3 +252,63 @@ def test_adopt_ignores_entry_order_and_places_own_stop(cfg, short_pos):
     st, stop_price, why = evaluate(short_pos, short_pos.entry_price, st, cfg)
     assert stop_price is not None
     assert "initial protective stop" in why
+
+
+# ── Breakeven step ───────────────────────────────────────────────────────────
+
+def _be_cfg(at=3.0, stop=0.0):
+    return GuardConfig(initial_stop_roi=10, arm_roi=5, callback_roi=3,
+                       breakeven_at_roi=at, breakeven_stop_roi=stop)
+
+
+def test_stop_stays_at_initial_below_the_breakeven_trigger():
+    cfg = _be_cfg()
+    assert desired_stop_roi(GuardState(peak_roi=2.9), cfg) == pytest.approx(-10.0)
+
+
+def test_stop_moves_to_breakeven_once_triggered():
+    """
+    A trade that showed a real gain should not run all the way back to its
+    initial stop. Two losers peaking above +3% gave back 28.5% of ROI doing so.
+    """
+    cfg = _be_cfg()
+    assert desired_stop_roi(GuardState(peak_roi=3.0), cfg) == pytest.approx(0.0)
+    assert desired_stop_roi(GuardState(peak_roi=4.9), cfg) == pytest.approx(0.0)
+
+
+def test_trail_still_takes_over_above_the_arm_level():
+    """The step sits BELOW the trail — winner behaviour above arm is unchanged."""
+    cfg = _be_cfg()
+    assert desired_stop_roi(GuardState(peak_roi=5.0), cfg) == pytest.approx(2.0)
+    assert desired_stop_roi(GuardState(peak_roi=20.0), cfg) == pytest.approx(17.0)
+
+
+def test_breakeven_level_is_configurable_for_fees():
+    """Exiting at exactly 0% ROI still loses the round-trip fee."""
+    cfg = _be_cfg(stop=2.0)
+    assert desired_stop_roi(GuardState(peak_roi=4.0), cfg) == pytest.approx(2.0)
+
+
+def test_step_disabled_by_default():
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=5, callback_roi=3)
+    assert cfg.breakeven_at_roi == 0.0
+    assert desired_stop_roi(GuardState(peak_roi=4.0), cfg) == pytest.approx(-10.0)
+
+
+def test_breakeven_must_sit_below_the_arm_level():
+    with pytest.raises(AssertionError):
+        _be_cfg(at=5.0).validate()
+
+
+def test_breakeven_stop_must_sit_below_its_trigger():
+    with pytest.raises(AssertionError):
+        _be_cfg(at=3.0, stop=4.0).validate()
+
+
+def test_step_respects_the_atr_derived_initial_stop():
+    """The override still applies below the trigger."""
+    cfg = _be_cfg()
+    assert desired_stop_roi(GuardState(peak_roi=1.0), cfg,
+                            initial_stop_override=7.5) == pytest.approx(-7.5)
+    assert desired_stop_roi(GuardState(peak_roi=3.5), cfg,
+                            initial_stop_override=7.5) == pytest.approx(0.0)

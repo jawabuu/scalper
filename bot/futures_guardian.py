@@ -240,6 +240,7 @@ class FuturesGuardian:
         self.pending_poll_interval: float = getattr(
             self, "pending_poll_interval", 1.0)
         self.reap_untracked: bool = getattr(self, "reap_untracked", False)
+        self.sweep_orphan_stops: bool = getattr(self, "sweep_orphan_stops", True)
         self._last_untracked_sweep: float = 0.0
         self.untracked_sweep_interval_s: float = 120.0
 
@@ -1181,7 +1182,14 @@ class FuturesGuardian:
 
             # Sweep for orders the bot has no record of. Anything placed before
             # tracking existed rests indefinitely and can fill hours later.
-            if self.reap_untracked and self._untracked_due():
+            sweep_due = self._untracked_due()
+            if self.sweep_orphan_stops and sweep_due:
+                try:
+                    self.reap_orphan_stops()
+                except Exception as e:
+                    log.warning(f"orphan-stop sweep failed: {e}")
+
+            if self.reap_untracked and sweep_due:
                 try:
                     entry.reap_untracked_entry_orders(
                         self.entry_order_ttl_s, self._reap_scan_symbols())
@@ -1386,6 +1394,63 @@ class FuturesGuardian:
 
         return {"ok": True, "dry_run": False, "symbol": symbol,
                 "side": side, "qty": qty, "order_id": oid}
+
+    def reap_orphan_stops(self) -> list:
+        """
+        Cancel reduce-only stops resting on symbols with NO open position.
+
+        A reduce-only stop with nothing to reduce serves no purpose and cannot
+        protect anything — but it CAN fire against a future position on the
+        same symbol, closing it at a level chosen for a trade that already
+        ended. Eight such orders accumulated across five symbols, three of them
+        on one symbol.
+
+        Unlike the entry reaper this does not need to know who placed the
+        order: a protective stop with no position is unambiguously stale
+        whoever created it. Non-reduce-only orders are never touched, so the
+        operator's own entries are safe.
+        """
+        try:
+            orders = self.exchange.fetch_open_orders()
+        except Exception as e:
+            log.warning(f"orphan-stop sweep could not list orders: {e}")
+            return []
+        try:
+            live = {p.symbol for p in self.fetch_positions()}
+        except Exception as e:
+            log.warning(f"orphan-stop sweep could not list positions: {e}")
+            return []
+
+        cancelled = []
+        for o in orders or []:
+            info = o.get("info") or {}
+            reduce_only = o.get("reduceOnly")
+            if reduce_only is None:
+                reduce_only = str(info.get("reduceOnly", "")).lower() == "true"
+            if not reduce_only:
+                continue                     # an entry order; not ours to judge
+            sym = o.get("symbol") or ""
+            if not sym or sym in live:
+                continue                     # protecting a real position
+            otype = (o.get("type") or info.get("origType") or "").upper()
+            if "STOP" not in otype and "TRAILING" not in otype:
+                continue                     # not a protective stop
+            oid = str(o.get("id") or info.get("orderId") or "")
+            try:
+                self.exchange.cancel_order(oid, sym)
+                log.warning(f"{sym}: cancelled ORPHANED protective stop {oid} "
+                            f"— no open position to protect")
+                self._record(sym, "orphan_stop_swept", f"id={oid} (no position)")
+                cancelled.append((sym, oid))
+            except Exception as e:
+                msg = str(e).lower()
+                if "unknown order" in msg or "-2011" in msg:
+                    log.debug(f"{sym}: orphan {oid} already gone")
+                else:
+                    log.warning(f"{sym}: could not cancel orphan {oid}: {e}")
+        if cancelled:
+            log.warning(f"orphan-stop sweep cancelled {len(cancelled)} order(s)")
+        return cancelled
 
     def _cancel_orphan_stop(self, symbol: str, order_id: str):
         """

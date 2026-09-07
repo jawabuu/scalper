@@ -82,6 +82,8 @@ if __name__ == "__main__":
             atr_stop_min_roi=cfg.atr_stop_min_roi,
             atr_stop_max_roi=cfg.atr_stop_max_roi,
             close_if_past_stop=cfg.guard_close_if_past_stop,
+            breakeven_at_roi=cfg.guard_breakeven_at_roi,
+            breakeven_stop_roi=cfg.guard_breakeven_stop_roi,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,
@@ -95,6 +97,7 @@ if __name__ == "__main__":
         # The guardian needs the risk budget to police the sizing/stop invariant.
         guardian.risk_pct = cfg.entry_risk_pct
         guardian.pending_poll_interval = cfg.guardian_pending_poll_interval
+        guardian.sweep_orphan_stops = cfg.guard_sweep_orphan_stops
         # Restore before the first cycle so discovered positions keep the stop
         # they were sized for and their peak ROI, instead of being re-derived.
         if cfg.futures_state_path:

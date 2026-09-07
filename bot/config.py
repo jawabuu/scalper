@@ -288,6 +288,13 @@ class BotConfig:
     # breached, so closing is what the stop was for; trailing it instead protects
     # nothing. Set false to only report and leave it open.
     guard_close_if_past_stop: bool = field(default_factory=lambda: _env_bool("GUARD_CLOSE_IF_PAST_STOP", True))
+    # Move the stop to breakeven once peak ROI reaches this. Sits below the
+    # trail, so arm/give-back behaviour above arm_roi is unchanged. 0 disables.
+    guard_breakeven_at_roi: float = field(default_factory=lambda: _env_float("GUARD_BREAKEVEN_AT_ROI", 0.0))
+    # Where the stop goes at that point. Exactly 0 is entry price, which still
+    # loses the round-trip fee (~2% ROI at 20x), so a small positive value is
+    # closer to true breakeven.
+    guard_breakeven_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_BREAKEVEN_STOP_ROI", 0.0))
     entry_risk_pct: float = field(default_factory=lambda: _env_float("ENTRY_RISK_PCT", 1.0))
 
     # ── Unattended auto-trading ─────────────────────────────────────────
@@ -332,6 +339,11 @@ class BotConfig:
     # before tracking existed). Leave false if you place entries by hand —
     # those would be cancelled too.
     entry_reap_untracked: bool = field(default_factory=lambda: _env_bool("ENTRY_REAP_UNTRACKED", False))
+    # Cancel reduce-only stops resting on symbols with no open position. Such
+    # an order cannot protect anything but can fire against a FUTURE position
+    # on the same symbol. Defaults ON: a protective stop with nothing to
+    # protect is stale whoever placed it.
+    guard_sweep_orphan_stops: bool = field(default_factory=lambda: _env_bool("GUARD_SWEEP_ORPHAN_STOPS", True))
     entry_order_ttl_s: float = field(default_factory=lambda: max(
         60.0, _env_float("ENTRY_ORDER_TTL_S", 900.0)))
 
