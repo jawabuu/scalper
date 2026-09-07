@@ -460,3 +460,60 @@ def test_low_ratio_shifts_control_to_the_floor():
     tight = AutoTradeConfig(callback_ratio=0.1, callback_atr_mult=0.75)
     assert callback_for(2.0, atr_pct=0.5, cfg=loose)[2] == "ratio"
     assert callback_for(2.0, atr_pct=0.5, cfg=tight)[2] == "atr_floor"
+
+
+# ── Longs need a ceiling, shorts deliberately do not ─────────────────────────
+
+def _band_cfg(lo=45.0, hi=50.0):
+    return AutoTradeConfig(long_rsi_min=lo, long_rsi_max=hi, short_rsi_min=75.0,
+                           max_dist_to_extreme_pct=3.0, required_strength_sweeps=2)
+
+
+def _long_row(rsi):
+    return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": rsi,
+            "atr_pct": 0.5, "pct_above_24h_low": 1.0,
+            "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
+
+
+def test_long_above_the_ceiling_is_skipped():
+    """
+    Split by entry RSI within one session's longs — same regime, differing only
+    by RSI — the 50-60 band lost 13 USDT per trade over 11 trades while 45-50
+    made money. The auto-trader had a floor but no ceiling.
+    """
+    cfg = _band_cfg()
+    d = evaluate_candidate(_long_row(58), streak=2, cfg=cfg, atr_pct=0.5)
+    assert not d.enter and "above the long ceiling" in d.reason
+
+
+def test_long_inside_the_band_is_taken():
+    cfg = _band_cfg()
+    for rsi in (45, 48, 50):
+        assert evaluate_candidate(_long_row(rsi), streak=2, cfg=cfg,
+                                  atr_pct=0.5).enter
+
+
+def test_long_below_the_floor_is_still_skipped():
+    cfg = _band_cfg()
+    d = evaluate_candidate(_long_row(42), streak=2, cfg=cfg, atr_pct=0.5)
+    assert not d.enter and "below the long floor" in d.reason
+
+
+def test_ceiling_of_zero_disables_it():
+    cfg = _band_cfg(hi=0.0)
+    assert evaluate_candidate(_long_row(64), streak=2, cfg=cfg, atr_pct=0.5).enter
+
+
+def test_shorts_have_no_ceiling():
+    """The thesis is that more overbought is a better fade — do not cap it."""
+    cfg = _band_cfg()
+    row = {"symbol": "X/USDT:USDT", "direction": "short", "rsi": 92,
+           "atr_pct": 0.5, "pct_above_24h_low": 20.0,
+           "pct_below_24h_high": -1.0, "range_pos_24h": 0.95}
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.5).enter
+
+
+def test_ceiling_is_live_editable():
+    a = _trader()
+    applied, errors = a.update_rules({"long_rsi_max": 52})
+    assert not errors and a.cfg.long_rsi_max == 52

@@ -307,6 +307,9 @@ class BotConfig:
     auto_max_dist_pct: float = field(default_factory=lambda: _env_float("AUTO_MAX_DIST_PCT", 3.0))
     auto_strength_sweeps: int = field(default_factory=lambda: _env_int("AUTO_STRENGTH_SWEEPS", 2))
     auto_long_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_LONG_RSI_MIN", 48.0))
+    # Ceiling for longs. 0 disables it (the previous behaviour, where longs
+    # inherited the scanner's much wider band).
+    auto_long_rsi_max: float = field(default_factory=lambda: _env_float("AUTO_LONG_RSI_MAX", 0.0))
     auto_short_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MIN", 78.0))
     auto_callback_ratio: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_RATIO", 0.5))
     auto_callback_atr_mult: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_ATR_MULT", 0.75))

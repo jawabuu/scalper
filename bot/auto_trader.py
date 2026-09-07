@@ -44,6 +44,12 @@ class AutoTradeConfig:
     max_dist_to_extreme_pct: float = 3.0   # within 3% of the 24h low/high
     required_strength_sweeps: int = 2      # strengthened on N consecutive scans
     long_rsi_min: float = 48.0
+    # Upper bound for longs. The auto-trader had a floor but no ceiling, so it
+    # inherited the scanner's much wider band. Within a single session's longs
+    # — same regime, differing only by entry RSI — the 45-50 band was the only
+    # profitable one; 50-60 lost 13 USDT per trade across 11 trades. 0 disables
+    # the ceiling.
+    long_rsi_max: float = 0.0
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -149,6 +155,16 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     if float(rsi) < floor:
         return AutoDecision(False, symbol, side,
                             reason=f"RSI {rsi} below the {side} floor of {floor}")
+
+    # Longs also need a CEILING. A long taken in the middle of the RSI range is
+    # neither oversold enough to bounce nor strong enough to trend, and that
+    # band was the only losing one when longs were split by entry RSI within a
+    # single session. Shorts are unbounded above by design — the whole thesis
+    # is that more overbought is a better fade.
+    if side == "long" and cfg.long_rsi_max and float(rsi) > cfg.long_rsi_max:
+        return AutoDecision(False, symbol, side,
+                            reason=f"RSI {rsi} above the long ceiling of "
+                                   f"{cfg.long_rsi_max}")
 
     if streak < cfg.required_strength_sweeps:
         return AutoDecision(False, symbol, side,
@@ -409,6 +425,7 @@ class AutoTrader:
                 "max_dist_to_extreme_pct": self.cfg.max_dist_to_extreme_pct,
                 "required_strength_sweeps": self.cfg.required_strength_sweeps,
                 "long_rsi_min": self.cfg.long_rsi_min,
+                "long_rsi_max": self.cfg.long_rsi_max,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
@@ -438,6 +455,7 @@ class AutoTrader:
         "max_dist_to_extreme_pct": (float, 0.1, 50.0),
         "required_strength_sweeps": (int, 1, 10),
         "long_rsi_min": (float, 0.0, 100.0),
+        "long_rsi_max": (float, 0.0, 100.0),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),

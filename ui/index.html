@@ -957,8 +957,9 @@
             <input type="number" class="pb-input" id="ar-dist" step="0.5" onchange="onAutoRule('max_dist_to_extreme_pct','ar-dist')"><span class="k">% of extreme</span></span>
           <span class="pb-setting" style="border:none"><span class="k">sweeps&nbsp;</span>
             <input type="number" class="pb-input" id="ar-sweeps" step="1" onchange="onAutoRule('required_strength_sweeps','ar-sweeps')"></span>
-          <span class="pb-setting" style="border:none"><span class="k">long RSI&gt;&nbsp;</span>
-            <input type="number" class="pb-input" id="ar-lrsi" step="1" onchange="onAutoRule('long_rsi_min','ar-lrsi')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">long RSI&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-lrsi" step="1" title="long floor" onchange="onAutoRule('long_rsi_min','ar-lrsi')"><span class="k">&nbsp;to&nbsp;</span>
+            <input type="number" class="pb-input" id="ar-lrsix" step="1" title="long ceiling (0 = none)" onchange="onAutoRule('long_rsi_max','ar-lrsix')"></span>
           <span class="pb-setting" style="border:none"><span class="k">short RSI&gt;&nbsp;</span>
             <input type="number" class="pb-input" id="ar-srsi" step="1" onchange="onAutoRule('short_rsi_min','ar-srsi')"></span>
           <span class="pb-setting" style="border:none"><span class="k">callback&nbsp;</span>
@@ -2519,6 +2520,7 @@ function fillAutoRules(c) {
   set('ar-dist', c.max_dist_to_extreme_pct);
   set('ar-sweeps', c.required_strength_sweeps);
   set('ar-lrsi', c.long_rsi_min);
+  set('ar-lrsix', c.long_rsi_max);
   set('ar-srsi', c.short_rsi_min);
   set('ar-ratio', c.callback_ratio);
   set('ar-atr', c.callback_atr_mult);
