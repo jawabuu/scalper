@@ -1401,6 +1401,10 @@ class FuturesGuardian:
         realised = None
         pnl_source = "none"
         ledger_pnl = None
+        # Reset per close. This is instance state, and leaving it set meant a
+        # trade whose fill lookup failed inherited the PREVIOUS trade's
+        # commission — a wrong number that looks entirely plausible.
+        self._last_trade_fees = None
         try:
             # Scope the fills to THIS position's lifetime. fetch_my_trades
             # returns the last N fills for the symbol regardless of which
@@ -1433,16 +1437,6 @@ class FuturesGuardian:
                 except (TypeError, ValueError):
                     pass
             self._last_trade_fees = round(fees, 6)
-
-            # The ledger is authoritative; fills can be missing or partial.
-            led_pnl, led_comm, led_found = self._income_for_position(
-                symbol, since_ms)
-            if led_found:
-                if led_comm:
-                    self._last_trade_fees = round(led_comm, 6)
-                ledger_pnl = led_pnl        # applied after the fill logic
-                log.debug(f"{symbol}: ledger realised {led_pnl:+.4f}, "
-                          f"fees {led_comm:.4f}")
             if scoped and not pnl:
                 log.debug(f"{symbol}: {len(scoped)} fill(s) in scope, all zero realisedPnl")
             if pnl:
@@ -1459,6 +1453,27 @@ class FuturesGuardian:
                     pnl_source = "computed"
         except Exception as e:
             log.debug(f"realised PnL lookup failed for {symbol}: {e}")
+
+        # The income ledger is queried INDEPENDENTLY of the fills. It used to
+        # sit inside the same try, so a fill-lookup failure skipped it — losing
+        # the authoritative source exactly when the fallback was needed.
+        try:
+            opened_at = meta.get("opened_seen_at")
+            since_ms = int(opened_at * 1000) if opened_at else None
+            led_pnl, led_comm, led_found = self._income_for_position(
+                symbol, since_ms)
+            if led_found:
+                if led_comm:
+                    self._last_trade_fees = round(led_comm, 6)
+                ledger_pnl = led_pnl
+                log.info(f"{symbol}: ledger realised {led_pnl:+.4f}, "
+                         f"fees {led_comm:.4f}")
+            else:
+                log.warning(
+                    f"{symbol}: income ledger returned nothing — P&L and fees "
+                    f"fall back to fills or a price estimate, which can be wrong.")
+        except Exception as e:
+            log.warning(f"{symbol}: income ledger lookup failed: {e}")
 
         if realised is None and computed is not None:
             realised = computed
@@ -1531,6 +1546,14 @@ class FuturesGuardian:
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
             "armed": state.armed,
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
+            # Commission from the income ledger. GROSS realised P&L excludes
+            # it, which is why a positive P&L can sit beside a falling wallet.
+            "fees_usdt": (None if self._last_trade_fees is None
+                          else round(self._last_trade_fees, 4)),
+            "net_pnl_usdt": (
+                round(realised - self._last_trade_fees, 4)
+                if realised is not None and self._last_trade_fees is not None
+                else None),
             "exit_is_estimate": not exit_from_exchange,
             "entry_context": meta.get("entry_context") or {},
             "exit_reason": ("trail" if state.native_trail_id

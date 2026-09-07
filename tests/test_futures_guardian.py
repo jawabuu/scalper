@@ -2580,3 +2580,89 @@ def test_income_lookup_survives_an_error():
             raise RuntimeError("boom")
     g = _guardian(BadEx())
     assert g._income_for_position("X/USDT:USDT", None) == (0.0, 0.0, False)
+
+
+# ── Fee capture, end to end ──────────────────────────────────────────────────
+
+class _LedgerOnlyEx(FakeExchange):
+    """Fills unavailable; only the income ledger has the numbers."""
+    def market_id(self, s):
+        return "SOLVUSDT"
+    def fetch_my_trades(self, symbol, since=None, limit=50):
+        raise RuntimeError("fills unavailable")
+    def fapiPrivateGetIncome(self, params=None):
+        return [{"incomeType": "REALIZED_PNL", "income": "0.00000000"},
+                {"incomeType": "COMMISSION", "income": "-1.03487468"},
+                {"incomeType": "COMMISSION", "income": "-1.03487471"}]
+
+
+def _close_one(ex):
+    g = _guardian(ex)
+    g.run_cycle()
+    ex._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    return g
+
+
+def test_closed_trade_carries_fees():
+    """
+    The record never included fees_usdt at all — an edit targeted a line that
+    did not match and silently did nothing, so the field was absent and the UI
+    always showed a dash.
+    """
+    g = _close_one(_LedgerOnlyEx(positions=[_raw_pos("short", entry=0.00479)],
+                                 price=0.00479))
+    t = g.closed_trades()[0]
+    assert "fees_usdt" in t
+    assert t["fees_usdt"] == pytest.approx(2.0697, abs=0.001)
+
+
+def test_net_pnl_is_recorded():
+    g = _close_one(_LedgerOnlyEx(positions=[_raw_pos("short", entry=0.00479)],
+                                 price=0.00479))
+    t = g.closed_trades()[0]
+    assert t["net_pnl_usdt"] == pytest.approx(-2.0697, abs=0.001)
+    assert t["pnl_source"] == "ledger"
+
+
+def test_ledger_is_consulted_even_when_fills_fail():
+    """
+    The ledger lookup sat inside the same try as the fills, so a fill failure
+    skipped the authoritative source exactly when it was most needed.
+    """
+    g = _close_one(_LedgerOnlyEx(positions=[_raw_pos("short", entry=0.00479)],
+                                 price=0.00479))
+    assert g.closed_trades()[0]["pnl_source"] == "ledger"
+
+
+def test_fees_do_not_leak_between_trades():
+    """
+    _last_trade_fees is instance state. Without a reset, a trade whose lookup
+    failed inherited the PREVIOUS trade's commission — a plausible wrong number.
+    """
+    class NoDataEx(FakeExchange):
+        def market_id(self, s):
+            return "XUSDT"
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            raise RuntimeError("no fills")
+        def fapiPrivateGetIncome(self, params=None):
+            return []
+    g = _guardian(_LedgerOnlyEx(positions=[_raw_pos("short", entry=0.00479)],
+                                price=0.00479))
+    g.run_cycle()
+    g.exchange._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert g.closed_trades()[0]["fees_usdt"] is not None
+
+    # a second position whose data is unavailable must NOT inherit the first
+    # fee. closed_trades() is newest-first, so index 0 is the second trade.
+    g.exchange = NoDataEx(positions=[_raw_pos("long", entry=1.0)], price=1.0)
+    g.run_cycle()
+    g.exchange._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert len(g.closed_trades()) == 2
+    assert g.closed_trades()[0]["fees_usdt"] is None, "stale fee leaked"
+    assert g.closed_trades()[1]["fees_usdt"] == pytest.approx(2.0697, abs=0.001)
