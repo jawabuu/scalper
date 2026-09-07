@@ -131,6 +131,9 @@
      their grid cells and paint over each other. */
   .an-grid { display: block; margin-top: 12px; }
   .an-grid > div { margin-bottom: 22px; overflow-x: auto; }
+  /* The overall table sits OUTSIDE .an-grid, so it missed the scroll
+     container its siblings get and overflowed the page on narrow screens. */
+  #an-overall { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .an-grid table { width: 100%; }
   .an-grid th, .an-grid td { white-space: nowrap; }
   .an-grid .sym { white-space: nowrap; }
@@ -455,9 +458,18 @@
   }
 
   .version-badge {
-    font-size: 10px;
-    color: var(--border2);
-    letter-spacing: 0.05em;
+    /* Was var(--border2) — a BORDER colour, hence barely legible. The running
+       version is the first thing needed when checking whether a fix is
+       actually deployed, so it should be readable. */
+    font-size: 11px;
+    /* Was var(--border2) — a BORDER colour at 1.47:1 against the background,
+       effectively invisible. var(--muted) is only 2.98:1, still below the
+       4.5:1 needed for small text, so this uses an explicit value at 6.15:1.
+       The running version is the first thing needed when checking whether a
+       fix is deployed. */
+    color: #7d93a6;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
   }
 
   .err { color: var(--red); font-size: 11px; margin-top: 6px; }
@@ -609,7 +621,9 @@
     /* Header must shrink, not push the page wide. */
     header { min-width: 0; }
     .user-avatar { display: none; }
-    .version-badge { display: none; }
+    /* Keep the version visible on mobile — it is the first thing needed when
+       diagnosing whether a fix is actually deployed. */
+    .version-badge { display: inline; font-size: 10px; }
 
     /* Real tap targets. */
     .view-switch button { padding: 8px 12px; font-size: 11px; }
@@ -633,7 +647,10 @@
     .badge-breakout, .badge-pullback, .badge-live, .badge-testnet { display: none; }
 
     /* Analysis tables stack anyway; give each its own scroll context. */
-    .an-grid > div { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .an-grid > div, #an-overall {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
 
     /* Row action buttons need a real tap target. */
     .btn-entry, .btn-row-close, .btn-row-confirm {

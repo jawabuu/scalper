@@ -227,6 +227,9 @@ class FuturesGuardian:
         self._range_source: dict[str, str] = {}
         self._risk_overshoots: dict[str, dict] = {}
         self._capped_stop_reported: dict[str, float] = {}
+        self._listing_warned: bool = False
+        self._empty_listings: int = 0
+        self._last_wide_probe: float = 0.0
         self._missing_counts: dict[str, int] = {}
         self._stop_source_reported: set = set()
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
@@ -346,6 +349,10 @@ class FuturesGuardian:
     RANGE_CACHE_TTL_S = 300.0
     # Consecutive cycles a position must be absent before it counts as closed.
     MISSING_CONFIRMATIONS = 3
+    # Give up on the expensive account-wide listing after this many empties,
+    # then re-probe on a slow clock in case the environment starts reporting.
+    EMPTY_LISTING_LIMIT = 5
+    WIDE_PROBE_INTERVAL_S = 1800.0
     # Candle timeframe for ATR. Must match the timeframe the strategy trades:
     # a 15m ATR is ~2.2x a 3m ATR, so stops sized off 15m were more than twice
     # as wide as the 3m chart justified (FORM: 24.4% ROI where 10.9% was right).
@@ -749,6 +756,17 @@ class FuturesGuardian:
                 self._all_stop_ids[pos.symbol] = [
                     i for i in self._all_stop_ids.get(pos.symbol, []) if i != oid]
 
+    @staticmethod
+    def _order_already_gone(err) -> bool:
+        """
+        -2011 "Unknown order sent" means the order does NOT exist — already
+        filled, already cancelled, or from a previous run. It is a SUCCESSFUL
+        outcome for a cancel, not a failure, and must not be reported as
+        "still resting".
+        """
+        t = str(err).lower()
+        return "-2011" in t or "unknown order" in t
+
     def _cancel_stop(self, pos: FuturesPosition, order_id: str) -> bool:
         """
         Cancel a stop the guardian is managing.
@@ -763,7 +781,12 @@ class FuturesGuardian:
             log.info(f"Cancelled superseded stop {order_id} on {pos.symbol}")
             return True
         except Exception as e:
-            # Not fatal: it may already have triggered or been cancelled.
+            if self._order_already_gone(e):
+                # Gone is the outcome we wanted. Report success so callers stop
+                # tracking it instead of retrying forever.
+                log.info(f"stop {order_id} on {pos.symbol} was already gone "
+                         f"(-2011) — nothing to cancel")
+                return True
             log.warning(f"cancel {order_id} on {pos.symbol} failed: {e}")
             return False
 
@@ -878,15 +901,13 @@ class FuturesGuardian:
                             i for i in self._all_stop_ids.get(pos.symbol, [])
                             if i != prev_order_id]
                     else:
-                        # This is exactly how a stop is left hanging. Make it
-                        # loud and record it, rather than leaving a warning
-                        # among routine INFO lines.
+                        # Reached only for a genuine failure: an order that is
+                        # already gone now reports success (-2011 handling in
+                        # _cancel_stop), so this really does mean still resting.
                         log.error(
                             f"{pos.symbol}: armed the trail but could NOT cancel "
                             f"the fixed stop {prev_order_id} — it is still "
-                            f"resting and will be retried each cycle. If this "
-                            f"repeats, cancel_order does not work for "
-                            f"conditional orders on this account.")
+                            f"resting and will be retried each cycle.")
                         self._record(pos.symbol, "stop_cancel_failed",
                                      f"id={prev_order_id} left resting at arming")
                 else:
@@ -1522,6 +1543,21 @@ class FuturesGuardian:
         except Exception:
             pass
 
+        # The account-wide listing carries 40x the normal request weight. On
+        # Binance demo futures it returns nothing no matter what, so paying
+        # that weight every sweep buys exactly nothing. After a run of empty
+        # replies, stop asking and retry only occasionally — cleanup relies on
+        # the bot's persisted record of what it placed, not on discovery.
+        now = time.time()
+        skip_wide = (self._empty_listings >= self.EMPTY_LISTING_LIMIT
+                     and now - self._last_wide_probe < self.WIDE_PROBE_INTERVAL_S)
+        if skip_wide:
+            log.debug(f"skipping account-wide order listing "
+                      f"({self._empty_listings} empty replies; retry in "
+                      f"{self.WIDE_PROBE_INTERVAL_S/60:.0f}m)")
+            return []
+        self._last_wide_probe = now
+
         rows = []
         for label, call in (
                 ("unified", lambda: self.exchange.fetch_open_orders()),
@@ -1539,6 +1575,19 @@ class FuturesGuardian:
                 # part when two order listings disagree with the UI.
                 log.warning(f"open-order listing via {label} FAILED: "
                             f"{type(e).__name__}: {e}")
+
+        if rows:
+            self._empty_listings = 0
+        else:
+            self._empty_listings += 1
+            if self._empty_listings == self.EMPTY_LISTING_LIMIT:
+                log.warning(
+                    f"account-wide order listing has returned nothing "
+                    f"{self._empty_listings} times; it costs 40x request "
+                    f"weight, so it will now be probed only every "
+                    f"{self.WIDE_PROBE_INTERVAL_S/60:.0f} minutes. Cleanup "
+                    f"continues from the bot's own persisted record of the "
+                    f"stops it placed.")
         return rows
 
     def _normalise_order(self, o: dict) -> dict:
@@ -1718,6 +1767,16 @@ class FuturesGuardian:
 
         log.info(f"orphan-stop sweep: {account_wide} order(s) account-wide, "
                  f"{per_symbol} more per-symbol, {len(orders)} total")
+        if not orders and not self._listing_warned:
+            self._listing_warned = True
+            log.warning(
+                "Order LISTING returned nothing from every endpoint. On Binance "
+                "demo futures this is expected — open orders are not reported "
+                "even though placing, cancelling, positions and balance all "
+                "work. Cleanup therefore relies on the bot's OWN record of the "
+                "stops it placed (persisted in the state file), not on "
+                "discovery. Orders placed before that record existed are "
+                "invisible to the bot and must be cancelled by hand once.")
 
         cancelled = []
         surplus: dict = {}

@@ -2238,3 +2238,111 @@ def test_orphan_sweep_sees_orders_once_the_gate_is_open():
     g = _guardian(ex)
     res = g.reap_orphan_stops()
     assert [oid for _, oid in res] == ["z1"]
+
+
+# ── -2011 means the order is gone, not still resting ─────────────────────────
+
+def test_unknown_order_is_a_successful_cancel():
+    """
+    -2011 "Unknown order sent" means the order does not exist — already
+    filled, cancelled, or from a previous run. Treating it as a failure made
+    the guardian log "it is still resting" about an order that was gone, and
+    retry it forever.
+    """
+    g = _guardian(FakeExchange())
+    assert g._order_already_gone('binanceusdm {"code":-2011,"msg":"Unknown order sent."}')
+    assert g._order_already_gone("Unknown order sent.")
+    assert not g._order_already_gone('{"code":-1021,"msg":"Timestamp ahead."}')
+
+
+def test_cancel_reports_success_when_order_already_gone():
+    from bot.futures_guard import FuturesPosition
+
+    class GoneEx(FakeExchange):
+        def cancel_order(self, order_id, symbol):
+            raise RuntimeError('binanceusdm {"code":-2011,"msg":"Unknown order sent."}')
+
+    g = _guardian(GoneEx())
+    pos = FuturesPosition("CYS/USDT:USDT", "long", 1.0, 10.0, 20, 100.0)
+    assert g._cancel_stop(pos, "1000000196042886") is True
+
+
+def test_gone_order_is_dropped_from_tracking():
+    """Otherwise it is retried every cycle for the life of the position."""
+    from bot.futures_guard import FuturesPosition
+
+    class GoneEx(FakeExchange):
+        def cancel_order(self, order_id, symbol):
+            raise RuntimeError('{"code":-2011}')
+
+    g = _guardian(GoneEx())
+    g._all_stop_ids["CYS/USDT:USDT"] = ["old-1", "current-2"]
+    pos = FuturesPosition("CYS/USDT:USDT", "long", 1.0, 10.0, 20, 100.0)
+    g._cancel_superseded_stops(pos, keep="current-2")
+    assert g._all_stop_ids["CYS/USDT:USDT"] == ["current-2"]
+
+
+def test_genuine_cancel_failure_is_still_reported():
+    from bot.futures_guard import FuturesPosition
+
+    class BadEx(FakeExchange):
+        def cancel_order(self, order_id, symbol):
+            raise RuntimeError('{"code":-1000,"msg":"An unknown error occurred."}')
+
+    g = _guardian(BadEx())
+    pos = FuturesPosition("CYS/USDT:USDT", "long", 1.0, 10.0, 20, 100.0)
+    assert g._cancel_stop(pos, "x") is False
+
+
+# ── Do not pay 40x weight for a listing that returns nothing ─────────────────
+
+class _EmptyListingEx(FakeExchange):
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.wide_calls = 0
+        self.options = {"defaultType": "future",
+                        "fetchOpenOrders": {"warnWithoutSymbol": False}}
+        self.urls = {"api": {"fapiPrivate": "x"}}
+    def fetch_open_orders(self, symbol=None, since=None, limit=None, params=None):
+        if symbol is None:
+            self.wide_calls += 1
+        return []
+    def fapiPrivateGetOpenOrders(self, params=None):
+        self.wide_calls += 1
+        return []
+
+
+def test_account_wide_listing_backs_off_when_always_empty():
+    """
+    The account-wide call costs 40x request weight and returns nothing on demo
+    futures, so paying it every sweep buys nothing.
+    """
+    ex = _EmptyListingEx()
+    g = _guardian(ex)
+    for _ in range(10):
+        g._all_open_orders_raw()
+    # 2 calls per attempt, and attempts stop after the limit
+    assert ex.wide_calls == 2 * g.EMPTY_LISTING_LIMIT
+
+
+def test_backoff_expires_and_reprobes():
+    ex = _EmptyListingEx()
+    g = _guardian(ex)
+    for _ in range(10):
+        g._all_open_orders_raw()
+    before = ex.wide_calls
+    g._last_wide_probe -= g.WIDE_PROBE_INTERVAL_S + 1
+    g._all_open_orders_raw()
+    assert ex.wide_calls > before
+
+
+def test_a_non_empty_reply_resets_the_counter():
+    class SometimesEx(_EmptyListingEx):
+        def fapiPrivateGetOpenOrders(self, params=None):
+            self.wide_calls += 1
+            return [{"orderId": "1", "symbol": "ONUSDT",
+                     "origType": "STOP_MARKET", "reduceOnly": "true"}]
+    g = _guardian(SometimesEx())
+    for _ in range(8):
+        g._all_open_orders_raw()
+    assert g._empty_listings == 0
