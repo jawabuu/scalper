@@ -1395,6 +1395,72 @@ class FuturesGuardian:
         return {"ok": True, "dry_run": False, "symbol": symbol,
                 "side": side, "qty": qty, "order_id": oid}
 
+    def _endpoint_hint(self) -> str:
+        """Best-effort description of the API host actually in use."""
+        try:
+            urls = getattr(self.exchange, "urls", {}) or {}
+            api = urls.get("api")
+            if isinstance(api, dict):
+                for key in ("fapiPrivate", "fapiPublic", "future", "private"):
+                    if api.get(key):
+                        return str(api[key])
+                return str(next(iter(api.values()), ""))
+            return str(api or "")
+        except Exception:
+            return "unknown"
+
+    def diagnose_order_listing(self) -> dict:
+        """
+        Report what every candidate order-listing call actually returns.
+
+        Balance and position calls succeed while order listings come back
+        empty, so the question is which specific endpoint disagrees with the
+        exchange UI. Guessing has been wrong repeatedly; this reports the URL
+        used, the count, and the raw error for each candidate so the answer is
+        observed rather than inferred.
+        """
+        urls = getattr(self.exchange, "urls", {}) or {}
+        api = urls.get("api") if isinstance(urls.get("api"), dict) else {}
+        out = {
+            "demo_flag": self.demo,
+            "demo_enabled_in_ccxt": bool(
+                (getattr(self.exchange, "options", {}) or {}).get("enableDemoTrading")),
+            "fapiPrivate_url": api.get("fapiPrivate", "?"),
+            "private_url": api.get("private", "?"),
+            "default_type": (getattr(self.exchange, "options", {}) or {}).get("defaultType"),
+            "attempts": [],
+        }
+        try:
+            out["positions"] = len(self.exchange.fetch_positions() or [])
+        except Exception as e:
+            out["positions"] = f"error: {e}"
+
+        candidates = [
+            ("fetch_open_orders()", lambda: self.exchange.fetch_open_orders()),
+            ("fetch_open_orders(type=future)",
+             lambda: self.exchange.fetch_open_orders(None, None, None,
+                                                     {"type": "future"})),
+            ("fapiPrivateGetOpenOrders",
+             lambda: self.exchange.fapiPrivateGetOpenOrders()),
+            ("fapiPrivateGetOpenOrders(recvWindow)",
+             lambda: self.exchange.fapiPrivateGetOpenOrders({"recvWindow": 10000})),
+        ]
+        for name, call in candidates:
+            row = {"call": name}
+            try:
+                got = call() or []
+                row["count"] = len(got)
+                row["sample"] = [
+                    {k: v for k, v in (o.items() if isinstance(o, dict) else [])
+                     if k in ("orderId", "id", "symbol", "origType", "type",
+                              "reduceOnly", "status")}
+                    for o in list(got)[:3]
+                ]
+            except Exception as e:
+                row["error"] = f"{type(e).__name__}: {e}"
+            out["attempts"].append(row)
+        return out
+
     def _all_open_orders_raw(self) -> list:
         """
         Every open order on the account, from the exchange directly.
@@ -1418,8 +1484,11 @@ class FuturesGuardian:
                     if isinstance(o, dict):
                         rows.append(o)
             except Exception as e:
-                log.info(f"open-order listing via {label} unavailable: "
-                         f"{type(e).__name__}")
+                # Log the MESSAGE, not just the type. "ExchangeError" alone
+                # hides exactly what Binance said, which is the only useful
+                # part when two order listings disagree with the UI.
+                log.warning(f"open-order listing via {label} FAILED: "
+                            f"{type(e).__name__}: {e}")
         return rows
 
     def _normalise_order(self, o: dict) -> dict:
@@ -1493,7 +1562,12 @@ class FuturesGuardian:
         """
         out = {"positions": [], "protecting": [], "orphan_stops": [],
                "stale_entries": [], "account_wide_count": 0,
-               "per_symbol_count": 0, "error": None}
+               "per_symbol_count": 0, "error": None,
+               # Which account/endpoint this reflects. When an order listing
+               # disagrees with the exchange UI, the first question is whether
+               # both are looking at the same place.
+               "endpoint": self._endpoint_hint(),
+               "demo": self.demo}
         try:
             live = {p.symbol: p for p in self.fetch_positions()}
         except Exception as e:

@@ -199,6 +199,16 @@ def create_app(engine) -> FastAPI:
             log.exception("analysis failed")
             return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
 
+    @app.get("/api/futures/orders/diagnose")
+    def futures_orders_diagnose(user: dict = Depends(_require_auth)):
+        """What each candidate order-listing call returns, with URLs."""
+        if _guardian is None:
+            return {"enabled": False}
+        try:
+            return _guardian.diagnose_order_listing()
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+
     @app.get("/api/futures/orders")
     def futures_orders(user: dict = Depends(_require_auth)):
         """Resting orders reconciled against positions — orphans made visible."""

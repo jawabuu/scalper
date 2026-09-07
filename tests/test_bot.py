@@ -709,3 +709,83 @@ def test_candle_seconds_parses_timeframes(cfg):
     for tf, secs in [("1m", 60), ("5m", 300), ("15m", 900), ("1h", 3600), ("4h", 14400)]:
         eng.cfg.timeframe = tf
         assert eng.candle_seconds() == secs
+
+
+# ── Auth failures must not loop forever ──────────────────────────────────────
+
+def _auth_engine():
+    from bot.engine import ScalpingEngine
+    return object.__new__(ScalpingEngine)
+
+
+def test_auth_error_codes_are_recognised():
+    """
+    -2015 means the key is rejected for this action. It will never clear by
+    retrying, so it must be distinguished from a transient failure.
+    """
+    eng = _auth_engine()
+    assert eng._is_auth_error('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}')
+    assert eng._is_auth_error('{"code":-2014}')
+    assert not eng._is_auth_error('binance {"code":-1121,"msg":"Invalid symbol."}')
+    assert not eng._is_auth_error("connection reset by peer")
+
+
+def test_auth_error_is_flagged_for_the_caller():
+    eng = _auth_engine()
+    eng._note_auth_error('{"code":-2015}')
+    assert eng._last_order_error_is_auth is True
+    eng._note_auth_error("timeout")
+    assert eng._last_order_error_is_auth is False
+
+
+def test_backoff_is_not_active_by_default():
+    eng = _auth_engine()
+    assert eng.sell_backoff_active("SOL/USDT") is False
+
+
+def test_backoff_becomes_active_once_set():
+    import time as _t
+    eng = _auth_engine()
+    eng._auth_state()
+    eng._sell_backoff_until["SOL/USDT"] = _t.time() + 60
+    assert eng.sell_backoff_active("SOL/USDT") is True
+
+
+def test_expired_backoff_is_not_active():
+    import time as _t
+    eng = _auth_engine()
+    eng._auth_state()
+    eng._sell_backoff_until["SOL/USDT"] = _t.time() - 1
+    assert eng.sell_backoff_active("SOL/USDT") is False
+
+
+# ── Spot must use Demo Trading, not the legacy sandbox ───────────────────────
+
+def test_demo_trading_gives_the_demo_spot_endpoint():
+    """
+    set_sandbox_mode points spot at testnet.binance.vision — a separate
+    platform with its own keys, which rejects Demo Trading keys with -2015.
+    enable_demo_trading points it at demo-api.binance.com, which accepts the
+    same keys the futures side already uses.
+    """
+    import ccxt
+    ex = ccxt.binance({"options": {"defaultType": "spot"}})
+    ex.enable_demo_trading(True)
+    assert "demo-api.binance.com" in ex.urls["api"]["private"]
+    assert "testnet.binance.vision" not in ex.urls["api"]["private"]
+
+
+def test_sandbox_mode_points_somewhere_else_entirely():
+    import ccxt
+    ex = ccxt.binance({"options": {"defaultType": "spot"}})
+    ex.set_sandbox_mode(True)
+    assert "testnet.binance.vision" in ex.urls["api"]["private"]
+
+
+def test_demo_futures_and_spot_share_one_host_family():
+    """One set of keys, both markets — which is why a single flag is enough."""
+    import ccxt
+    ex = ccxt.binanceusdm()
+    demo = ex.urls["demo"]
+    assert "demo-api.binance.com" in demo["private"]
+    assert "demo-fapi.binance.com" in demo["fapiPrivate"]

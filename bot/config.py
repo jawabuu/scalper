@@ -94,6 +94,7 @@ def _resolve_credentials() -> tuple[bool, str, str]:
 class BotConfig:
     # ── Credentials (resolved together so suffix is consistent) ────────
     testnet: bool = field(default_factory=lambda: _resolve_credentials()[0])
+
     api_key: str = field(default_factory=lambda: _resolve_credentials()[1])
     api_secret: str = field(default_factory=lambda: _resolve_credentials()[2])
 

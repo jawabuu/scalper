@@ -41,6 +41,12 @@ class ScalpingEngine:
         self._symbol_cache: list[str] = []
         self._cache_ts: float = 0
         self._cooldown: dict[str, float] = {}  # symbol → earliest re-entry timestamp
+        # Auth/permission failures are permanent, not transient. Tracked so the
+        # bot alerts once and backs off instead of looping an error every cycle.
+        self._sell_failures: dict[str, int] = {}
+        self._auth_alerted: set = set()
+        self._sell_backoff_until: dict[str, float] = {}
+        self._last_order_error_is_auth: bool = False
         self.kill_switch: bool = False
         # Trailing-stop activation threshold — in-memory only, UI-controlled.
         # enabled=False means immediate trailing (original behaviour).
@@ -139,10 +145,29 @@ class ScalpingEngine:
         exchange = ccxt.binance(params)
 
         if self.cfg.testnet:
-            exchange.set_sandbox_mode(True)
-            log.info("🟡 Testnet mode active — endpoint: testnet.binance.vision")
+            # Demo Trading, NOT the old sandbox.
+            #
+            # set_sandbox_mode(True) points spot at testnet.binance.vision --
+            # the legacy Spot testnet, a separate platform with its own keys.
+            # Demo Trading keys are rejected there with -2015, which reads as a
+            # permissions problem but is simply the wrong host.
+            #
+            # enable_demo_trading(True) points spot at demo-api.binance.com and
+            # futures at demo-fapi.binance.com, both of which accept the SAME
+            # Demo Trading keys. That is the environment the futures side is
+            # already using, so this makes spot match it.
+            try:
+                exchange.enable_demo_trading(True)
+                log.info("🟡 Spot endpoint: DEMO — demo-api.binance.com "
+                         "(same keys as futures demo)")
+            except Exception as e:
+                log.error(
+                    f"Could not enable spot demo trading ({e}); falling back to "
+                    f"the legacy sandbox at testnet.binance.vision, which needs "
+                    f"its OWN keys and will reject demo keys with -2015.")
+                exchange.set_sandbox_mode(True)
         else:
-            log.info("🔴 LIVE trading mode active")
+            log.info("🔴 Spot endpoint: LIVE")
 
         exchange.load_markets()
         return exchange
@@ -826,13 +851,58 @@ class ScalpingEngine:
             # May already be filled or cancelled — log and move on
             log.debug(f"Order cancel for {symbol} id={list_id}: {e}")
 
+    # Binance codes that mean "this will never work as configured".
+    AUTH_ERROR_CODES = ("-2015", "-2014", "-1022", "-2008")
+    # Class-level defaults: some call paths build the engine with
+    # object.__new__, so these must exist without __init__ having run.
+    _last_order_error_is_auth = False
+    AUTH_FAIL_ALERT_AFTER = 3
+    AUTH_FAIL_BACKOFF_S = 300.0
+
+    def _auth_state(self) -> tuple:
+        """Lazily create the per-instance auth-tracking containers."""
+        if not hasattr(self, "_sell_failures"):
+            self._sell_failures = {}
+        if not hasattr(self, "_auth_alerted"):
+            self._auth_alerted = set()
+        if not hasattr(self, "_sell_backoff_until"):
+            self._sell_backoff_until = {}
+        return self._sell_failures, self._auth_alerted, self._sell_backoff_until
+
+    def _is_auth_error(self, err) -> bool:
+        text = str(err)
+        return any(code in text for code in self.AUTH_ERROR_CODES)
+
+    def _note_auth_error(self, err) -> bool:
+        """Record whether the most recent exchange error was an auth failure."""
+        self._last_order_error_is_auth = self._is_auth_error(err)
+        return self._last_order_error_is_auth
+
+    def _note_auth_failure(self, action: str, err: str) -> bool:
+        """
+        True if this error is an auth/permission failure, which is logged once
+        per symbol rather than every cycle.
+        """
+        if not self._note_auth_error(err):
+            return False
+        log.error(f"AUTH FAILURE on {action}: {err}")
+        return True
+
+    def sell_backoff_active(self, symbol: str) -> bool:
+        _, _, backoff = self._auth_state()
+        until = backoff.get(symbol)
+        return bool(until and time.time() < until)
+
     def place_sell(self, symbol: str, qty: float) -> dict | None:
         try:
             order = self.exchange.create_market_sell_order(symbol, qty)
             log.info(f"SELL {symbol} qty={qty} id={order.get('id','?')}")
             return order
         except Exception as e:
-            log.error(f"Sell order failed for {symbol}: {e}")
+            if self._note_auth_failure(f"sell {symbol}", str(e)):
+                pass                      # already surfaced; do not spam
+            else:
+                log.error(f"Sell order failed for {symbol}: {e}")
             return None  # caller checks for None to detect failure
 
     # ------------------------------------------------------------------
@@ -947,6 +1017,7 @@ class ScalpingEngine:
                 pos.qty = actual_qty
                 self.positions[sym] = pos  # persist corrected qty
         except Exception as e:
+            self._note_auth_error(e)
             log.warning(f"Could not verify sell qty for {sym}: {e} — using stored qty")
             actual_qty = pos.qty
 
@@ -954,12 +1025,39 @@ class ScalpingEngine:
         order = self.place_sell(sym, sell_qty)
 
         if order is None:
-            # Sell failed — keep position in store, retry next cycle
+            # Sell failed — keep the position, but distinguish a transient
+            # failure from a permanent one. An auth or permission error (-2015,
+            # -2014, -1022) will NEVER clear by retrying: retrying it every
+            # cycle produces an endless error loop that buries real problems in
+            # the log while the position stays open and unsellable.
+            fails, alerted, backoff = self._auth_state()
+            n = fails.get(sym, 0) + 1
+            fails[sym] = n
+            auth = self._last_order_error_is_auth
+            if auth and n >= self.AUTH_FAIL_ALERT_AFTER:
+                if sym not in alerted:
+                    alerted.add(sym)
+                    log.error(
+                        f"CANNOT SELL {sym}: the API key is rejected for SPOT "
+                        f"actions (-2015). This is a permission or IP-whitelist "
+                        f"problem, not a transient one — retrying will not fix "
+                        f"it. The position is OPEN and unsellable by the bot; "
+                        f"close it on Binance, and check that the key has Spot "
+                        f"trading enabled and your server IP is whitelisted."
+                    )
+                # Back off so the loop does not flood the log or the API.
+                backoff[sym] = time.time() + self.AUTH_FAIL_BACKOFF_S
+                return
             log.error(
-                f"Sell FAILED for {sym} — position kept, will retry next cycle. "
-                f"Check Binance manually if this persists."
+                f"Sell FAILED for {sym} (attempt {n}) — position kept, will "
+                f"retry next cycle. Check Binance manually if this persists."
             )
             return
+
+        fails, alerted, backoff = self._auth_state()
+        fails.pop(sym, None)
+        alerted.discard(sym)
+        backoff.pop(sym, None)
 
         pnl_pct  = (price - pos.entry_price) / pos.entry_price * 100
         pnl_usdt = (price - pos.entry_price) * sell_qty
