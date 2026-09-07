@@ -2255,7 +2255,12 @@ def test_unknown_order_is_a_successful_cancel():
     assert not g._order_already_gone('{"code":-1021,"msg":"Timestamp ahead."}')
 
 
-def test_cancel_reports_success_when_order_already_gone():
+def test_minus_2011_is_not_treated_as_a_successful_cancel():
+    """
+    -2011 was assumed to mean the order is gone. An order that was STILL
+    RESTING on the exchange returned -2011 to a cancel, so treating it as
+    success dropped it from tracking and orphaned it permanently.
+    """
     from bot.futures_guard import FuturesPosition
 
     class GoneEx(FakeExchange):
@@ -2264,11 +2269,10 @@ def test_cancel_reports_success_when_order_already_gone():
 
     g = _guardian(GoneEx())
     pos = FuturesPosition("CYS/USDT:USDT", "long", 1.0, 10.0, 20, 100.0)
-    assert g._cancel_stop(pos, "1000000196042886") is True
+    assert g._cancel_stop(pos, "1000000196042886") is False
 
 
-def test_gone_order_is_dropped_from_tracking():
-    """Otherwise it is retried every cycle for the life of the position."""
+def test_failed_cancel_is_queued_for_retry():
     from bot.futures_guard import FuturesPosition
 
     class GoneEx(FakeExchange):
@@ -2276,10 +2280,9 @@ def test_gone_order_is_dropped_from_tracking():
             raise RuntimeError('{"code":-2011}')
 
     g = _guardian(GoneEx())
-    g._all_stop_ids["CYS/USDT:USDT"] = ["old-1", "current-2"]
     pos = FuturesPosition("CYS/USDT:USDT", "long", 1.0, 10.0, 20, 100.0)
-    g._cancel_superseded_stops(pos, keep="current-2")
-    assert g._all_stop_ids["CYS/USDT:USDT"] == ["current-2"]
+    g._cancel_stop(pos, "old-1")
+    assert "old-1" in g._pending_cancels.get("CYS/USDT:USDT", [])
 
 
 def test_genuine_cancel_failure_is_still_reported():
@@ -2346,3 +2349,65 @@ def test_a_non_empty_reply_resets_the_counter():
     for _ in range(8):
         g._all_open_orders_raw()
     assert g._empty_listings == 0
+
+
+# ── Pending-cancel queue ─────────────────────────────────────────────────────
+
+class _FlakyCancelOnceEx(FakeExchange):
+    """Cancels fail until `heal` is set — mimics an unreliable venue."""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.heal = False
+        self.cancelled = []
+    def cancel_order(self, order_id, symbol):
+        if not self.heal:
+            raise RuntimeError('{"code":-2011,"msg":"Unknown order sent."}')
+        self.cancelled.append((symbol, str(order_id)))
+
+
+def test_queue_survives_the_position_closing():
+    """
+    The position is gone but the order may not be, and with order listing
+    unavailable nothing else will ever discover it.
+    """
+    fake = _FlakyCancelOnceEx(positions=[_raw_pos("long", entry=1.0)], price=1.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert g._pending_cancels, "nothing queued after a failed close-time cancel"
+
+
+def test_drain_retries_and_succeeds_later():
+    fake = _FlakyCancelOnceEx(positions=[_raw_pos("long", entry=1.0)], price=1.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    fake.heal = True
+    assert g.drain_pending_cancels() >= 1
+    assert not g._pending_cancels
+
+
+def test_drain_gives_up_after_the_attempt_limit():
+    fake = _FlakyCancelOnceEx(price=1.0)
+    g = _guardian(fake)
+    g._pending_cancels["X/USDT:USDT"] = ["stuck-1"]
+    for _ in range(g.MAX_CANCEL_ATTEMPTS + 5):
+        g.drain_pending_cancels()
+    assert g._cancel_attempts["stuck-1"] >= g.MAX_CANCEL_ATTEMPTS
+
+
+def test_queue_is_persisted_and_restored():
+    import os
+    import tempfile
+    from bot import futures_state
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    futures_state.save(path, states={}, pos_meta={}, closed_trades=[],
+                       pending_cancels={"REZ/USDT:USDT": ["1000000196098048"]})
+    g = _guardian(FakeExchange())
+    g.state_owner = ""
+    g.load_state(path)
+    assert g._pending_cancels["REZ/USDT:USDT"] == ["1000000196098048"]

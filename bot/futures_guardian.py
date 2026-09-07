@@ -229,6 +229,8 @@ class FuturesGuardian:
         self._capped_stop_reported: dict[str, float] = {}
         self._listing_warned: bool = False
         self._empty_listings: int = 0
+        self._pending_cancels: dict[str, list] = {}
+        self._cancel_attempts: dict[str, int] = {}
         self._last_wide_probe: float = 0.0
         self._missing_counts: dict[str, int] = {}
         self._stop_source_reported: set = set()
@@ -349,6 +351,9 @@ class FuturesGuardian:
     RANGE_CACHE_TTL_S = 300.0
     # Consecutive cycles a position must be absent before it counts as closed.
     MISSING_CONFIRMATIONS = 3
+    # Cancels are retried well past the position's life: an order that reports
+    # -2011 may still be resting, so give it many chances before abandoning it.
+    MAX_CANCEL_ATTEMPTS = 60
     # Give up on the expensive account-wide listing after this many empties,
     # then re-probe on a slow clock in case the environment starts reporting.
     EMPTY_LISTING_LIMIT = 5
@@ -767,6 +772,58 @@ class FuturesGuardian:
         t = str(err).lower()
         return "-2011" in t or "unknown order" in t
 
+    def _queue_pending_cancel(self, symbol: str, order_id: str):
+        """
+        Remember a cancel that did not take, so it survives the position
+        closing and a container restart.
+
+        Neither order listing nor the cancel result is trustworthy on this
+        venue, so the only durable record of "this order should not exist" is
+        the bot's own queue.
+        """
+        with self._lock:
+            q = self._pending_cancels.setdefault(symbol, [])
+            if order_id not in q:
+                q.append(order_id)
+
+    def _clear_pending_cancel(self, symbol: str, order_id: str):
+        with self._lock:
+            q = self._pending_cancels.get(symbol) or []
+            self._pending_cancels[symbol] = [i for i in q if i != order_id]
+            if not self._pending_cancels[symbol]:
+                self._pending_cancels.pop(symbol, None)
+        self._cancel_attempts.pop(order_id, None)
+
+    def drain_pending_cancels(self) -> int:
+        """
+        Retry every cancel that has not yet succeeded, including for symbols
+        with no open position. Runs on the sweep clock.
+        """
+        with self._lock:
+            work = {k: list(v) for k, v in self._pending_cancels.items()}
+        done = 0
+        for symbol, ids in work.items():
+            for oid in ids:
+                n = self._cancel_attempts.get(oid, 0)
+                if n >= self.MAX_CANCEL_ATTEMPTS:
+                    continue
+                try:
+                    self.exchange.cancel_order(oid, symbol)
+                    log.warning(f"{symbol}: pending cancel of {oid} SUCCEEDED "
+                                f"on attempt {n + 1}")
+                    self._record(symbol, "pending_cancel_ok", f"id={oid}")
+                    self._clear_pending_cancel(symbol, oid)
+                    done += 1
+                except Exception as e:
+                    self._cancel_attempts[oid] = n + 1
+                    if self._cancel_attempts[oid] == self.MAX_CANCEL_ATTEMPTS:
+                        log.error(
+                            f"{symbol}: giving up on cancelling {oid} after "
+                            f"{self.MAX_CANCEL_ATTEMPTS} attempts ({e}). If it "
+                            f"is still on the exchange, cancel it by hand.")
+                        self._record(symbol, "cancel_abandoned", f"id={oid}")
+        return done
+
     def _cancel_stop(self, pos: FuturesPosition, order_id: str) -> bool:
         """
         Cancel a stop the guardian is managing.
@@ -779,15 +836,23 @@ class FuturesGuardian:
         try:
             self.exchange.cancel_order(order_id, pos.symbol)
             log.info(f"Cancelled superseded stop {order_id} on {pos.symbol}")
+            self._clear_pending_cancel(pos.symbol, order_id)
             return True
         except Exception as e:
-            if self._order_already_gone(e):
-                # Gone is the outcome we wanted. Report success so callers stop
-                # tracking it instead of retrying forever.
-                log.info(f"stop {order_id} on {pos.symbol} was already gone "
-                         f"(-2011) — nothing to cancel")
-                return True
-            log.warning(f"cancel {order_id} on {pos.symbol} failed: {e}")
+            # -2011 "Unknown order sent" is NOT proof the order is gone here.
+            # An order that was still resting on the exchange returned -2011 to
+            # a cancel, so treating it as success dropped it from tracking and
+            # orphaned it permanently. Count the attempts instead and keep it
+            # queued; a retry costs one request and may succeed.
+            n = self._cancel_attempts.get(order_id, 0) + 1
+            self._cancel_attempts[order_id] = n
+            gone = self._order_already_gone(e)
+            if n == 1 or n % 20 == 0:
+                log.warning(
+                    f"cancel {order_id} on {pos.symbol} failed (attempt {n}): {e}"
+                    + ("  [-2011 is not reliable on this venue; still queued]"
+                       if gone else ""))
+            self._queue_pending_cancel(pos.symbol, order_id)
             return False
 
     # ── per-position management ─────────────────────────────────────────────
@@ -1085,6 +1150,16 @@ class FuturesGuardian:
                 for oid in ids:
                     if oid not in cur:
                         cur.append(oid)
+        with self._lock:
+            for sym, ids in (data.get("pending_cancels") or {}).items():
+                q = self._pending_cancels.setdefault(sym, [])
+                for oid in ids:
+                    if oid not in q:
+                        q.append(oid)
+        if data.get("pending_cancels"):
+            n = sum(len(v) for v in data["pending_cancels"].values())
+            log.warning(f"restored {n} order(s) still awaiting cancellation "
+                        f"from a previous run — they will be retried")
         if data.get("stop_ids"):
             log.info(f"restored {sum(len(v) for v in data['stop_ids'].values())} "
                      f"tracked stop id(s) across "
@@ -1136,9 +1211,11 @@ class FuturesGuardian:
         placed = entry.export_placed_orders() if entry is not None else {}
         with self._lock:
             stop_ids = {k: list(v) for k, v in self._all_stop_ids.items()}
+            pending = {k: list(v) for k, v in self._pending_cancels.items()}
         futures_state.save(self.state_path, states=states, pos_meta=meta,
                            closed_trades=trades, owner=self.state_owner,
                            placed_orders=placed, stop_ids=stop_ids,
+                           pending_cancels=pending,
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -1219,7 +1296,10 @@ class FuturesGuardian:
             if st.native_trail_id:
                 ids.add(st.native_trail_id)
             for oid in ids:
-                self._cancel_orphan_stop(sym, oid)
+                if not self._cancel_orphan_stop(sym, oid):
+                    # Keep it queued: the position is gone but the order may
+                    # not be, and nothing else will ever discover it.
+                    self._queue_pending_cancel(sym, oid)
 
         for pos in positions:
             try:
@@ -1241,6 +1321,11 @@ class FuturesGuardian:
             # Sweep for orders the bot has no record of. Anything placed before
             # tracking existed rests indefinitely and can fill hours later.
             sweep_due = self._untracked_due()
+            if self._pending_cancels:
+                try:
+                    self.drain_pending_cancels()
+                except Exception as e:
+                    log.warning(f"pending-cancel drain failed: {e}")
             if self.sweep_orphan_stops and sweep_due:
                 try:
                     self.reap_orphan_stops()
@@ -1832,25 +1917,31 @@ class FuturesGuardian:
             log.warning(f"orphan-stop sweep cancelled {len(cancelled)} order(s)")
         return cancelled
 
-    def _cancel_orphan_stop(self, symbol: str, order_id: str):
+    def _cancel_orphan_stop(self, symbol: str, order_id: str) -> bool:
         """
-        Cancel a stop left behind by a closed position.
+        Cancel a stop left behind by a closed position. Returns True only on a
+        confirmed cancel.
 
-        The order has usually already triggered (that is why the position
-        closed), so a "not found / already filled" error is the normal case and
-        is logged quietly rather than treated as a failure.
+        The order has often already triggered (that is why the position
+        closed), so an error here is common. But -2011 has been observed on
+        orders that were STILL RESTING, so a failure is queued for retry rather
+        than assumed benign — nothing else will ever discover it.
         """
         if self.dry_run:
             log.info(f"[DRY RUN] would cancel orphaned stop {order_id} on {symbol}")
-            return
+            return True
         try:
             self.exchange.cancel_order(order_id, symbol)
             log.info(f"Cancelled orphaned stop {order_id} on {symbol} "
                      f"(position already closed)")
             self._record(symbol, "orphan_stop_cancelled", f"id={order_id}")
+            return True
         except Exception as e:
-            # Expected when the stop is what closed the position.
+            # Often the stop is what closed the position — but -2011 has been
+            # seen on orders still resting, so report failure and let the
+            # caller queue it.
             log.debug(f"orphaned stop {order_id} on {symbol} not cancellable: {e}")
+            return False
 
     def closed_trades(self) -> list[dict]:
         with self._lock:

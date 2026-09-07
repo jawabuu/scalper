@@ -71,7 +71,8 @@ def identity(demo: bool, account_hint: str = "") -> str:
 def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
          safety: dict | None = None, owner: str = "",
          placed_orders: dict | None = None,
-         stop_ids: dict | None = None) -> bool:
+         stop_ids: dict | None = None,
+         pending_cancels: dict | None = None) -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
@@ -105,6 +106,10 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         # since the order listing cannot see conditional orders either, a
         # forgotten stop became permanently invisible and uncancellable.
         "stop_ids": stop_ids or {},
+        # Cancels that have not yet succeeded. Neither order listing nor the
+        # cancel result is trustworthy on demo, so this queue is the only
+        # durable record that an order should not exist.
+        "pending_cancels": pending_cancels or {},
     }
     return _atomic_write(path, payload)
 
