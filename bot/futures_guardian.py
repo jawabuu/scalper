@@ -832,6 +832,12 @@ class FuturesGuardian:
         # continuously, so the guardian must NOT keep repositioning stops — it
         # only watches. This is what removes the polling gap.
         if state.native_trail_id:
+            # Binance owns the trail, so no repositioning — but a fixed stop
+            # whose cancel FAILED at arming would otherwise sit untouched until
+            # the position closed, still able to fire at a level the trade has
+            # long left behind. Retry the sweep each cycle; it is a no-op once
+            # nothing is superseded.
+            self._cancel_superseded_stops(pos, keep=state.native_trail_id)
             with self._lock:
                 self._states[pos.symbol] = state
             return
@@ -856,9 +862,18 @@ class FuturesGuardian:
                 # Place-then-cancel, same as everywhere else: the trail is
                 # resting before the fixed stop is removed.
                 if prev_order_id:
-                    self._cancel_stop(pos, prev_order_id)
+                    if self._cancel_stop(pos, prev_order_id):
+                        # Drop it from the sweep list so it is not re-cancelled
+                        # on every subsequent cycle.
+                        self._all_stop_ids[pos.symbol] = [
+                            i for i in self._all_stop_ids.get(pos.symbol, [])
+                            if i != prev_order_id]
                 state.native_trail_id = trail_id
                 state.stop_order_id = None
+                # Track the trail too, so close-time cleanup cancels it.
+                self._all_stop_ids.setdefault(pos.symbol, [])
+                if trail_id not in self._all_stop_ids[pos.symbol]:
+                    self._all_stop_ids[pos.symbol].append(trail_id)
                 # Report the callbackRate actually sent, not the raw config
                 # value — printing trail_callback_pct made a correctly-placed
                 # 0.25% trail look like a 1.0% one.

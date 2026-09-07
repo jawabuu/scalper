@@ -1798,3 +1798,73 @@ def test_native_trail_id_also_cleaned_up_on_close():
     for _ in range(g.MISSING_CONFIRMATIONS):
         g.run_cycle()
     assert any(oid == trail_id for oid, _ in fake.cancelled)
+
+
+# ── A failed cancel at arming must be retried, not deferred to close ─────────
+
+class _FailFirstCancelEx(FakeExchange):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.fail_next_cancel = True
+    def cancel_order(self, order_id, symbol):
+        if self.fail_next_cancel:
+            self.fail_next_cancel = False
+            raise RuntimeError("cancel failed at arming")
+        return FakeExchange.cancel_order(self, order_id, symbol)
+
+
+def _armed_cfg():
+    from bot.futures_guard import GuardConfig
+    return GuardConfig(initial_stop_roi=5, arm_roi=5, callback_roi=3,
+                       trail_callback_roi=3.0, use_native_trail=True,
+                       atr_stop_mult=0.0)
+
+
+def _arm(fake):
+    g = _guardian(fake, cfg=_armed_cfg())
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 8.0)
+    g.run_cycle()
+    return g
+
+
+def test_fixed_stop_orphaned_at_arming_is_retried_next_cycle():
+    """
+    manage_position returned early once the native trail was set, so a fixed
+    stop whose cancel failed at arming sat untouched until the position closed
+    — still able to fire at a level the trade had left behind.
+    """
+    fake = _FailFirstCancelEx(positions=[_raw_pos("long", entry=0.23411)],
+                              price=0.23411)
+    g = _arm(fake)
+    assert fake.cancelled == [], "cancel was expected to fail at arming"
+    g.run_cycle()
+    assert fake.cancelled, "orphaned fixed stop was not retried while armed"
+
+
+def test_retry_does_not_cancel_the_active_trail():
+    fake = _FailFirstCancelEx(positions=[_raw_pos("long", entry=0.23411)],
+                              price=0.23411)
+    g = _arm(fake)
+    trail_id = g._states["DOGE/USDT:USDT"].native_trail_id
+    for _ in range(3):
+        g.run_cycle()
+    assert trail_id not in [oid for oid, _ in fake.cancelled]
+    assert g._states["DOGE/USDT:USDT"].native_trail_id == trail_id
+
+
+def test_sweep_is_a_noop_when_nothing_is_superseded():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23411)], price=0.23411)
+    g = _arm(fake)
+    n = len(fake.cancelled)
+    for _ in range(3):
+        g.run_cycle()
+    assert len(fake.cancelled) == n
+
+
+def test_trail_id_is_tracked_for_close_cleanup():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23411)], price=0.23411)
+    g = _arm(fake)
+    trail_id = g._states["DOGE/USDT:USDT"].native_trail_id
+    assert trail_id in g._all_stop_ids.get("DOGE/USDT:USDT", [])
