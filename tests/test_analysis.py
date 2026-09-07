@@ -156,3 +156,39 @@ def test_trough_note_explains_an_empty_dataset():
 def test_trough_note_reports_the_deepest_dip():
     trades = [_w(29.0, 41.0, -3.2), _w(24.2, 30.3, -16.2)]
     assert "-16.2" in analyse(trades)["trough_note"]
+
+
+# ── Fees must not be invisible ───────────────────────────────────────────────
+
+def test_expectancy_prefers_the_net_figure():
+    """
+    Binance's realizedPnl excludes commission, so a gross expectancy reads
+    positive while the wallet falls — +60 USDT of P&L against a 20 USDT wallet
+    loss, the difference being 80 USDT of fees.
+    """
+    trades = [{"side": "long", "final_roi": 5.0, "peak_roi": 8.0,
+               "realised_pnl_usdt": 6.0, "fees_usdt": 4.0,
+               "net_pnl_usdt": 2.0, "entry_context": {}} for _ in range(10)]
+    r = analyse(trades)
+    assert r["overall"]["expectancy_usdt"] == pytest.approx(2.0)
+    assert r["overall"]["total_fees"] == pytest.approx(40.0)
+
+
+def test_falls_back_to_gross_when_net_is_absent():
+    trades = [{"side": "long", "final_roi": 5.0, "peak_roi": 8.0,
+               "realised_pnl_usdt": 6.0, "entry_context": {}} for _ in range(10)]
+    assert analyse(trades)["overall"]["expectancy_usdt"] == pytest.approx(6.0)
+
+
+def test_fee_note_explains_the_discrepancy():
+    trades = [{"side": "long", "final_roi": 5.0, "peak_roi": 8.0,
+               "realised_pnl_usdt": 6.0, "fees_usdt": 4.0,
+               "net_pnl_usdt": 2.0, "entry_context": {}} for _ in range(12)]
+    notes = " ".join(analyse(trades)["notes"])
+    assert "Fees so far" in notes and "gross" in notes
+
+
+def test_no_fee_note_when_fees_are_unknown():
+    trades = [{"side": "long", "final_roi": 5.0, "peak_roi": 8.0,
+               "realised_pnl_usdt": 6.0, "entry_context": {}} for _ in range(12)]
+    assert not any("Fees so far" in n for n in analyse(trades)["notes"])

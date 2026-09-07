@@ -36,7 +36,20 @@ def _roi(t: dict) -> float | None:
 
 
 def _realised(t: dict) -> float | None:
-    v = t.get("realised_pnl_usdt")
+    """
+    Prefer the NET figure. Binance's realizedPnl excludes commission, so a
+    gross-only expectancy can read positive while the wallet falls — which is
+    exactly what happened: +60 USDT of P&L against a 20 USDT wallet loss, the
+    difference being 80 USDT of fees.
+    """
+    v = t.get("net_pnl_usdt")
+    if v is None:
+        v = t.get("realised_pnl_usdt")
+    return None if v is None else float(v)
+
+
+def _fees(t: dict) -> float | None:
+    v = t.get("fees_usdt")
     return None if v is None else float(v)
 
 
@@ -73,6 +86,9 @@ def group_stats(trades: list[dict]) -> dict:
         "expectancy_usdt": (round(sum(realised) / len(realised), 4)
                             if realised else None),
         "total_realised": round(sum(realised), 2) if realised else None,
+        "total_fees": (round(sum(f for f in (_fees(t) for t in scored)
+                                 if f is not None), 2)
+                       if any(_fees(t) is not None for t in scored) else None),
         "best_roi": round(max(rois), 2),
         "worst_roi": round(min(rois), 2),
     }
@@ -172,6 +188,12 @@ def analyse(trades: list[dict]) -> dict:
         notes.append(
             "Win rate is at or above 50% but expectancy is negative — the losers "
             "are bigger than the winners. That is an exit problem, not an entry one.")
+    if overall.get("total_fees"):
+        notes.append(
+            f"Fees so far: {overall['total_fees']:.2f} USDT across "
+            f"{overall['n']} trades. Expectancy below is NET of fees; the "
+            f"exchange's own P&L figure is gross, which is why a positive "
+            f"P&L can sit alongside a falling wallet balance.")
     if overall.get("avg_giveback") and overall["avg_giveback"] > 10:
         notes.append(
             f"Average give-back is {overall['avg_giveback']:.1f}% ROI from peak. "

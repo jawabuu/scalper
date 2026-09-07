@@ -231,6 +231,7 @@ class FuturesGuardian:
         self._empty_listings: int = 0
         self._pending_cancels: dict[str, list] = {}
         self._cancel_attempts: dict[str, int] = {}
+        self._last_trade_fees: float | None = None
         self._last_wide_probe: float = 0.0
         self._missing_counts: dict[str, int] = {}
         self._stop_source_reported: set = set()
@@ -1365,7 +1366,7 @@ class FuturesGuardian:
             move = ((last - entry) / entry) if side == "long" else ((entry - last) / entry)
             computed = move * notional
 
-        # Binance's realizedPnl is more accurate (it includes fees), so prefer
+        # Binance's realizedPnl is the exchange's own figure, so prefer
         # it — but only when it AGREES IN SIGN with the direction-aware figure.
         # A short that closed in profit was being reported as a loss because the
         # exchange value was taken on trust.
@@ -1389,6 +1390,19 @@ class FuturesGuardian:
 
             pnl = sum(float((t.get("info") or {}).get("realizedPnl") or 0)
                       for t in scoped)
+            # Binance's realizedPnl EXCLUDES commission — that is a separate
+            # field on the same fill. Summing it alone gives a GROSS figure,
+            # which is why a positive total P&L can sit alongside a falling
+            # wallet balance. Capture the commission so net is reportable.
+            fees = 0.0
+            for t in scoped:
+                info = t.get("info") or {}
+                try:
+                    fees += abs(float(info.get("commission") or
+                                      (t.get("fee") or {}).get("cost") or 0))
+                except (TypeError, ValueError):
+                    pass
+            self._last_trade_fees = round(fees, 6)
             if scoped and not pnl:
                 log.debug(f"{symbol}: {len(scoped)} fill(s) in scope, all zero realisedPnl")
             if pnl:
