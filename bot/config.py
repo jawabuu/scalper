@@ -310,6 +310,9 @@ class BotConfig:
     # Ceiling for longs. 0 disables it (the previous behaviour, where longs
     # inherited the scanner's much wider band).
     auto_long_rsi_max: float = field(default_factory=lambda: _env_float("AUTO_LONG_RSI_MAX", 0.0))
+    # "all", "long" or "short" — disable one side without redeploying.
+    auto_directions: str = field(default_factory=lambda: (
+        _env("AUTO_DIRECTIONS", "all").strip().lower() or "all"))
     auto_short_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MIN", 78.0))
     auto_callback_ratio: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_RATIO", 0.5))
     auto_callback_atr_mult: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_ATR_MULT", 0.75))

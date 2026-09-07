@@ -887,6 +887,9 @@
       <div class="stat"><div class="stat-label">Total trades</div><div class="stat-value" id="s-total">—</div></div>
       <div class="stat"><div class="stat-label">Win rate</div><div class="stat-value" id="s-winrate">—</div></div>
       <div class="stat"><div class="stat-label">Total P&L</div><div class="stat-value" id="s-pnl">—</div><div class="stat-sub" id="s-pnl-usdt"></div></div>
+      <div class="stat" id="stat-fees-card"><div class="stat-label">Fees paid</div>
+        <div class="stat-value neg" id="s-fees">—</div>
+        <div class="stat-sub" id="s-fees-sub">commission</div></div>
       <div class="stat"><div class="stat-label">Avg trade</div><div class="stat-value" id="s-avg">—</div></div>
     </div>
 
@@ -968,6 +971,13 @@
             <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
           <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
             <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">trade&nbsp;</span>
+            <select class="pb-input" id="ar-dirs" style="width:82px"
+                    onchange="onAutoRuleValue('directions', this.value)">
+              <option value="all">both</option>
+              <option value="long">long only</option>
+              <option value="short">short only</option>
+            </select></span>
           <span class="pb-setting" style="border:none"><span class="k">max trades/h&nbsp;</span>
             <input type="number" class="pb-input" id="ar-tph" step="1" title="0 disables the rate cap" onchange="onAutoRule('max_trades_per_hour','ar-tph')"></span>
           <span class="scan-note" id="auto-rule-msg"></span>
@@ -2489,6 +2499,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let _autoEditing = false;
 
+// Same as onAutoRule but for controls whose value is not numeric.
+async function onAutoRuleValue(key, value) {
+  try {
+    const r = await api('/api/auto-trade', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rules: {[key]: value}}),
+    });
+    if (r && r.errors && r.errors.length) alert(r.errors.join('\n'));
+    refreshAuto();
+  } catch (e) { console.error(e); }
+}
+
 async function onAutoRule(key, elId) {
   const el = document.getElementById(elId);
   const v = parseFloat(el.value);
@@ -2526,6 +2548,8 @@ function fillAutoRules(c) {
   set('ar-atr', c.callback_atr_mult);
   set('ar-cd', c.cooldown_override_rsi_delta);
   set('ar-tph', c.max_trades_per_hour);
+  const dirs = document.getElementById('ar-dirs');
+  if (dirs && c.directions) dirs.value = c.directions;
 }
 
 
@@ -2583,6 +2607,21 @@ async function refreshAnalysis() {
     const o = a.overall || {};
     setEl('an-meta', o.n ? `(${o.n} closed trades)` : '(no closed trades yet)');
     setEl('an-notes', (a.notes || []).map(n => `<div class="an-note">${n}</div>`).join(''));
+
+    // Fees are gross-vs-net: the exchange P&L figure excludes commission, so a
+    // positive total can sit alongside a falling wallet. Show it plainly.
+    const fees = o.total_fees;
+    const feeCard = document.getElementById('stat-fees-card');
+    if (feeCard) {
+      if (fees === null || fees === undefined) {
+        setEl('s-fees', '—');
+        setEl('s-fees-sub', 'no fee data yet');
+      } else {
+        setEl('s-fees', '-$' + Number(fees).toFixed(2));
+        const per = o.n ? (fees / o.n) : 0;
+        setEl('s-fees-sub', `$${per.toFixed(2)}/trade · net of fees below`);
+      }
+    }
 
     setEl('an-overall', o.n ? `<table><thead><tr><th></th><th class="num">n</th>
       <th class="num">win</th><th class="num">avg ROI</th><th class="num">avg peak</th>

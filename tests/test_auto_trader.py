@@ -517,3 +517,56 @@ def test_ceiling_is_live_editable():
     a = _trader()
     applied, errors = a.update_rules({"long_rsi_max": 52})
     assert not errors and a.cfg.long_rsi_max == 52
+
+
+# ── Direction lever ──────────────────────────────────────────────────────────
+
+def _dir_cfg(mode):
+    return AutoTradeConfig(directions=mode, long_rsi_min=45, long_rsi_max=52,
+                           short_rsi_min=75, max_dist_to_extreme_pct=3.0,
+                           required_strength_sweeps=2)
+
+
+def _dir_row(side, rsi):
+    return {"symbol": "X/USDT:USDT", "direction": side, "rsi": rsi,
+            "atr_pct": 0.5, "pct_above_24h_low": 1.0,
+            "pct_below_24h_high": -1.0,
+            "range_pos_24h": 0.1 if side == "long" else 0.9}
+
+
+def test_all_permits_both_sides():
+    cfg = _dir_cfg("all")
+    assert evaluate_candidate(_dir_row("long", 48), 2, cfg, atr_pct=0.5).enter
+    assert evaluate_candidate(_dir_row("short", 80), 2, cfg, atr_pct=0.5).enter
+
+
+def test_long_only_blocks_shorts():
+    cfg = _dir_cfg("long")
+    assert evaluate_candidate(_dir_row("long", 48), 2, cfg, atr_pct=0.5).enter
+    d = evaluate_candidate(_dir_row("short", 80), 2, cfg, atr_pct=0.5)
+    assert not d.enter and "disabled" in d.reason
+
+
+def test_short_only_blocks_longs():
+    cfg = _dir_cfg("short")
+    assert evaluate_candidate(_dir_row("short", 80), 2, cfg, atr_pct=0.5).enter
+    d = evaluate_candidate(_dir_row("long", 48), 2, cfg, atr_pct=0.5)
+    assert not d.enter and "disabled" in d.reason
+
+
+def test_direction_is_live_editable():
+    a = _trader()
+    applied, errors = a.update_rules({"directions": "short"})
+    assert not errors and a.cfg.directions == "short"
+
+
+def test_invalid_direction_is_rejected():
+    a = _trader()
+    applied, errors = a.update_rules({"directions": "sideways"})
+    assert applied == {} and "must be one of" in errors[0]
+
+
+def test_direction_value_is_normalised():
+    a = _trader()
+    a.update_rules({"directions": "  SHORT "})
+    assert a.cfg.directions == "short"

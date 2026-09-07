@@ -1939,16 +1939,21 @@ class FuturesGuardian:
 
         log.info(f"orphan-stop sweep: {account_wide} order(s) account-wide, "
                  f"{per_symbol} more per-symbol, {len(orders)} total")
-        if not orders and not self._listing_warned:
+        # An empty result is now the NORMAL, healthy state: everything the bot
+        # placed has been cleaned up. It used to mean the listing was broken,
+        # because conditional stops live in the algo book and only the regular
+        # book was queried. Warn only if orders are still queued for
+        # cancellation while the listing claims there is nothing there — that
+        # combination is genuinely contradictory.
+        with self._lock:
+            queued = sum(len(v) for v in self._pending_cancels.values())
+        if not orders and queued and not self._listing_warned:
             self._listing_warned = True
             log.warning(
-                "Order LISTING returned nothing from every endpoint. On Binance "
-                "demo futures this is expected — open orders are not reported "
-                "even though placing, cancelling, positions and balance all "
-                "work. Cleanup therefore relies on the bot's OWN record of the "
-                "stops it placed (persisted in the state file), not on "
-                "discovery. Orders placed before that record existed are "
-                "invisible to the bot and must be cancelled by hand once.")
+                f"Order listing reports nothing, yet {queued} order(s) are "
+                f"still queued for cancellation. Either they are gone and the "
+                f"queue is stale, or a book is not being read. Both listings "
+                f"and the algo book were tried.")
 
         cancelled = []
         surplus: dict = {}

@@ -198,6 +198,7 @@ if __name__ == "__main__":
                     required_strength_sweeps=cfg.auto_strength_sweeps,
                     long_rsi_min=cfg.auto_long_rsi_min,
                     long_rsi_max=cfg.auto_long_rsi_max,
+                    directions=cfg.auto_directions,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
                     callback_atr_mult=cfg.auto_callback_atr_mult,

@@ -1118,3 +1118,51 @@ def test_unknown_order_reply_is_not_logged_as_a_failure():
                                               "placed_at": time.time() - 3600}]}
     svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
     assert svc.bot_placed_orders("TRIA/USDT:USDT") == []
+
+
+# ── Entry orders live in the algo book too ───────────────────────────────────
+
+def test_stale_entry_is_cancelled_via_the_algo_book():
+    """
+    Trailing-stop ENTRIES are algo orders, so a regular cancel returns -2011
+    and a stale entry would never actually be removed.
+    """
+    import sys
+    import time
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, _AlgoBookEx
+    from bot.futures_entry import EntryService, EntryLimits
+
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    svc = EntryService(g, EntryLimits())
+    svc._placed_orders = {"CYS/USDT:USDT": [{"id": "A4",
+                                             "placed_at": time.time() - 3600}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert "A4" not in [a["algoId"] for a in ex.algo]
+
+
+def test_unexpired_entry_is_left_alone():
+    import sys
+    import time
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, _AlgoBookEx
+    from bot.futures_entry import EntryService, EntryLimits
+
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    svc = EntryService(g, EntryLimits())
+    svc._placed_orders = {"CYS/USDT:USDT": [{"id": "A4",
+                                             "placed_at": time.time() - 60}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert "A4" in [a["algoId"] for a in ex.algo]
+
+
+def test_orphan_stop_sweep_never_touches_an_entry():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, _AlgoBookEx
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    g.reap_orphan_stops()
+    assert "A4" in [a["algoId"] for a in ex.algo]

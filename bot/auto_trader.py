@@ -50,6 +50,10 @@ class AutoTradeConfig:
     # profitable one; 50-60 lost 13 USDT per trade across 11 trades. 0 disables
     # the ceiling.
     long_rsi_max: float = 0.0
+    # Which directions may be traded: "all", "long" or "short". A fade
+    # strategy's two halves can behave very differently in a given regime, so
+    # being able to disable one without redeploying is worth having.
+    directions: str = "all"
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -147,6 +151,11 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     side = row.get("direction", "")
     if side not in ("long", "short"):
         return AutoDecision(False, symbol, side, reason=f"unknown direction {side!r}")
+
+    allowed = (cfg.directions or "all").strip().lower()
+    if allowed in ("long", "short") and side != allowed:
+        return AutoDecision(False, symbol, side,
+                            reason=f"{side}s disabled ({allowed} only)")
 
     rsi = row.get("rsi")
     if rsi is None:
@@ -426,6 +435,7 @@ class AutoTrader:
                 "required_strength_sweeps": self.cfg.required_strength_sweeps,
                 "long_rsi_min": self.cfg.long_rsi_min,
                 "long_rsi_max": self.cfg.long_rsi_max,
+                "directions": self.cfg.directions,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
@@ -456,6 +466,9 @@ class AutoTrader:
         "required_strength_sweeps": (int, 1, 10),
         "long_rsi_min": (float, 0.0, 100.0),
         "long_rsi_max": (float, 0.0, 100.0),
+        # A string enum rather than a numeric range: the third element is the
+        # set of allowed values instead of an upper bound.
+        "directions": (str, None, ("all", "long", "short")),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),
@@ -493,7 +506,12 @@ class AutoTrader:
             except (TypeError, ValueError):
                 errors.append(f"{key} must be a {typ.__name__}")
                 continue
-            if not (lo <= val <= hi):
+            if isinstance(hi, (tuple, list, set)):
+                val = str(val).strip().lower()
+                if val not in hi:
+                    errors.append(f"{key} must be one of {', '.join(sorted(hi))}")
+                    continue
+            elif not (lo <= val <= hi):
                 errors.append(f"{key} must be between {lo} and {hi}")
                 continue
             applied[key] = val

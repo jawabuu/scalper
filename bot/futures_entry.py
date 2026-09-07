@@ -422,16 +422,16 @@ class EntryService:
                 age_s = (now - float(ts)) / 1000.0
                 if age_s < ttl_s:
                     continue
-                oid = str(o.get("id") or info.get("orderId") or "")
-                try:
-                    self.guardian.exchange.cancel_order(oid, symbol)
+                oid = str(o.get("id") or info.get("orderId")
+                          or info.get("algoId") or "")
+                if self._cancel(oid, symbol):
                     log.warning(f"{symbol}: cancelled UNTRACKED entry order {oid} "
                                 f"(unfilled after {age_s/60:.0f}m)")
                     cancelled.append((symbol, oid, f"untracked, {age_s/60:.0f}m"))
                     self.forget_order(symbol, oid)
                     self.clear_pending(symbol)
-                except Exception as e:
-                    log.warning(f"{symbol}: could not cancel {oid}: {e}")
+                else:
+                    log.warning(f"{symbol}: could not cancel untracked {oid}")
         return cancelled
 
     def reap_stale_entry_orders(self, ttl_s: float,
@@ -484,19 +484,32 @@ class EntryService:
                     pass
                 reason = ("position already open" if has_pos
                           else f"unfilled after {age/60:.0f}m")
-                try:
-                    self.guardian.exchange.cancel_order(oid, symbol)
+                if self._cancel(oid, symbol):
                     log.warning(f"{symbol}: cancelled stale entry order {oid} "
                                 f"({reason})")
                     cancelled.append((symbol, oid, reason))
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "unknown order" in msg or "does not exist" in msg or "-2011" in msg:
-                        log.debug(f"{symbol}: order {oid} already gone")
-                    else:
-                        log.warning(f"{symbol}: could not cancel {oid}: {e}")
+                else:
+                    log.warning(f"{symbol}: could not cancel entry {oid} in "
+                                f"either book ({reason})")
                 self.forget_order(symbol, oid)
         return cancelled
+
+    def _cancel(self, order_id: str, symbol: str) -> bool:
+        """
+        Cancel through whichever book holds the order.
+
+        Trailing-stop ENTRIES are algo orders too, so a regular cancel returns
+        -2011 for them and a stale entry would never actually be removed.
+        """
+        guardian = self.guardian
+        helper = getattr(guardian, "_cancel_any", None)
+        if helper is not None:
+            return bool(helper(order_id, symbol))
+        try:
+            guardian.exchange.cancel_order(order_id, symbol)
+            return True
+        except Exception:
+            return False
 
     def pending_entry_orders(self, symbol: str) -> list:
         """
