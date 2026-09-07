@@ -913,7 +913,10 @@
       <div class="stat" id="stat-fees-card"><div class="stat-label">Fees paid</div>
         <div class="stat-value neg" id="s-fees">—</div>
         <div class="stat-sub" id="s-fees-sub">commission</div></div>
-      <div class="stat"><div class="stat-label">Avg trade</div><div class="stat-value" id="s-avg">—</div></div>
+      <div class="stat" id="stat-roc-card"><div class="stat-label">Return on capital</div>
+        <div class="stat-value neu" id="s-roc">—</div>
+        <div class="stat-sub" id="s-roc-sub">net of fees</div></div>
+      <div class="stat" style="display:none"><div class="stat-label">Avg trade</div><div class="stat-value" id="s-avg">—</div></div>
     </div>
 
     <!-- Positions -->
@@ -2618,6 +2621,33 @@ function statRow(s) {
     <td class="num ${exp === null ? '' : cls(exp)}">${exp === null ? '—' : (exp >= 0 ? '+$' : '-$') + Math.abs(exp).toFixed(3)}</td>`;
 }
 
+// Time buckets get their own renderer: the point is comparing LONG against
+// SHORT within the same hours, so both directions sit side by side rather than
+// in separate tables where the regime differs between them.
+function timeTable(title, rows, note) {
+  const body = (rows || []).filter(r => r.n).map(r => {
+    const cell = (d) => !d || !d.n
+      ? '<td class="scan-note">—</td>'
+      : `<td class="num ${d.avg_roi > 0 ? 'pos' : (d.avg_roi < 0 ? 'neg' : '')}">`
+        + `${d.n} · ${d.win_rate}% · ${d.avg_roi >= 0 ? '+' : ''}${d.avg_roi}%</td>`;
+    return `<tr><td class="sym">${r.label}${confBadge(r.confidence)}</td>
+      <td class="num">${r.n}</td>
+      <td class="num ${r.avg_roi > 0 ? 'pos' : 'neg'}">${r.avg_roi >= 0 ? '+' : ''}${r.avg_roi}%</td>
+      <td class="num ${(r.expectancy_usdt ?? 0) >= 0 ? 'pos' : 'neg'}">${
+        r.expectancy_usdt === null || r.expectancy_usdt === undefined
+          ? '—' : (r.expectancy_usdt >= 0 ? '+$' : '-$') + Math.abs(r.expectancy_usdt).toFixed(2)}</td>
+      ${cell(r.long)}${cell(r.short)}</tr>`;
+  }).join('');
+  if (!body) return `<div><div class="panel-label">${title}</div>
+    <div class="empty" style="padding:12px">no trades yet</div></div>`;
+  return `<div><div class="panel-label">${title}</div>
+    <table><thead><tr><th></th><th class="num">n</th><th class="num">avg ROI</th>
+    <th class="num">expectancy</th>
+    <th class="num">LONG n·win·ROI</th><th class="num">SHORT n·win·ROI</th>
+    </tr></thead><tbody>${body}</tbody></table>
+    ${note ? `<div class="scan-note" style="margin-top:6px">${note}</div>` : ''}</div>`;
+}
+
 function statTable(title, rows) {
   const body = rows.filter(r => r.n).map(r =>
     `<tr><td class="sym">${r.label}${confBadge(r.confidence)}</td>${statRow(r)}</tr>`).join('');
@@ -2690,6 +2720,13 @@ async function refreshAnalysis() {
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
       statTable('By exit reason', a.by_exit_reason || []),
+      timeTable('By session (entry time, UTC)', a.by_session || [],
+                'Comparing directions WITHIN the same hours controls for the '
+                + 'market regime — unlike comparing long against short across '
+                + 'a whole run, where one side may simply have matched the trend.'),
+      timeTable('By hour of entry (UTC)', a.by_hour || [],
+                'Twenty-four buckets stay insufficient for a long time. Read '
+                + 'the session table first.'),
       statTable('By callback rule (distance ratio vs ATR floor)', a.by_callback_rule || []),
       statTable('Re-entries vs fresh entries', [
         Object.assign({label: 'override re-entry'}, a.reentries.override_reentries),

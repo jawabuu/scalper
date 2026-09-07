@@ -1579,6 +1579,10 @@ class FuturesGuardian:
             "exit_from_exchange": exit_from_exchange,
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
             "armed": state.armed,
+            # The capital actually committed. Needed to compute return on
+            # capital: averaging ROI percentages weights a large trade the same
+            # as a small one, so one big loss can hide behind two small wins.
+            "margin": round(margin, 4) if margin else None,
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
             # Commission from the income ledger. GROSS realised P&L excludes
             # it, which is why a positive P&L can sit beside a falling wallet.

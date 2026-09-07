@@ -254,3 +254,115 @@ def test_wallet_reconciles_with_full_round_trip_fees():
     r = reconcile(trades, wallet_now=4926.43, wallet_start=5000.0)
     assert r["reconciles"] is True
     assert abs(r["discrepancy"]) < 0.05
+
+
+# ── Return on capital, not a mean of percentages ─────────────────────────────
+
+def _sized(roi, pnl, margin):
+    return {"side": "short", "final_roi": roi, "peak_roi": max(roi, 0) + 3,
+            "realised_pnl_usdt": pnl, "margin": margin, "entry_context": {}}
+
+
+def test_return_on_capital_weights_by_size():
+    """
+    Averaging ROI percentages treats a large trade the same as a small one. One
+    session showed +8.32% as a simple mean while the capital actually returned
+    +2.80% — the single loss carried more than double the margin of either win.
+    """
+    trades = [_sized(17.47, 14.4273, 82.58),
+              _sized(-13.70, -24.9701, 182.26),
+              _sized(21.20, 20.6907, 97.60)]
+    o = analyse(trades)["overall"]
+    assert o["avg_roi"] == pytest.approx(8.32, abs=0.01)
+    assert o["capital_deployed"] == pytest.approx(362.44, abs=0.01)
+    assert o["return_on_capital"] == pytest.approx(2.80, abs=0.05)
+
+
+def test_return_on_capital_is_net_when_fees_are_known():
+    trades = [dict(_sized(17.47, 14.4273, 82.58), fees_usdt=2.05,
+                   net_pnl_usdt=12.3773),
+              dict(_sized(-13.70, -24.9701, 182.26), fees_usdt=2.05,
+                   net_pnl_usdt=-27.0201),
+              dict(_sized(21.20, 20.6907, 97.60), fees_usdt=2.04,
+                   net_pnl_usdt=18.6507)]
+    assert analyse(trades)["overall"]["return_on_capital"] == pytest.approx(1.11, abs=0.05)
+
+
+def test_missing_margin_leaves_it_unreported():
+    trades = [{"side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+               "realised_pnl_usdt": 5.0, "entry_context": {}}]
+    o = analyse(trades)["overall"]
+    assert o["return_on_capital"] is None
+    assert o["capital_deployed"] is None
+
+
+def test_equal_sizes_make_the_two_measures_agree():
+    trades = [_sized(10.0, 10.0, 100.0), _sized(-6.0, -6.0, 100.0)]
+    o = analyse(trades)["overall"]
+    assert o["avg_roi"] == pytest.approx(2.0)
+    assert o["return_on_capital"] == pytest.approx(2.0)
+
+
+# ── Time-of-day splits ───────────────────────────────────────────────────────
+
+def _at_hour(side, roi, pnl, margin, hour):
+    from datetime import datetime, timezone
+    ts = datetime(2026, 9, 7, hour, 30, tzinfo=timezone.utc).timestamp()
+    return {"side": side, "final_roi": roi, "peak_roi": max(roi, 0) + 3,
+            "realised_pnl_usdt": pnl, "margin": margin, "opened_at": ts,
+            "entry_context": {}}
+
+
+def _regime_set():
+    """Shorts win overnight, longs win in the US session."""
+    t = []
+    for h in (2, 4, 6):
+        t += [_at_hour("short", 18, 20, 100, h), _at_hour("long", -12, -24, 120, h)]
+    for h in (18, 20, 22):
+        t += [_at_hour("short", -11, -22, 110, h), _at_hour("long", 16, 18, 95, h)]
+    return t
+
+
+def test_sessions_separate_direction_performance():
+    """
+    Comparing directions WITHIN the same hours controls for the regime —
+    unlike long-vs-short across a whole run, where one side may simply have
+    matched the trend.
+    """
+    r = analyse(_regime_set())
+    by = {b["label"]: b for b in r["by_session"] if b["n"]}
+    assert by["Asia"]["short"]["win_rate"] == 100.0
+    assert by["Asia"]["long"]["win_rate"] == 0.0
+    assert by["US"]["long"]["win_rate"] == 100.0
+    assert by["US"]["short"]["win_rate"] == 0.0
+
+
+def test_hour_buckets_only_include_hours_with_trades():
+    r = analyse(_regime_set())
+    assert len(r["by_hour"]) == 6
+    assert all(b["n"] for b in r["by_hour"])
+
+
+def test_entry_time_is_used_not_exit_time():
+    """A trade opened at 02:00 and closed at 09:00 belongs to the Asia session."""
+    from datetime import datetime, timezone
+    t = [{"side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+          "realised_pnl_usdt": 5.0, "margin": 100.0,
+          "opened_at": datetime(2026, 9, 7, 2, 0, tzinfo=timezone.utc).timestamp(),
+          "closed_at": datetime(2026, 9, 7, 9, 0, tzinfo=timezone.utc).timestamp(),
+          "entry_context": {}}]
+    by = {b["label"]: b for b in analyse(t)["by_session"] if b["n"]}
+    assert "Asia" in by and "Europe" not in by
+
+
+def test_trades_without_timestamps_are_skipped():
+    t = [{"side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+          "realised_pnl_usdt": 5.0, "entry_context": {}}]
+    assert all(not b["n"] for b in analyse(t)["by_session"])
+
+
+def test_every_session_carries_a_confidence_label():
+    r = analyse(_regime_set())
+    for b in r["by_session"]:
+        if b["n"]:
+            assert b["confidence"] in ("insufficient", "thin", "usable")

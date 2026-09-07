@@ -53,6 +53,14 @@ def _fees(t: dict) -> float | None:
     return None if v is None else float(v)
 
 
+def _margin(t: dict) -> float | None:
+    v = t.get("margin")
+    try:
+        return float(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
 def group_stats(trades: list[dict]) -> dict:
     """
     Performance of one group of trades.
@@ -70,6 +78,7 @@ def group_stats(trades: list[dict]) -> dict:
     wins = [r for r in rois if r > 0]
     realised = [_realised(t) for t in scored if _realised(t) is not None]
     peaks = [float(t.get("peak_roi") or 0) for t in scored]
+    margins = [m for m in (_margin(t) for t in scored) if m]
     givebacks = [float(t.get("peak_roi") or 0) - r
                  for t, r in zip(scored, rois)]
 
@@ -91,6 +100,15 @@ def group_stats(trades: list[dict]) -> dict:
                        if any(_fees(t) is not None for t in scored) else None),
         "best_roi": round(max(rois), 2),
         "worst_roi": round(min(rois), 2),
+        # Return on the capital actually committed. Averaging ROI percentages
+        # weights every trade equally regardless of size, so one large loss and
+        # one small win can average to a healthy-looking number while the
+        # account is down. This divides the money earned by the money at work.
+        "capital_deployed": (round(sum(m for m in margins if m), 2)
+                             if margins else None),
+        "return_on_capital": (
+            round(sum(realised) / sum(m for m in margins if m) * 100, 2)
+            if realised and margins and sum(m for m in margins if m) else None),
     }
 
 
@@ -172,6 +190,51 @@ def reconcile(trades: list[dict], wallet_now: float | None,
     return out
 
 
+# Trading sessions in UTC. Deliberately coarse: a 24-way split of a few dozen
+# trades is noise, whereas four buckets can reach a usable sample. Boundaries
+# follow the main centres rather than exchange hours, since crypto never closes.
+SESSIONS = [
+    ("Asia", 0, 8),
+    ("Europe", 8, 13),
+    ("EU/US overlap", 13, 17),
+    ("US", 17, 24),
+]
+
+
+def _entry_hour(t: dict) -> int | None:
+    """
+    Hour of day (UTC) the position was OPENED.
+
+    Entry time is what the hypothesis is about — whether a direction works
+    better at certain times — so it beats exit time, which drifts by however
+    long the trade ran.
+    """
+    ts = t.get("opened_at") or t.get("closed_at")
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).hour
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _time_split(trades: list[dict], label: str, members) -> dict:
+    """One time bucket, split by direction so the two can be compared."""
+    group = [t for t in trades if members(t)]
+    out = group_stats(group)
+    out["label"] = label
+    for side in ("long", "short"):
+        sub = [t for t in group if t.get("side") == side]
+        st = group_stats(sub)
+        out[side] = {"n": st.get("n", 0),
+                     "win_rate": st.get("win_rate"),
+                     "avg_roi": st.get("avg_roi"),
+                     "expectancy_usdt": st.get("expectancy_usdt"),
+                     "confidence": st.get("confidence")}
+    return out
+
+
 def analyse(trades: list[dict]) -> dict:
     """
     Full report. Every section carries its own sample size so a striking
@@ -205,6 +268,20 @@ def analyse(trades: list[dict]) -> dict:
         st = group_stats(group)
         st["label"] = src
         callback_rule.append(st)
+
+    # Does a direction work better at certain times? Sessions first, because
+    # four buckets can reach a usable sample where twenty-four cannot.
+    by_session = [
+        _time_split(trades, name,
+                    lambda t, lo=lo, hi=hi: (
+                        (_entry_hour(t) is not None) and lo <= _entry_hour(t) < hi))
+        for name, lo, hi in SESSIONS
+    ]
+    by_hour = [
+        _time_split(trades, f"{h:02d}:00 UTC",
+                    lambda t, h=h: _entry_hour(t) == h)
+        for h in range(24)
+    ]
 
     reentries = [t for t in trades if (t.get("entry_context") or {}).get("was_reentry")]
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
@@ -279,6 +356,8 @@ def analyse(trades: list[dict]) -> dict:
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
         "by_exit_reason": exits,
+        "by_session": by_session,
+        "by_hour": [b for b in by_hour if b.get("n")],
         "by_callback_rule": callback_rule,
         "reentries": {"override_reentries": group_stats(reentries),
                       "fresh_entries": group_stats(fresh)},
