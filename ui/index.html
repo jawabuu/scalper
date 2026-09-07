@@ -2336,13 +2336,16 @@ async function refreshFuturesHistory() {
         <td class="num">${t.exit_price ?? '—'}${est}</td>
         <td class="num">${finCell}</td>
         <td class="num pos">+${t.peak_roi}%</td>
+        <td class="num ${(t.trough_roi ?? 0) < 0 ? 'neg' : ''}">${
+          t.trough_roi === null || t.trough_roi === undefined
+            ? '—' : (t.trough_roi > 0 ? '+' : '') + t.trough_roi + '%'}</td>
         <td class="num">${pnlCell}</td>
         <td style="color:var(--muted);font-size:11px">${t.closed_at ? new Date(t.closed_at*1000).toLocaleTimeString() : ''}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `<table><thead><tr>
       <th>Pair</th><th>Dir</th><th class="num">Entry</th><th class="num">Exit</th>
-      <th class="num">Final ROI</th><th class="num">Peak ROI</th>
+      <th class="num">Final ROI</th><th class="num">Peak ROI</th><th class="num">Low ROI</th>
       <th class="num">Realised</th><th>Closed</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
   } catch (e) { /* guardian off */ }
@@ -2570,7 +2573,22 @@ async function refreshAnalysis() {
       <tr><td class="dir-short">SHORT${confBadge((a.by_side.short || {}).confidence || 'insufficient')}</td>${statRow(a.by_side.short)}</tr>
       </tbody></table>` : '<div class="empty">No closed trades yet</div>');
 
+    const si = (a.stop_impact || []).filter(r => r.of_winners);
+    const siTable = si.length ? `<div><div class="panel-label">
+      Would a tighter stop have cut your winners?</div>
+      <table><thead><tr><th>stop</th><th class="num">winners cut</th>
+      <th class="num">of winners</th><th></th></tr></thead><tbody>` +
+      si.map(r => `<tr><td class="sym">-${r.stop_roi}% ROI${confBadge(r.confidence)}</td>
+        <td class="num ${r.winners_cut ? 'neg' : 'pos'}">${r.winners_cut}</td>
+        <td class="num">${r.of_winners}</td>
+        <td class="scan-note">${r.winners_cut === 0
+          ? 'no winner ever dipped this far' : 'these would have been stopped out'}</td></tr>`).join('')
+      + `</tbody></table><div class="scan-note" style="margin-top:6px">${a.trough_note || ''}</div></div>`
+      : `<div><div class="panel-label">Would a tighter stop have cut your winners?</div>
+         <div class="empty" style="padding:12px">${a.trough_note || 'no trough data yet'}</div></div>`;
+
     setEl('an-grid', [
+      siTable,
       statTable('By RSI at entry', a.by_rsi || []),
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
@@ -2723,6 +2741,9 @@ function renderGuardian(g) {
         <td class="${dirCls}">${(s.side || '').toUpperCase()}</td>
         <td class="num">${cur}</td>
         <td class="num pos">+${s.peak_roi}%</td>
+        <td class="num ${(s.trough_roi ?? 0) < 0 ? 'neg' : ''}">${
+          s.trough_roi === null || s.trough_roi === undefined
+            ? '—' : (s.trough_roi > 0 ? '+' : '') + s.trough_roi + '%'}</td>
         <td class="num">${stop}</td>
         <td>${armed}</td>
         <td>${rangeContext(s)}</td>
@@ -2747,7 +2768,7 @@ function renderGuardian(g) {
       <br>The guardian will not close a position on its own — close it here or accept the risk.
       </div>` : '';
     setEl('guard-wrap', banner + `<table><thead><tr>
-      <th>Pair</th><th>Dir</th><th class="num">ROI now</th><th class="num">Peak ROI</th>
+      <th>Pair</th><th>Dir</th><th class="num">ROI now</th><th class="num">Peak ROI</th><th class="num">Low ROI</th>
       <th class="num">Stop @ ROI</th><th>Trail</th><th>24h range</th>
       <th class="num">Margin</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table>`);

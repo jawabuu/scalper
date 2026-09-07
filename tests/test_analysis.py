@@ -110,3 +110,49 @@ def test_long_and_short_reported_separately():
     r = analyse([_t(5, side="long"), _t(-3, side="short"), _t(7, side="short")])
     assert r["by_side"]["long"]["n"] == 1
     assert r["by_side"]["short"]["n"] == 2
+
+
+# ── Trough / stop-impact reporting ───────────────────────────────────────────
+
+def _w(roi, peak, trough):
+    return {"side": "long", "final_roi": roi, "peak_roi": peak,
+            "trough_roi": trough, "realised_pnl_usdt": roi * 0.25,
+            "exit_reason": "trail" if roi > 0 else "stop", "entry_context": {}}
+
+
+def test_stop_impact_counts_winners_that_dipped_past_each_level():
+    """
+    Peak alone cannot say whether a tighter stop would have cut a winner short.
+    The trough answers it: a winner that dipped to -11% would have been stopped
+    out by a 5% or 10% stop but survived 15%.
+    """
+    trades = [_w(29.0, 41.0, -3.2), _w(8.2, 13.3, -11.4), _w(24.2, 30.3, -16.2)]
+    si = {r["stop_roi"]: r["winners_cut"] for r in analyse(trades)["stop_impact"]}
+    # -3.2% never reaches a -5% stop, so only the -11.4 and -16.2 are cut.
+    assert si[5.0] == 2
+    assert si[10.0] == 2
+    assert si[15.0] == 1
+    assert si[20.0] == 0
+
+
+def test_stop_impact_ignores_losers():
+    """A loser was stopped out anyway — only winners answer the question."""
+    trades = [_w(20.0, 25.0, -2.0), _w(-13.0, 0.0, -13.0)]
+    rows = analyse(trades)["stop_impact"]
+    assert all(r["of_winners"] == 1 for r in rows)
+
+
+def test_stop_impact_carries_a_confidence_label():
+    trades = [_w(20.0, 25.0, -2.0)]
+    assert all(r["confidence"] == "insufficient"
+               for r in analyse(trades)["stop_impact"])
+
+
+def test_trough_note_explains_an_empty_dataset():
+    r = analyse([{"side": "long", "final_roi": 5.0, "peak_roi": 8.0}])
+    assert "No trough data yet" in r["trough_note"]
+
+
+def test_trough_note_reports_the_deepest_dip():
+    trades = [_w(29.0, 41.0, -3.2), _w(24.2, 30.3, -16.2)]
+    assert "-16.2" in analyse(trades)["trough_note"]
