@@ -192,3 +192,50 @@ def test_no_fee_note_when_fees_are_unknown():
     trades = [{"side": "long", "final_roi": 5.0, "peak_roi": 8.0,
                "realised_pnl_usdt": 6.0, "entry_context": {}} for _ in range(12)]
     assert not any("Fees so far" in n for n in analyse(trades)["notes"])
+
+
+# ── Internal consistency ─────────────────────────────────────────────────────
+
+def test_reconciliation_closes_when_the_numbers_agree():
+    """realised - fees must equal the wallet change."""
+    from bot.analysis import reconcile
+    trades = [{"realised_pnl_usdt": 0.0, "fees_usdt": 2.07, "pnl_source": "ledger"},
+              {"realised_pnl_usdt": 12.5, "fees_usdt": 2.10, "pnl_source": "ledger"},
+              {"realised_pnl_usdt": -24.3, "fees_usdt": 1.95, "pnl_source": "ledger"}]
+    r = reconcile(trades, wallet_now=5000.0 - 17.92, wallet_start=5000.0)
+    assert r["net_pnl"] == pytest.approx(-17.92, abs=0.01)
+    assert r["reconciles"] is True
+    assert r["discrepancy"] == pytest.approx(0.0, abs=0.01)
+
+
+def test_reconciliation_flags_a_gap():
+    from bot.analysis import reconcile
+    trades = [{"realised_pnl_usdt": 60.0, "fees_usdt": 0.0, "pnl_source": "computed"}]
+    r = reconcile(trades, wallet_now=4980.0, wallet_start=5000.0)
+    assert r["reconciles"] is False
+    assert r["discrepancy"] == pytest.approx(-80.0)
+
+
+def test_reconciliation_counts_estimated_exits():
+    from bot.analysis import reconcile
+    trades = [{"realised_pnl_usdt": 1.0, "pnl_source": "computed"},
+              {"realised_pnl_usdt": 1.0, "pnl_source": "ledger"}]
+    assert reconcile(trades, None, None)["estimated_exits"] == 1
+
+
+def test_roi_mismatch_is_reported():
+    """
+    A price-derived ROI that disagrees with the money received means the
+    trade's own numbers are inconsistent — SOLV said +4.18% against a true 0.
+    """
+    trades = [{"side": "short", "final_roi": 4.18, "roi_from_realised": 0.0,
+               "peak_roi": 4.18, "realised_pnl_usdt": 0.0, "entry_context": {}}]
+    r = analyse(trades)
+    assert r["roi_mismatches"] == 1
+    assert any("disagrees with the ROI implied" in n for n in r["notes"])
+
+
+def test_no_mismatch_when_consistent():
+    trades = [{"side": "short", "final_roi": 4.18, "roi_from_realised": 4.18,
+               "peak_roi": 4.18, "realised_pnl_usdt": 4.32, "entry_context": {}}]
+    assert analyse(trades)["roi_mismatches"] == 0

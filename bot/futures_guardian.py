@@ -232,6 +232,13 @@ class FuturesGuardian:
         self._pending_cancels: dict[str, list] = {}
         self._cancel_attempts: dict[str, int] = {}
         self._last_trade_fees: float | None = None
+        # Ids confirmed cancelled or confirmed absent from both books. Nothing
+        # here is ever retried — a successful cancel followed by a -2011 retry
+        # was re-queueing orders that no longer existed.
+        self._cancelled_ids: set = set()
+        # Wallet at the first observation, so the reconciliation has a baseline
+        # to measure against. Persisted with the rest of the state.
+        self.wallet_start: float | None = getattr(self, "wallet_start", None)
         self._last_wide_probe: float = 0.0
         self._missing_counts: dict[str, int] = {}
         self._stop_source_reported: set = set()
@@ -805,6 +812,9 @@ class FuturesGuardian:
         done = 0
         for symbol, ids in work.items():
             for oid in ids:
+                if oid in self._cancelled_ids:
+                    self._clear_pending_cancel(symbol, oid)
+                    continue
                 n = self._cancel_attempts.get(oid, 0)
                 if n >= self.MAX_CANCEL_ATTEMPTS:
                     continue
@@ -816,7 +826,9 @@ class FuturesGuardian:
                     self._clear_pending_cancel(symbol, oid)
                     done += 1
                 except Exception as e:
-                    if self._cancel_algo_order(oid, symbol):
+                    ok, gone = self._cancel_algo_order(oid, symbol)
+                    if ok or gone:
+                        self._cancelled_ids.add(oid)
                         self._clear_pending_cancel(symbol, oid)
                         done += 1
                         continue
@@ -850,7 +862,9 @@ class FuturesGuardian:
             # orphaned it permanently. Count the attempts instead and keep it
             # queued; a retry costs one request and may succeed.
             # These stops are ALGO orders, so a regular cancel misses them.
-            if self._cancel_algo_order(order_id, pos.symbol):
+            ok, gone = self._cancel_algo_order(order_id, pos.symbol)
+            if ok or gone:
+                self._cancelled_ids.add(order_id)
                 self._clear_pending_cancel(pos.symbol, order_id)
                 return True
             n = self._cancel_attempts.get(order_id, 0) + 1
@@ -1153,6 +1167,8 @@ class FuturesGuardian:
                 self._closed_trades = list(data.get("closed_trades") or [])
         self._restored_safety = data.get("safety") or {}
         self._restored_placed_orders = data.get("placed_orders") or {}
+        if data.get("wallet_start") and self.wallet_start is None:
+            self.wallet_start = float(data["wallet_start"])
         with self._lock:
             for sym, ids in (data.get("stop_ids") or {}).items():
                 cur = self._all_stop_ids.setdefault(sym, [])
@@ -1225,6 +1241,7 @@ class FuturesGuardian:
                            closed_trades=trades, owner=self.state_owner,
                            placed_orders=placed, stop_ids=stop_ids,
                            pending_cancels=pending,
+                           wallet_start=self.wallet_start,
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -1243,6 +1260,9 @@ class FuturesGuardian:
             elif abs(val - self._wallet_balance_cached) > 0.01:
                 log.info(f"Futures wallet balance {val:.2f} USDT (from {source})")
             self._wallet_balance_cached = val
+            if self.wallet_start is None and val > 0:
+                self.wallet_start = val
+                log.info(f"Reconciliation baseline: wallet {val:.2f} USDT")
         except Exception as e:
             log.debug(f"balance fetch failed: {e}")
 
@@ -1379,6 +1399,8 @@ class FuturesGuardian:
         # A short that closed in profit was being reported as a loss because the
         # exchange value was taken on trust.
         realised = None
+        pnl_source = "none"
+        ledger_pnl = None
         try:
             # Scope the fills to THIS position's lifetime. fetch_my_trades
             # returns the last N fills for the symbol regardless of which
@@ -1411,11 +1433,22 @@ class FuturesGuardian:
                 except (TypeError, ValueError):
                     pass
             self._last_trade_fees = round(fees, 6)
+
+            # The ledger is authoritative; fills can be missing or partial.
+            led_pnl, led_comm, led_found = self._income_for_position(
+                symbol, since_ms)
+            if led_found:
+                if led_comm:
+                    self._last_trade_fees = round(led_comm, 6)
+                ledger_pnl = led_pnl        # applied after the fill logic
+                log.debug(f"{symbol}: ledger realised {led_pnl:+.4f}, "
+                          f"fees {led_comm:.4f}")
             if scoped and not pnl:
                 log.debug(f"{symbol}: {len(scoped)} fill(s) in scope, all zero realisedPnl")
             if pnl:
                 if computed is None or (pnl >= 0) == (computed >= 0):
                     realised = pnl
+                    pnl_source = "fills"
                 else:
                     log.warning(
                         f"{symbol}: exchange realisedPnl {pnl:+.4f} disagrees in sign "
@@ -1423,11 +1456,26 @@ class FuturesGuardian:
                         f"({computed:+.4f}) — using the computed value."
                     )
                     realised = computed
+                    pnl_source = "computed"
         except Exception as e:
             log.debug(f"realised PnL lookup failed for {symbol}: {e}")
 
         if realised is None and computed is not None:
             realised = computed
+            pnl_source = "computed"
+
+        # The income ledger is the exchange's own accounting and wins over both
+        # the fill sum and the price estimate — INCLUDING when it reports zero,
+        # which is exactly the case a price-based estimate gets wrong. One
+        # trade opened and closed at the same price (true result 0) and was
+        # recorded as +4.32 because the estimated exit was never checked.
+        if ledger_pnl is not None:
+            if realised is not None and abs(realised - ledger_pnl) > 0.01:
+                log.warning(
+                    f"{symbol}: {pnl_source} P&L {realised:+.4f} disagrees with "
+                    f"the income ledger {ledger_pnl:+.4f} — using the ledger.")
+            realised = ledger_pnl
+            pnl_source = "ledger"
 
         # When the exchange reports realised PnL it reflects the ACTUAL fill.
         # The guardian polls, so a stop that triggered between cycles filled at
@@ -1466,6 +1514,18 @@ class FuturesGuardian:
             "peak_roi": round(state.peak_roi, 2),
             "trough_roi": round(state.trough_roi, 2),
             "final_roi": final_roi,
+            # ROI DERIVED from the same figure as the money, so the two can
+            # never disagree. Previously ROI came from entry/exit prices while
+            # realised came from the ledger, and one trade reported +4.18% ROI
+            # against a true result of zero P&L.
+            "roi_from_realised": (
+                round(realised / margin * 100, 2)
+                if realised is not None and margin else None),
+            "net_roi": (
+                round((realised - self._last_trade_fees) / margin * 100, 2)
+                if realised is not None and margin
+                and self._last_trade_fees is not None else None),
+            "pnl_source": pnl_source,
             "observed_roi": _r2(meta.get("current_roi")),
             "exit_from_exchange": exit_from_exchange,
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),
@@ -1645,6 +1705,49 @@ class FuturesGuardian:
                 return list(res)
         return []
 
+    def _income_for_position(self, symbol: str, since_ms: int | None) -> tuple:
+        """
+        Realised P&L and commission from Binance's INCOME ledger.
+
+        This is the authoritative record of what a position actually paid or
+        earned. It matters because the fallback — reconstructing the exit from
+        the stop level — can invent a profit: one trade opened and closed at
+        the SAME price (true result: 0 P&L, -2.07 USDT in fees) and was
+        recorded as +4.32 USDT because the estimated exit was never checked
+        against the ledger.
+
+        Returns (realised_pnl, commission, found).
+        """
+        fn = getattr(self.exchange, "fapiPrivateGetIncome", None)
+        if fn is None:
+            return 0.0, 0.0, False
+        try:
+            params = {"symbol": self.exchange.market_id(symbol), "limit": 200}
+            if since_ms:
+                params["startTime"] = int(since_ms)
+            rows = fn(params) or []
+        except Exception as e:
+            log.debug(f"{symbol}: income lookup failed: {e}")
+            return 0.0, 0.0, False
+
+        pnl = comm = 0.0
+        seen = False
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            kind = str(r.get("incomeType") or "").upper()
+            try:
+                val = float(r.get("income") or 0)
+            except (TypeError, ValueError):
+                continue
+            if kind == "REALIZED_PNL":
+                pnl += val
+                seen = True
+            elif kind == "COMMISSION":
+                comm += abs(val)
+                seen = True
+        return round(pnl, 8), round(comm, 8), seen
+
     def _cancel_any(self, order_id: str, symbol: str) -> bool:
         """
         Cancel an order that may live in EITHER book.
@@ -1656,31 +1759,41 @@ class FuturesGuardian:
         if self.dry_run:
             log.info(f"[DRY RUN] would cancel {order_id} on {symbol}")
             return True
+        if order_id in self._cancelled_ids:
+            return True                       # already done; never retry
         try:
             self.exchange.cancel_order(order_id, symbol)
+            self._cancelled_ids.add(order_id)
             return True
         except Exception as e:
-            if self._cancel_algo_order(order_id, symbol):
+            ok, gone = self._cancel_algo_order(order_id, symbol)
+            if ok or gone:
+                # Cancelled, or absent from BOTH books — either way it is not
+                # resting and must not be queued for another attempt.
+                self._cancelled_ids.add(order_id)
                 return True
             log.debug(f"{symbol}: cancel {order_id} failed in both books: {e}")
             return False
 
-    def _cancel_algo_order(self, order_id: str, symbol: str) -> bool:
+    def _cancel_algo_order(self, order_id: str, symbol: str) -> tuple:
         """
-        Cancel via the ALGO book. A regular DELETE /fapi/v1/order returns -2011
-        for these, which reads as "already gone" but simply means the order is
-        not in the book being searched.
+        Cancel via the ALGO book. Returns (cancelled, definitely_gone).
+
+        -2011 from the REGULAR book only means "not in the book I searched" —
+        these are algo orders. But -2011 from the ALGO book too means the order
+        exists in neither, so it really is gone and must stop being retried.
         """
         fn = getattr(self.exchange, "fapiPrivateDeleteAlgoOrder", None)
         if fn is None:
-            return False
+            return False, False
         try:
             fn({"algoId": order_id})
             log.info(f"Cancelled ALGO order {order_id} on {symbol}")
-            return True
+            return True, True
         except Exception as e:
+            gone = self._order_already_gone(e)
             log.debug(f"algo cancel {order_id} failed: {e}")
-            return False
+            return False, gone
 
     def _all_open_orders_raw(self) -> list:
         """
@@ -2025,8 +2138,12 @@ class FuturesGuardian:
             # Often the stop is what closed the position — but -2011 has been
             # seen on orders still resting, so report failure and let the
             # caller queue it.
-            if self._cancel_algo_order(order_id, symbol):
-                self._record(symbol, "orphan_stop_cancelled", f"id={order_id} (algo)")
+            ok, gone = self._cancel_algo_order(order_id, symbol)
+            if ok or gone:
+                self._cancelled_ids.add(order_id)
+                if ok:
+                    self._record(symbol, "orphan_stop_cancelled",
+                                 f"id={order_id} (algo)")
                 return True
             log.debug(f"orphaned stop {order_id} on {symbol} not cancellable: {e}")
             return False

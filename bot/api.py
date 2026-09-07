@@ -191,8 +191,16 @@ def create_app(engine) -> FastAPI:
         if _guardian is None:
             return {"enabled": False, "message": "Guardian not enabled"}
         try:
-            from bot.analysis import analyse
-            report = analyse(_guardian.closed_trades())
+            from bot.analysis import analyse, reconcile
+            trades = _guardian.closed_trades()
+            report = analyse(trades)
+            try:
+                report["reconciliation"] = reconcile(
+                    trades,
+                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    wallet_start=getattr(_guardian, "wallet_start", None))
+            except Exception as e:
+                report["reconciliation"] = {"error": str(e)}
             report["enabled"] = True
             return report
         except Exception as e:

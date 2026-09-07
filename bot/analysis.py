@@ -137,6 +137,41 @@ ATR_BUCKETS = [Bucket("<0.3%", 0, 0.3), Bucket("0.3-0.7%", 0.3, 0.7),
                Bucket("0.7-1.5%", 0.7, 1.5), Bucket("1.5%+", 1.5, 999)]
 
 
+def reconcile(trades: list[dict], wallet_now: float | None,
+              wallet_start: float | None) -> dict:
+    """
+    Does the arithmetic close?
+
+        sum(realised) - sum(fees)  ==  wallet change
+
+    Three numbers previously came from three sources — ROI from prices,
+    realised from the ledger or fills, fees from the ledger — so nothing
+    guaranteed they agreed. This states plainly whether they do, and by how
+    much they do not.
+    """
+    scored = [t for t in trades if t.get("realised_pnl_usdt") is not None]
+    gross = sum(float(t["realised_pnl_usdt"]) for t in scored)
+    fees = sum(float(t.get("fees_usdt") or 0) for t in scored)
+    net = gross - fees
+    out = {
+        "trades": len(scored),
+        "gross_pnl": round(gross, 4),
+        "fees": round(fees, 4),
+        "net_pnl": round(net, 4),
+        "wallet_start": wallet_start,
+        "wallet_now": wallet_now,
+        "missing_fee_data": sum(1 for t in scored if t.get("fees_usdt") is None),
+        "estimated_exits": sum(1 for t in scored
+                               if t.get("pnl_source") in (None, "computed")),
+    }
+    if wallet_now is not None and wallet_start is not None:
+        moved = wallet_now - wallet_start
+        out["wallet_change"] = round(moved, 4)
+        out["discrepancy"] = round(moved - net, 4)
+        out["reconciles"] = abs(moved - net) <= max(1.0, abs(net) * 0.02)
+    return out
+
+
 def analyse(trades: list[dict]) -> dict:
     """
     Full report. Every section carries its own sample size so a striking
@@ -220,7 +255,21 @@ def analyse(trades: list[dict]) -> dict:
                        "on, and is what shows whether a tighter stop would "
                        "have cut winners short.")
 
+    # ROI derived from money vs ROI derived from prices: if these disagree the
+    # trade's numbers are internally inconsistent and should not be trusted.
+    mismatched = 0
+    for t in trades:
+        a, b = t.get("final_roi"), t.get("roi_from_realised")
+        if a is not None and b is not None and abs(float(a) - float(b)) > 1.0:
+            mismatched += 1
+    if mismatched:
+        notes.append(
+            f"{mismatched} trade(s) have a price-derived ROI that disagrees "
+            f"with the ROI implied by the money actually received. Trust the "
+            f"money: a price-based exit estimate can invent a profit.")
+
     return {
+        "roi_mismatches": mismatched,
         "stop_impact": stop_impact,
         "trough_note": notes_extra,
         "overall": overall,

@@ -72,7 +72,8 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
          safety: dict | None = None, owner: str = "",
          placed_orders: dict | None = None,
          stop_ids: dict | None = None,
-         pending_cancels: dict | None = None) -> bool:
+         pending_cancels: dict | None = None,
+         wallet_start: float | None = None) -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
@@ -110,6 +111,8 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         # cancel result is trustworthy on demo, so this queue is the only
         # durable record that an order should not exist.
         "pending_cancels": pending_cancels or {},
+        # Baseline for the wallet reconciliation.
+        "wallet_start": wallet_start,
     }
     return _atomic_write(path, payload)
 

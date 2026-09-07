@@ -2504,3 +2504,79 @@ def test_cancel_any_reports_failure_when_neither_book_has_it():
     ex = _AlgoBookEx()
     g = _guardian(ex)
     assert g._cancel_any("NOPE", "REZ/USDT:USDT") is False
+
+
+# ── -2011 semantics: which book was searched ─────────────────────────────────
+
+def test_minus_2011_from_both_books_means_gone():
+    """
+    -2011 from the REGULAR book only means "not in this book" — these are algo
+    orders. -2011 from the ALGO book too means it exists in neither, so it must
+    stop being retried. A successful cancel followed by a -2011 retry was
+    re-queueing orders that no longer existed.
+    """
+    class BothMissEx(_AlgoBookEx):
+        def fapiPrivateDeleteAlgoOrder(self, params=None):
+            raise RuntimeError('{"code":-2011,"msg":"Unknown order sent."}')
+    g = _guardian(BothMissEx())
+    assert g._cancel_any("GONE-1", "REZ/USDT:USDT") is True
+    assert "GONE-1" in g._cancelled_ids
+
+
+def test_confirmed_cancel_is_never_retried():
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    assert g._cancel_any("A1", "REZ/USDT:USDT") is True
+    before = len(ex.cancelled)
+    assert g._cancel_any("A1", "REZ/USDT:USDT") is True
+    assert len(ex.cancelled) == before, "a confirmed cancel was retried"
+
+
+def test_drain_skips_ids_already_confirmed():
+    ex = _AlgoBookEx()
+    g = _guardian(ex)
+    g._cancelled_ids.add("A1")
+    g._pending_cancels["REZ/USDT:USDT"] = ["A1"]
+    g.drain_pending_cancels()
+    assert not g._pending_cancels
+
+
+# ── The income ledger is authoritative ───────────────────────────────────────
+
+class _IncomeEx(FakeExchange):
+    """One trade opened and closed at the SAME price, paying 2.07 in fees."""
+    def market_id(self, s):
+        return s.split("/")[0] + "USDT"
+    def fapiPrivateGetIncome(self, params=None):
+        return [{"incomeType": "REALIZED_PNL", "income": "0.00000000"},
+                {"incomeType": "COMMISSION", "income": "-1.03487468"},
+                {"incomeType": "COMMISSION", "income": "-1.03487471"}]
+
+
+def test_income_ledger_reports_true_pnl_and_fees():
+    """
+    Reconstructing the exit from the stop level invented a profit: a trade that
+    opened and closed at the same price (0 P&L, -2.07 fees) was recorded as
+    +4.32.
+    """
+    g = _guardian(_IncomeEx())
+    pnl, comm, found = g._income_for_position("SOLV/USDT:USDT", None)
+    assert found
+    assert pnl == pytest.approx(0.0)
+    assert comm == pytest.approx(2.0697, abs=0.001)
+
+
+def test_income_absent_is_reported_not_guessed():
+    g = _guardian(FakeExchange())
+    pnl, comm, found = g._income_for_position("X/USDT:USDT", None)
+    assert found is False
+
+
+def test_income_lookup_survives_an_error():
+    class BadEx(FakeExchange):
+        def market_id(self, s):
+            return "XUSDT"
+        def fapiPrivateGetIncome(self, params=None):
+            raise RuntimeError("boom")
+    g = _guardian(BadEx())
+    assert g._income_for_position("X/USDT:USDT", None) == (0.0, 0.0, False)
