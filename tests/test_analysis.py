@@ -288,9 +288,14 @@ def test_return_on_capital_is_net_when_fees_are_known():
     assert analyse(trades)["overall"]["return_on_capital"] == pytest.approx(1.11, abs=0.05)
 
 
-def test_missing_margin_leaves_it_unreported():
-    trades = [{"side": "short", "final_roi": 5.0, "peak_roi": 8.0,
-               "realised_pnl_usdt": 5.0, "entry_context": {}}]
+def test_margin_absent_and_underivable_stays_unreported():
+    """
+    With no margin AND no ROI there is nothing to derive from, so the figure
+    is omitted rather than guessed. (Where ROI exists it IS derived — see
+    test_margin_is_derived_when_not_recorded.)
+    """
+    trades = [{"side": "short", "final_roi": 0.0, "peak_roi": 0.0,
+               "realised_pnl_usdt": 0.0, "entry_context": {}}]
     o = analyse(trades)["overall"]
     assert o["return_on_capital"] is None
     assert o["capital_deployed"] is None
@@ -366,3 +371,44 @@ def test_every_session_carries_a_confidence_label():
     for b in r["by_session"]:
         if b["n"]:
             assert b["confidence"] in ("insufficient", "thin", "usable")
+
+
+# ── Margin must be usable on older records too ───────────────────────────────
+
+def test_margin_is_derived_when_not_recorded():
+    """
+    Trades closed before margin was stored showed a dash for return on
+    capital. It is recoverable from the two fields that ARE present:
+    margin = realised / (ROI / 100).
+    """
+    from bot.analysis import _margin
+    t = {"realised_pnl_usdt": 14.4273, "final_roi": 17.47}
+    assert _margin(t) == pytest.approx(82.58, abs=0.05)
+
+
+def test_recorded_margin_wins_over_the_derivation():
+    from bot.analysis import _margin
+    t = {"margin": 100.0, "realised_pnl_usdt": 14.4273, "final_roi": 17.47}
+    assert _margin(t) == pytest.approx(100.0)
+
+
+def test_derivation_prefers_roi_from_realised():
+    """That ROI comes from the same figure as the money, so it cannot disagree."""
+    from bot.analysis import _margin
+    t = {"realised_pnl_usdt": 10.0, "final_roi": 50.0, "roi_from_realised": 10.0}
+    assert _margin(t) == pytest.approx(100.0)
+
+
+def test_zero_roi_cannot_be_derived():
+    from bot.analysis import _margin
+    assert _margin({"realised_pnl_usdt": 0.0, "final_roi": 0.0}) is None
+
+
+def test_return_on_capital_works_without_recorded_margin():
+    trades = [{"side": "short", "final_roi": 17.47, "peak_roi": 20.29,
+               "realised_pnl_usdt": 14.4273, "entry_context": {}},
+              {"side": "short", "final_roi": -13.7, "peak_roi": 1.28,
+               "realised_pnl_usdt": -1.2573, "entry_context": {}}]
+    o = analyse(trades)["overall"]
+    assert o["return_on_capital"] is not None
+    assert o["capital_deployed"] is not None

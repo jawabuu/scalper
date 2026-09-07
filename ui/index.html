@@ -2677,6 +2677,23 @@ async function refreshAnalysis() {
     setEl('an-meta', o.n ? `(${o.n} closed trades)` : '(no closed trades yet)');
     setEl('an-notes', (a.notes || []).map(n => `<div class="an-note">${n}</div>`).join(''));
 
+    // Return on the capital actually committed, not a mean of ROI percentages
+    // — averaging percentages weights a large trade the same as a small one,
+    // so one big loss can hide behind two small wins.
+    const roc = o.return_on_capital;
+    const rocEl = document.getElementById('s-roc');
+    if (roc === null || roc === undefined) {
+      setEl('s-roc', '\u2014');
+      setEl('s-roc-sub', 'no closed trades');
+      if (rocEl) rocEl.className = 'stat-value neu';
+    } else {
+      setEl('s-roc', (roc >= 0 ? '+' : '') + Number(roc).toFixed(2) + '%');
+      if (rocEl) rocEl.className = 'stat-value ' + (roc > 0 ? 'pos' : (roc < 0 ? 'neg' : 'neu'));
+      setEl('s-roc-sub', o.capital_deployed
+        ? `on $${Number(o.capital_deployed).toFixed(0)} deployed`
+        : 'net of fees');
+    }
+
     // Fees are gross-vs-net: the exchange P&L figure excludes commission, so a
     // positive total can sit alongside a falling wallet. Show it plainly.
     const fees = o.total_fees;

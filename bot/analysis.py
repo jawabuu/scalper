@@ -54,11 +54,33 @@ def _fees(t: dict) -> float | None:
 
 
 def _margin(t: dict) -> float | None:
+    """
+    Capital committed to the trade.
+
+    Recorded directly from this version on. For trades closed earlier the
+    field is absent, so it is derived from the two numbers that ARE present:
+    margin = realised / (ROI / 100). That keeps the return-on-capital figure
+    working across a history that spans the change, instead of showing a dash
+    until every old trade has aged out.
+    """
     v = t.get("margin")
     try:
-        return float(v) if v else None
+        if v:
+            return float(v)
     except (TypeError, ValueError):
-        return None
+        pass
+
+    pnl = t.get("realised_pnl_usdt")
+    roi = t.get("roi_from_realised")
+    if roi is None:
+        roi = t.get("final_roi")
+    try:
+        if pnl is not None and roi:
+            derived = abs(float(pnl)) / (abs(float(roi)) / 100.0)
+            return derived if derived > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    return None
 
 
 def group_stats(trades: list[dict]) -> dict:
