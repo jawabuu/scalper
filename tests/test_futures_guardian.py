@@ -1715,3 +1715,86 @@ def test_position_past_its_stop_on_discovery_is_closed_not_left_open():
     g.run_cycle()
     assert [o for o in fake.created if o["type"] == "MARKET"]
     assert any(a["action"] == "closed_past_stop" for a in g._actions)
+
+
+# ── Protective stops must not accumulate ─────────────────────────────────────
+
+class _FlakyCancelEx(FakeExchange):
+    """Cancels fail for a while, as observed on ON."""
+    def __init__(self, fail_n=2, **kw):
+        super().__init__(**kw)
+        self.fail_cancels = fail_n
+    def cancel_order(self, order_id, symbol):
+        if self.fail_cancels > 0:
+            self.fail_cancels -= 1
+            raise RuntimeError("cancel failed (transient)")
+        return FakeExchange.cancel_order(self, order_id, symbol)
+
+
+def _ratchet_cfg():
+    from bot.futures_guard import GuardConfig
+    return GuardConfig(initial_stop_roi=10, arm_roi=5, callback_roi=3,
+                       atr_stop_mult=0.0, use_native_trail=False,
+                       min_stop_move_roi=0.5)
+
+
+def test_failed_cancels_do_not_orphan_stops_permanently():
+    """
+    Only the latest stop id was tracked, so a failed cancel orphaned that stop
+    forever. Three protective stops were left resting on one position.
+    """
+    fake = _FlakyCancelEx(fail_n=2, positions=[_raw_pos("long", entry=0.17129)],
+                          price=0.17129)
+    g = _guardian(fake, cfg=_ratchet_cfg())
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    for roi in (6.0, 9.0, 12.0):
+        fake._price = price_for_roi(pos, roi)
+        g.run_cycle()
+    # the failed ones are still known, so they can be swept later
+    assert g._all_stop_ids.get("DOGE/USDT:USDT")
+
+
+def test_all_known_stops_cancelled_when_the_position_closes():
+    fake = _FlakyCancelEx(fail_n=2, positions=[_raw_pos("long", entry=0.17129)],
+                          price=0.17129)
+    g = _guardian(fake, cfg=_ratchet_cfg())
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    for roi in (6.0, 9.0, 12.0):
+        fake._price = price_for_roi(pos, roi)
+        g.run_cycle()
+
+    fake.fail_cancels = 0
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    # more than one cancel attempted: every stop ever placed, not just the last
+    assert len(fake.cancelled) > 1
+    assert "DOGE/USDT:USDT" not in g._all_stop_ids
+
+
+def test_current_stop_is_not_cancelled_by_the_sweep():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.17129)], price=0.17129)
+    g = _guardian(fake, cfg=_ratchet_cfg())
+    g.run_cycle()
+    current = g._states["DOGE/USDT:USDT"].stop_order_id
+    assert current not in [oid for oid, _ in fake.cancelled]
+
+
+def test_native_trail_id_also_cleaned_up_on_close():
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=5, callback_roi=3,
+                      trail_callback_roi=3.0, atr_stop_mult=0.0)
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake, cfg=cfg)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 25.0)
+    g.run_cycle()
+    trail_id = g._states["DOGE/USDT:USDT"].native_trail_id
+    assert trail_id
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert any(oid == trail_id for oid, _ in fake.cancelled)

@@ -858,14 +858,18 @@ def test_orders_the_bot_did_not_place_are_never_cancelled():
 
 
 def test_filled_order_is_forgotten_not_cancelled():
+    """
+    A FILL is proven by the position existing — not by the order being absent
+    from fetch_open_orders, which does not reliably report conditional orders.
+    """
     import time
     ex = _ReapEx()
     svc = _reap_svc(ex)
-    ex.orders = []                                # it filled
+    ex.orders = []
     svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
-                                            "placed_at": time.time() - 1800}]}
-    svc.reap_stale_entry_orders(ttl_s=900, symbols_with_positions=set())
-    assert ex.cancelled == []
+                                            "placed_at": time.time() - 60}]}
+    svc.reap_stale_entry_orders(ttl_s=900,
+                                symbols_with_positions={"BR/USDT:USDT"})
     assert svc.bot_placed_orders("BR/USDT:USDT") == []
 
 
@@ -981,11 +985,136 @@ def test_reaping_the_order_releases_the_symbol():
 
 
 def test_a_filled_order_also_releases_the_symbol():
+    """The position appearing is what proves the fill and frees the symbol."""
     import time
     ex = _ReapEx()
-    ex.fetch_open_orders = lambda s: []          # order gone => filled
+    ex.fetch_open_orders = lambda s: []
     svc = _reap_svc(ex)
     svc._placed_orders = {"BR/USDT:USDT": [{"id": "E1",
                                             "placed_at": time.time() - 30}]}
-    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    svc.reap_stale_entry_orders(ttl_s=600,
+                                symbols_with_positions={"BR/USDT:USDT"})
     assert svc.bot_placed_orders("BR/USDT:USDT") == []
+
+
+# ── Untracked stale orders ───────────────────────────────────────────────────
+
+def test_untracked_stale_order_is_cancelled():
+    """
+    Orders placed before tracking existed rest forever and can fill hours
+    later at a size and price that no longer apply — the cause of several
+    recent losses.
+    """
+    import time
+    ex = _ReapEx()
+    old_ms = int((time.time() - 7200) * 1000)
+    ex.orders = [{"id": "OLD-1", "reduceOnly": False, "symbol": "TRIA/USDT:USDT",
+                  "timestamp": old_ms}]
+    svc = _reap_svc(ex)
+    svc._placed_orders = {}                       # no record of it
+    svc.reap_untracked_entry_orders(ttl_s=600, symbols=["TRIA/USDT:USDT"])
+    assert ("OLD-1", "TRIA/USDT:USDT") in ex.cancelled
+
+
+def test_untracked_recent_order_is_left_alone():
+    import time
+    ex = _ReapEx()
+    ex.orders = [{"id": "NEW-1", "reduceOnly": False, "symbol": "TRIA/USDT:USDT",
+                  "timestamp": int(time.time() * 1000)}]
+    svc = _reap_svc(ex)
+    svc.reap_untracked_entry_orders(ttl_s=600, symbols=["TRIA/USDT:USDT"])
+    assert ex.cancelled == []
+
+
+def test_untracked_sweep_never_touches_protective_orders():
+    import time
+    ex = _ReapEx()
+    old_ms = int((time.time() - 7200) * 1000)
+    ex.orders = [{"id": "STOP-1", "reduceOnly": True, "symbol": "TRIA/USDT:USDT",
+                  "timestamp": old_ms}]
+    svc = _reap_svc(ex)
+    svc.reap_untracked_entry_orders(ttl_s=600, symbols=["TRIA/USDT:USDT"])
+    assert ex.cancelled == []
+
+
+def test_untracked_sweep_releases_the_symbol():
+    import time
+    ex = _ReapEx()
+    old_ms = int((time.time() - 7200) * 1000)
+    ex.orders = [{"id": "OLD-1", "reduceOnly": False, "symbol": "BR/USDT:USDT",
+                  "timestamp": old_ms}]
+    svc = _reap_svc(ex)
+    svc._note_pending("BR/USDT:USDT")
+    svc.reap_untracked_entry_orders(ttl_s=600, symbols=["BR/USDT:USDT"])
+    assert not svc._recently_placed("BR/USDT:USDT")
+
+
+def test_order_without_a_timestamp_is_not_cancelled():
+    """No age means no basis to judge — leave it rather than guess."""
+    ex = _ReapEx()
+    ex.orders = [{"id": "X-1", "reduceOnly": False, "symbol": "BR/USDT:USDT"}]
+    svc = _reap_svc(ex)
+    svc.reap_untracked_entry_orders(ttl_s=600, symbols=["BR/USDT:USDT"])
+    assert ex.cancelled == []
+
+
+# ── Absence from fetch_open_orders is not proof of filling ───────────────────
+
+class _BlindEx(_ReapEx):
+    """fetch_open_orders never reports the conditional order, as observed live."""
+    def fetch_open_orders(self, s):
+        return []
+
+
+def test_stale_order_cancelled_even_when_query_is_blind():
+    """
+    The reaper treated a missing order as filled and silently forgot it, so
+    nothing was ever cancelled and the symbol was unblocked while the order
+    still rested on the exchange.
+    """
+    import time
+    ex = _BlindEx()
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"TRIA/USDT:USDT": [{"id": "E1",
+                                              "placed_at": time.time() - 3600}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert ("E1", "TRIA/USDT:USDT") in ex.cancelled
+    assert svc.bot_placed_orders("TRIA/USDT:USDT") == []
+
+
+def test_young_order_is_kept_tracked_when_query_is_blind():
+    """It must keep blocking duplicates rather than being forgotten."""
+    import time
+    ex = _BlindEx()
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"TRIA/USDT:USDT": [{"id": "E1",
+                                              "placed_at": time.time() - 60}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert ex.cancelled == []
+    assert len(svc.bot_placed_orders("TRIA/USDT:USDT")) == 1
+    assert svc._recently_placed("TRIA/USDT:USDT")
+
+
+def test_position_appearing_clears_the_tracked_order():
+    import time
+    ex = _BlindEx()
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"TRIA/USDT:USDT": [{"id": "E1",
+                                              "placed_at": time.time() - 60}]}
+    svc.reap_stale_entry_orders(ttl_s=600,
+                                symbols_with_positions={"TRIA/USDT:USDT"})
+    assert svc.bot_placed_orders("TRIA/USDT:USDT") == []
+
+
+def test_unknown_order_reply_is_not_logged_as_a_failure():
+    """-2011 means it really is gone; that is a clean outcome, not an error."""
+    import time
+    ex = _BlindEx()
+    def boom(oid, symbol):
+        raise RuntimeError("binanceusdm {\"code\":-2011,\"msg\":\"Unknown order sent.\"}")
+    ex.cancel_order = boom
+    svc = _reap_svc(ex)
+    svc._placed_orders = {"TRIA/USDT:USDT": [{"id": "E1",
+                                              "placed_at": time.time() - 3600}]}
+    svc.reap_stale_entry_orders(ttl_s=600, symbols_with_positions=set())
+    assert svc.bot_placed_orders("TRIA/USDT:USDT") == []

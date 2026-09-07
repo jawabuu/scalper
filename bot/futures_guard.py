@@ -63,7 +63,10 @@ class FuturesPosition:
 @dataclass
 class GuardState:
     """Per-position tracking the guardian keeps in memory."""
-    peak_roi: float = 0.0          # highest ROI% seen (monotonic)
+    peak_roi: float = 0.0
+    # Worst ROI seen while open. Peak alone cannot answer "would a tighter stop
+    # have cut this winner short?" — that needs the trough.
+    trough_roi: float = 0.0
     armed: bool = False            # has the trailing stop armed?
     stop_order_id: str | None = None
     stop_roi: float | None = None  # ROI level the resting stop sits at
@@ -326,9 +329,17 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
 
 
 def update_peak(state: GuardState, current_roi: float) -> GuardState:
-    """Track the high-water ROI mark. Monotonic — never decreases."""
+    """
+    Track the high- and low-water ROI marks. Both monotonic.
+
+    The trough matters for tuning: peak alone cannot tell you whether a tighter
+    stop would have cut a winner short, because it records the best moment and
+    says nothing about how far the trade went against you first.
+    """
     if current_roi > state.peak_roi:
         state.peak_roi = current_roi
+    if current_roi < state.trough_roi:
+        state.trough_roi = current_roi
     return state
 
 

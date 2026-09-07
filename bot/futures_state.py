@@ -81,6 +81,7 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         "states": {
             sym: {
                 "peak_roi": s.peak_roi,
+                "trough_roi": getattr(s, "trough_roi", 0.0),
                 "armed": s.armed,
                 "stop_roi": s.stop_roi,
                 "stop_order_id": s.stop_order_id,
@@ -198,6 +199,7 @@ def restore_states(data: dict):
         try:
             st = GuardState()
             st.peak_roi = float(raw.get("peak_roi") or 0.0)
+            st.trough_roi = float(raw.get("trough_roi") or 0.0)
             st.armed = bool(raw.get("armed"))
             st.stop_roi = raw.get("stop_roi")
             st.stop_order_id = raw.get("stop_order_id")

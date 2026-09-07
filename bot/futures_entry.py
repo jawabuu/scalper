@@ -388,6 +388,52 @@ class EntryService:
         """Restore after a restart, so stale orders remain reapable."""
         self._placed_orders = {k: list(v) for k, v in (data or {}).items()}
 
+    def reap_untracked_entry_orders(self, ttl_s: float, symbols: list) -> list:
+        """
+        Cancel stale entry orders the bot has no record of.
+
+        The tracked reaper only knows orders placed since tracking began, so
+        anything from an earlier version — or lost when a record was cleared —
+        rests forever and can fill hours later at a size and price that no
+        longer make sense. Those late fills are what produced recent losses.
+
+        Uses the exchange's own timestamp, so no local record is needed. Off by
+        default: an operator who places entries by hand would have them
+        cancelled, which is exactly what the tracked reaper avoids.
+        """
+        cancelled = []
+        now = time.time() * 1000
+        for symbol in symbols:
+            try:
+                orders = self.guardian.exchange.fetch_open_orders(symbol) or []
+            except Exception as e:
+                log.warning(f"{symbol}: could not list orders to reap: {e}")
+                continue
+            for o in orders:
+                info = o.get("info") or {}
+                reduce_only = o.get("reduceOnly")
+                if reduce_only is None:
+                    reduce_only = str(info.get("reduceOnly", "")).lower() == "true"
+                if reduce_only:
+                    continue                      # protective, never touch
+                ts = o.get("timestamp") or float(info.get("time") or 0)
+                if not ts:
+                    continue                      # no age, cannot judge
+                age_s = (now - float(ts)) / 1000.0
+                if age_s < ttl_s:
+                    continue
+                oid = str(o.get("id") or info.get("orderId") or "")
+                try:
+                    self.guardian.exchange.cancel_order(oid, symbol)
+                    log.warning(f"{symbol}: cancelled UNTRACKED entry order {oid} "
+                                f"(unfilled after {age_s/60:.0f}m)")
+                    cancelled.append((symbol, oid, f"untracked, {age_s/60:.0f}m"))
+                    self.forget_order(symbol, oid)
+                    self.clear_pending(symbol)
+                except Exception as e:
+                    log.warning(f"{symbol}: could not cancel {oid}: {e}")
+        return cancelled
+
     def reap_stale_entry_orders(self, ttl_s: float,
                                 symbols_with_positions: set) -> list:
         """
@@ -417,13 +463,25 @@ class EntryService:
                     if now - float(row.get("placed_at") or now) >= ttl_s:
                         self.forget_order(symbol, oid)  # placeholder expired
                     continue
-                if oid not in resting:
-                    self.forget_order(symbol, oid)      # filled or already gone
-                    continue
                 age = now - float(row.get("placed_at") or now)
                 has_pos = symbol in symbols_with_positions
-                if not has_pos and age < ttl_s:
-                    continue
+                seen = oid in resting
+
+                # Absence from fetch_open_orders is NOT proof the order filled.
+                # That query does not reliably report conditional (trailing
+                # stop) orders, so treating absence as "gone" silently forgot
+                # every tracked order on its first cycle — nothing was ever
+                # cancelled, and the symbol was unblocked while the order still
+                # rested. Only a position appearing, or the exchange telling us
+                # the order is unknown, proves it is gone.
+                if has_pos:
+                    pass                       # it filled (or must be cleared)
+                elif age < ttl_s:
+                    continue                   # still young; keep tracking
+                elif not seen:
+                    # Past TTL and unseen: attempt the cancel anyway rather
+                    # than assume. An "unknown order" reply settles it.
+                    pass
                 reason = ("position already open" if has_pos
                           else f"unfilled after {age/60:.0f}m")
                 try:
@@ -432,7 +490,11 @@ class EntryService:
                                 f"({reason})")
                     cancelled.append((symbol, oid, reason))
                 except Exception as e:
-                    log.warning(f"{symbol}: could not cancel {oid}: {e}")
+                    msg = str(e).lower()
+                    if "unknown order" in msg or "does not exist" in msg or "-2011" in msg:
+                        log.debug(f"{symbol}: order {oid} already gone")
+                    else:
+                        log.warning(f"{symbol}: could not cancel {oid}: {e}")
                 self.forget_order(symbol, oid)
         return cancelled
 

@@ -163,7 +163,30 @@ def analyse(trades: list[dict]) -> dict:
             f"Average give-back is {overall['avg_giveback']:.1f}% ROI from peak. "
             f"Arming the trail earlier would convert more of that into realised P&L.")
 
+    # Would a tighter stop have cut winners short? Only the trough can say.
+    winners = [t for t in trades if (_roi(t) or 0) > 0]
+    troughs = [float(t.get("trough_roi")) for t in winners
+               if t.get("trough_roi") is not None]
+    stop_impact = []
+    for level in (5.0, 10.0, 15.0, 20.0):
+        hit = [v for v in troughs if v <= -level]
+        stop_impact.append({
+            "stop_roi": level,
+            "winners_cut": len(hit),
+            "of_winners": len(troughs),
+            "confidence": confidence_for(len(troughs)),
+        })
+    if troughs:
+        notes_extra = (f"{len(troughs)} winners have trough data; "
+                       f"deepest dip {min(troughs):.1f}% ROI.")
+    else:
+        notes_extra = ("No trough data yet — it is recorded from this version "
+                       "on, and is what shows whether a tighter stop would "
+                       "have cut winners short.")
+
     return {
+        "stop_impact": stop_impact,
+        "trough_note": notes_extra,
         "overall": overall,
         "by_side": {"long": group_stats(longs), "short": group_stats(shorts)},
         "by_rsi": bucket_by(trades, lambda t: _stamp(t, "rsi"), RSI_BUCKETS),

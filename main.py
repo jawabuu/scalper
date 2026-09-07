@@ -130,6 +130,7 @@ if __name__ == "__main__":
             # The guardian drives the reap loop and owns persistence.
             guardian._entry_service = entry_service
             guardian.entry_order_ttl_s = cfg.entry_order_ttl_s
+            guardian.reap_untracked = cfg.entry_reap_untracked
             entry_service.import_placed_orders(
                 getattr(guardian, "_restored_placed_orders", {}))
             log.warning(
@@ -171,6 +172,8 @@ if __name__ == "__main__":
             interval=cfg.scanner_interval,
             demo=cfg.scanner_demo,
         )
+        if guardian is not None:
+            guardian._scanner = scan_runner     # widens the untracked sweep
         set_scanner(scan_runner)
         scan_runner.start_background()
       except Exception as e:

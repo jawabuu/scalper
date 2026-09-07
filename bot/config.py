@@ -328,6 +328,10 @@ class BotConfig:
     # How long an unfilled entry order may rest before the bot cancels it. A
     # GTC order that never fills blocks its symbol and, if it eventually
     # triggers, opens a position sized for conditions long past.
+    # Also cancel stale entry orders the bot has NO record of (e.g. placed
+    # before tracking existed). Leave false if you place entries by hand —
+    # those would be cancelled too.
+    entry_reap_untracked: bool = field(default_factory=lambda: _env_bool("ENTRY_REAP_UNTRACKED", False))
     entry_order_ttl_s: float = field(default_factory=lambda: max(
         60.0, _env_float("ENTRY_ORDER_TTL_S", 900.0)))
 

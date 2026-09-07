@@ -224,6 +224,11 @@ class FuturesGuardian:
         self._atr_cache: dict[str, tuple[float, float]] = {}   # sym -> (atr%, ts)
         # Extra order ids when a stop had to be split across the per-order cap.
         self._split_stop_ids: dict[str, list[str]] = {}
+        # EVERY protective stop id placed per symbol, not just the current one.
+        # Ratcheting replaces a stop each time it moves; a failed cancel used to
+        # orphan that stop permanently, because only the latest id was tracked.
+        # Three stops were left resting on one position for exactly that reason.
+        self._all_stop_ids: dict[str, list[str]] = {}
         # Where restart-critical state is persisted. Empty disables it.
         self.state_path: str = getattr(self, "state_path", "")
         self.state_owner: str = getattr(self, "state_owner", "")
@@ -234,6 +239,9 @@ class FuturesGuardian:
         # any moment. Shrinks the unprotected window after a fill.
         self.pending_poll_interval: float = getattr(
             self, "pending_poll_interval", 1.0)
+        self.reap_untracked: bool = getattr(self, "reap_untracked", False)
+        self._last_untracked_sweep: float = 0.0
+        self.untracked_sweep_interval_s: float = 120.0
 
     # ── reading ─────────────────────────────────────────────────────────────
 
@@ -722,6 +730,16 @@ class FuturesGuardian:
         )
         return oid
 
+    def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None):
+        """Cancel protective stops for this symbol other than the current one."""
+        ids = list(self._all_stop_ids.get(pos.symbol) or [])
+        for oid in ids:
+            if keep and oid == keep:
+                continue
+            if self._cancel_stop(pos, oid):
+                self._all_stop_ids[pos.symbol] = [
+                    i for i in self._all_stop_ids.get(pos.symbol, []) if i != oid]
+
     def _cancel_stop(self, pos: FuturesPosition, order_id: str) -> bool:
         """
         Cancel a stop the guardian is managing.
@@ -927,10 +945,15 @@ class FuturesGuardian:
                             self._states[pos.symbol] = state
                         return
 
+                    # Report the stop ACTUALLY used. Printing the config value
+                    # made a message read "at -5.7% ROI, past the -10% stop",
+                    # which is self-contradictory and hid that the stop had been
+                    # tightened by the budget cap.
                     state.unprotected_reason = (
                         f"already at {cur:+.1f}% ROI, past the "
-                        f"{-self.cfg.initial_stop_roi:+.0f}% stop — exchange "
-                        f"rejected the stop, and the trailing fallback also failed"
+                        f"{-abs(stop_roi_used):+.1f}% stop (config default "
+                        f"{-self.cfg.initial_stop_roi:+.0f}%) — exchange rejected "
+                        f"the stop, and the trailing fallback also failed"
                     )
                     log.error(
                         f"{pos.symbol}: UNPROTECTED — {state.unprotected_reason}. "
@@ -955,7 +978,15 @@ class FuturesGuardian:
             if prev_order_id and new_id:
                 self._cancel_stop(pos, prev_order_id)
 
+            if new_id:
+                self._all_stop_ids.setdefault(pos.symbol, [])
+                if new_id not in self._all_stop_ids[pos.symbol]:
+                    self._all_stop_ids[pos.symbol].append(new_id)
             state.stop_order_id = new_id
+            # Sweep any earlier stops whose cancel did not take. Harmless
+            # individually, but they accumulate and can fire against a LATER
+            # position on the same symbol.
+            self._cancel_superseded_stops(pos, keep=new_id)
             log.info(f"{pos.symbol}: {reason} | ROI now {roi_pct(pos, price):+.1f}% "
                      f"| stop @ {stop_price}")
             self._record(pos.symbol, "stop_set",
@@ -1108,8 +1139,13 @@ class FuturesGuardian:
         # it at a level chosen for the old trade. Done outside the state lock
         # because it makes network calls.
         for sym, st, _meta in gone:
+            ids = set(self._all_stop_ids.pop(sym, []) or [])
             if st.stop_order_id:
-                self._cancel_orphan_stop(sym, st.stop_order_id)
+                ids.add(st.stop_order_id)
+            if st.native_trail_id:
+                ids.add(st.native_trail_id)
+            for oid in ids:
+                self._cancel_orphan_stop(sym, oid)
 
         for pos in positions:
             try:
@@ -1127,6 +1163,15 @@ class FuturesGuardian:
                 entry.reap_stale_entry_orders(self.entry_order_ttl_s, live_symbols)
             except Exception as e:
                 log.warning(f"entry-order reap failed: {e}")
+
+            # Sweep for orders the bot has no record of. Anything placed before
+            # tracking existed rests indefinitely and can fill hours later.
+            if self.reap_untracked and self._untracked_due():
+                try:
+                    entry.reap_untracked_entry_orders(
+                        self.entry_order_ttl_s, self._reap_scan_symbols())
+                except Exception as e:
+                    log.warning(f"untracked reap failed: {e}")
 
         self._last_cycle_ts = time.time()
         self._last_error = None
@@ -1231,6 +1276,7 @@ class FuturesGuardian:
             "margin_usdt": meta.get("margin"),
             "leverage": meta.get("leverage"),
             "peak_roi": round(state.peak_roi, 2),
+            "trough_roi": round(state.trough_roi, 2),
             "final_roi": final_roi,
             "observed_roi": _r2(meta.get("current_roi")),
             "exit_from_exchange": exit_from_exchange,
@@ -1350,6 +1396,36 @@ class FuturesGuardian:
         with self._lock:
             return list(reversed(self._closed_trades))
 
+    def _untracked_due(self) -> bool:
+        """Sweeping costs one call per symbol, so it runs on its own slower clock."""
+        now = time.time()
+        if now - self._last_untracked_sweep < self.untracked_sweep_interval_s:
+            return False
+        self._last_untracked_sweep = now
+        return True
+
+    def _reap_scan_symbols(self) -> list:
+        """
+        Symbols worth sweeping: whatever the bot has touched, plus anything the
+        scanner is currently looking at.
+        """
+        syms = set()
+        entry = getattr(self, "_entry_service", None)
+        if entry is not None:
+            syms.update(entry.export_placed_orders().keys())
+        scanner = getattr(self, "_scanner", None)
+        if scanner is not None:
+            try:
+                for row in (scanner.snapshot().get("candidates") or []):
+                    if row.get("symbol"):
+                        syms.add(row["symbol"])
+            except Exception:
+                pass
+        with self._lock:
+            syms.update(self._states.keys())
+            syms.update(self._pos_meta.keys())
+        return sorted(syms)
+
     def _has_pending_entries(self) -> bool:
         entry = getattr(self, "_entry_service", None)
         if entry is None:
@@ -1390,6 +1466,7 @@ class FuturesGuardian:
             states = {
                 sym: {
                     "peak_roi": round(s.peak_roi, 2),
+                    "trough_roi": round(s.trough_roi, 2),
                     "armed": s.armed,
                     "stop_roi": None if s.stop_roi is None else round(s.stop_roi, 2),
                     "stop_order_id": s.stop_order_id,
