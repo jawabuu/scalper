@@ -632,13 +632,32 @@ class EntryService:
         # Never size beyond the exchange's per-ORDER quantity cap. A position
         # above it cannot have a single protective stop placed (-4005), which is
         # how a position ended up unprotected while the guardian retried.
+        capped_note = None
         try:
             m = self.guardian.exchange.market(symbol)
-            max_qty = (((m or {}).get("limits") or {}).get("amount") or {}).get("max")
+            # Use the MARKET cap: these entries execute as market orders, and
+            # MARKET_LOT_SIZE is smaller than LOT_SIZE. Reading only LOT_SIZE
+            # produced -4005 "Quantity greater than max quantity" rejections on
+            # low-priced coins, which needed manual margin reduction to clear.
+            # getattr, not a direct call: if the guardian does not expose the
+            # helper, an AttributeError would hit the outer except and skip the
+            # trim ENTIRELY — turning a smaller position into a -4005 rejection.
+            resolver = getattr(self.guardian, "market_max_qty", None)
+            max_qty = resolver(symbol) if callable(resolver) else None
+            if max_qty is None:
+                limits = (m or {}).get("limits") or {}
+                caps = [float(v["max"]) for k, v in limits.items()
+                        if isinstance(v, dict) and v.get("max")
+                        and k in ("market", "amount")]
+                max_qty = min(caps) if caps else None
             if max_qty and qty_raw > float(max_qty):
-                log.warning(
-                    f"{symbol}: size {qty_raw:g} exceeds the per-order cap "
-                    f"{float(max_qty):g} — trimming so the stop can be placed")
+                pct = float(max_qty) / qty_raw * 100
+                capped_note = (
+                    f"size trimmed to the exchange's per-order cap "
+                    f"({float(max_qty):g} contracts, {pct:.0f}% of the "
+                    f"risk-based size) — risk will be BELOW the budget, "
+                    f"not above it")
+                log.warning(f"{symbol}: {capped_note}")
                 qty_raw = float(max_qty)
         except Exception:
             pass
@@ -652,6 +671,8 @@ class EntryService:
         # size is how a 10.7 USDT margin became 0.7, so surface it loudly and
         # report the size that will ACTUALLY be opened, not the requested one.
         size_warnings: list[str] = []
+        if capped_note:
+            size_warnings.append(capped_note)
         if qty_raw > 0:
             shrink = (qty_raw - qty) / qty_raw
             if shrink >= 0.10:

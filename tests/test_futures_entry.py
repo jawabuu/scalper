@@ -1166,3 +1166,59 @@ def test_orphan_stop_sweep_never_touches_an_entry():
     g = _guardian(ex)
     g.reap_orphan_stops()
     assert "A4" in [a["algoId"] for a in ex.algo]
+
+
+# ── The MARKET per-order cap, not the LIMIT one ──────────────────────────────
+
+def test_market_cap_is_preferred_over_lot_size():
+    """
+    Binance publishes LOT_SIZE (limit orders) and MARKET_LOT_SIZE (market
+    orders); the market cap is far smaller. These entries and stops execute as
+    market orders, so reading only LOT_SIZE produced -4005 rejections that had
+    to be cleared by reducing margin by hand.
+    """
+    import sys
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, FakeExchange
+
+    class CapEx(FakeExchange):
+        def market(self, s):
+            return {"limits": {"amount": {"max": 1000000},
+                               "market": {"max": 5000}},
+                    "info": {"filters": []}}
+    assert _guardian(CapEx()).market_max_qty("X/USDT:USDT") == pytest.approx(5000)
+
+
+def test_cap_falls_back_to_raw_filters():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, FakeExchange
+
+    class RawEx(FakeExchange):
+        def market(self, s):
+            return {"limits": {}, "info": {"filters": [
+                {"filterType": "LOT_SIZE", "maxQty": "1000000"},
+                {"filterType": "MARKET_LOT_SIZE", "maxQty": "5000"}]}}
+    assert _guardian(RawEx()).market_max_qty("X/USDT:USDT") == pytest.approx(5000)
+
+
+def test_single_published_cap_is_used():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, FakeExchange
+
+    class OneEx(FakeExchange):
+        def market(self, s):
+            return {"limits": {"amount": {"max": 800}}, "info": {"filters": []}}
+    assert _guardian(OneEx()).market_max_qty("X/USDT:USDT") == pytest.approx(800)
+
+
+def test_no_cap_published_returns_none():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_futures_guardian import _guardian, FakeExchange
+
+    class NoneEx(FakeExchange):
+        def market(self, s):
+            return {"limits": {}, "info": {"filters": []}}
+    assert _guardian(NoneEx()).market_max_qty("X/USDT:USDT") is None

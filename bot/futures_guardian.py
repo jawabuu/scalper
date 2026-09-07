@@ -362,6 +362,9 @@ class FuturesGuardian:
     # Cancels are retried well past the position's life: an order that reports
     # -2011 may still be resting, so give it many chances before abandoning it.
     MAX_CANCEL_ATTEMPTS = 60
+    # Seconds of slack before the order-placed stamp when querying the income
+    # ledger, so the entry fill's commission is inside the window.
+    INCOME_LOOKBACK_PAD_S = 120.0
     # Give up on the expensive account-wide listing after this many empties,
     # then re-probe on a slow clock in case the environment starts reporting.
     EMPTY_LISTING_LIMIT = 5
@@ -634,16 +637,34 @@ class FuturesGuardian:
 
     def market_max_qty(self, symbol: str) -> float | None:
         """
-        The exchange's per-order quantity cap for this symbol, if published.
+        The per-order quantity cap that applies to a MARKET-executing order.
 
-        Low-priced coins need a huge contract count for a given notional, so a
-        legitimate position size can exceed the per-ORDER cap and the protective
-        stop is rejected with -4005 — leaving the position unprotected.
+        Binance publishes two caps: LOT_SIZE (limit orders) and
+        MARKET_LOT_SIZE (market orders), and the market one is usually far
+        smaller. Stops, trailing stops and entries here all execute as market,
+        so the MARKET cap governs — but only LOT_SIZE was being read, so orders
+        sized against it were rejected with -4005 "Quantity greater than max
+        quantity".
+
+        Returns the smaller of the two that are published.
         """
         try:
-            m = self.exchange.market(symbol)
-            mx = (((m or {}).get("limits") or {}).get("amount") or {}).get("max")
-            return float(mx) if mx else None
+            m = self.exchange.market(symbol) or {}
+            limits = m.get("limits") or {}
+            caps = []
+            for key in ("market", "amount"):
+                mx = ((limits.get(key) or {}).get("max"))
+                if mx:
+                    caps.append(float(mx))
+            # Fall back to the raw filter if ccxt did not surface it.
+            if not caps:
+                for f in ((m.get("info") or {}).get("filters") or []):
+                    if f.get("filterType") in ("MARKET_LOT_SIZE", "LOT_SIZE"):
+                        try:
+                            caps.append(float(f.get("maxQty")))
+                        except (TypeError, ValueError):
+                            pass
+            return min(caps) if caps else None
         except Exception:
             return None
 
@@ -1458,10 +1479,23 @@ class FuturesGuardian:
         # sit inside the same try, so a fill-lookup failure skipped it — losing
         # the authoritative source exactly when the fallback was needed.
         try:
+            # The window must start when the ORDER WAS PLACED, not when the
+            # guardian first saw the position. The entry commission is charged
+            # at the fill, which precedes the first poll — starting at
+            # opened_seen_at filtered it out and captured only the EXIT side,
+            # halving every fee figure and leaving the wallet unreconciled.
+            ctx = meta.get("entry_context") or {}
+            placed_at = ctx.get("sized_at")
             opened_at = meta.get("opened_seen_at")
-            since_ms = int(opened_at * 1000) if opened_at else None
+            floor_ts = placed_at or opened_at
+            if floor_ts:
+                # A small margin in case the fill preceded the recorded stamp.
+                income_since = int((float(floor_ts) - self.INCOME_LOOKBACK_PAD_S)
+                                   * 1000)
+            else:
+                income_since = None
             led_pnl, led_comm, led_found = self._income_for_position(
-                symbol, since_ms)
+                symbol, income_since)
             if led_found:
                 if led_comm:
                     self._last_trade_fees = round(led_comm, 6)

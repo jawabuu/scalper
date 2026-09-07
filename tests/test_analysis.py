@@ -239,3 +239,18 @@ def test_no_mismatch_when_consistent():
     trades = [{"side": "short", "final_roi": 4.18, "roi_from_realised": 4.18,
                "peak_roi": 4.18, "realised_pnl_usdt": 4.32, "entry_context": {}}]
     assert analyse(trades)["roi_mismatches"] == 0
+
+
+def test_wallet_reconciles_with_full_round_trip_fees():
+    """
+    With only the exit side captured the wallet was short by exactly the
+    missing entry commission.
+    """
+    from bot.analysis import reconcile
+    trades = [{"realised_pnl_usdt": 15.3342, "fees_usdt": 2.60, "pnl_source": "ledger"},
+              {"realised_pnl_usdt": -24.5864, "fees_usdt": 2.52, "pnl_source": "ledger"},
+              {"realised_pnl_usdt": -28.6656, "fees_usdt": 2.66, "pnl_source": "ledger"},
+              {"realised_pnl_usdt": -25.2470, "fees_usdt": 2.62, "pnl_source": "ledger"}]
+    r = reconcile(trades, wallet_now=4926.43, wallet_start=5000.0)
+    assert r["reconciles"] is True
+    assert abs(r["discrepancy"]) < 0.05

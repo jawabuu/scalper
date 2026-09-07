@@ -2666,3 +2666,69 @@ def test_fees_do_not_leak_between_trades():
     assert len(g.closed_trades()) == 2
     assert g.closed_trades()[0]["fees_usdt"] is None, "stale fee leaked"
     assert g.closed_trades()[1]["fees_usdt"] == pytest.approx(2.0697, abs=0.001)
+
+
+# ── The income window must cover the ENTRY fill ──────────────────────────────
+
+def test_entry_commission_is_inside_the_income_window():
+    """
+    The window started at opened_seen_at — when the guardian first SAW the
+    position. The entry commission is charged at the fill, which precedes that
+    poll, so only the EXIT side was captured. Every fee figure was halved and
+    the wallet never reconciled: 5.22 captured against 10.40 actually paid.
+    """
+    import time
+    now = time.time()
+
+    class BothSidesEx(FakeExchange):
+        def market_id(self, s):
+            return "AEROUSDT"
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return []
+        def fapiPrivateGetIncome(self, params=None):
+            start = (params or {}).get("startTime")
+            rows = [
+                {"incomeType": "COMMISSION", "income": "-1.26",
+                 "time": int((now - 300) * 1000)},          # entry fill
+                {"incomeType": "REALIZED_PNL", "income": "-24.5864",
+                 "time": int(now * 1000)},
+                {"incomeType": "COMMISSION", "income": "-1.26",
+                 "time": int(now * 1000)},                  # exit fill
+            ]
+            return [r for r in rows if not start or r["time"] >= start]
+
+    fake = BothSidesEx(positions=[_raw_pos("short", entry=0.6156)], price=0.6156)
+    g = _guardian(fake)
+    g.run_cycle()
+    g._pos_meta["DOGE/USDT:USDT"]["entry_context"] = {"sized_at": now - 300}
+    g._pos_meta["DOGE/USDT:USDT"]["opened_seen_at"] = now - 30
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+
+    t = g.closed_trades()[0]
+    assert t["fees_usdt"] == pytest.approx(2.52, abs=0.01), "entry side missed"
+    assert t["net_pnl_usdt"] == pytest.approx(-27.11, abs=0.01)
+
+
+def test_window_falls_back_when_no_placement_stamp():
+    """A manually opened position has no sized_at; opened_seen_at still works."""
+    import time
+    now = time.time()
+
+    class Ex(FakeExchange):
+        def market_id(self, s):
+            return "XUSDT"
+        def fetch_my_trades(self, symbol, since=None, limit=50):
+            return []
+        def fapiPrivateGetIncome(self, params=None):
+            return [{"incomeType": "COMMISSION", "income": "-1.00",
+                     "time": int(now * 1000)}]
+
+    fake = Ex(positions=[_raw_pos("long", entry=1.0)], price=1.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    fake._positions = []
+    for _ in range(g.MISSING_CONFIRMATIONS):
+        g.run_cycle()
+    assert g.closed_trades()[0]["fees_usdt"] == pytest.approx(1.0)
