@@ -1395,6 +1395,64 @@ class FuturesGuardian:
         return {"ok": True, "dry_run": False, "symbol": symbol,
                 "side": side, "qty": qty, "order_id": oid}
 
+    def _all_open_orders_raw(self) -> list:
+        """
+        Every open order on the account, from the exchange directly.
+
+        The unified fetch_open_orders() call with no symbol has been observed
+        returning nothing on this account while per-symbol queries return
+        orders, so the raw endpoint is tried as well. Asking the exchange for
+        the full list is the only approach that does not depend on the bot
+        remembering which symbols to check — and that memory is cleared by a
+        history reset or a failed persist.
+        """
+        rows = []
+        for label, call in (
+                ("unified", lambda: self.exchange.fetch_open_orders()),
+                ("raw fapi", lambda: self.exchange.fapiPrivateGetOpenOrders()),
+        ):
+            try:
+                got = call() or []
+                log.info(f"open-order listing via {label}: {len(got)} order(s)")
+                for o in got:
+                    if isinstance(o, dict):
+                        rows.append(o)
+            except Exception as e:
+                log.info(f"open-order listing via {label} unavailable: "
+                         f"{type(e).__name__}")
+        return rows
+
+    def _normalise_order(self, o: dict) -> dict:
+        """Accept either a ccxt order or a raw Binance one."""
+        info = o.get("info") if isinstance(o.get("info"), dict) else o
+        sym = o.get("symbol") or ""
+        if sym and "/" not in sym:
+            # raw Binance gives BRUSDT; map it back to the unified symbol
+            try:
+                sym = self.exchange.markets_by_id[sym][0]["symbol"]
+            except Exception:
+                base = sym[:-4] if sym.endswith("USDT") else sym
+                sym = f"{base}/USDT:USDT"
+        # Careful: the raw endpoint returns the STRING "false", and
+        # bool("false") is True. Coerce explicitly — getting this wrong would
+        # classify an entry order as a protective stop and cancel it, breaking
+        # the guarantee that the bot never touches an entry it did not place.
+        ro = o.get("reduceOnly")
+        if ro is None:
+            ro = info.get("reduceOnly")
+        if isinstance(ro, str):
+            ro = ro.strip().lower() == "true"
+        ro = bool(ro)
+        return {
+            "id": str(o.get("id") or info.get("orderId") or ""),
+            "symbol": sym,
+            "type": (o.get("type") or info.get("origType")
+                     or info.get("type") or "").upper(),
+            "reduce_only": ro,
+            "ts": o.get("timestamp") or float(info.get("time") or 0),
+            "qty": o.get("amount") or info.get("origQty"),
+        }
+
     def _orphan_scan_symbols(self, live: set) -> list:
         """
         Symbols worth checking for orphaned stops: anywhere the bot has traded
@@ -1425,6 +1483,69 @@ class FuturesGuardian:
                 pass
         return sorted(syms - live)
 
+    def reconcile_orders(self) -> dict:
+        """
+        Compare every resting order against actual positions.
+
+        Exists so a mismatch is visible in the dashboard rather than requiring
+        the exchange UI to be read by hand. Classifies each order as
+        protecting a real position, an orphaned stop, or a stale entry.
+        """
+        out = {"positions": [], "protecting": [], "orphan_stops": [],
+               "stale_entries": [], "account_wide_count": 0,
+               "per_symbol_count": 0, "error": None}
+        try:
+            live = {p.symbol: p for p in self.fetch_positions()}
+        except Exception as e:
+            out["error"] = f"positions: {e}"
+            return out
+        out["positions"] = [
+            {"symbol": sym, "side": p.side, "qty": p.qty,
+             "margin": round(p.margin, 2)} for sym, p in live.items()]
+
+        orders, seen = [], set()
+        for raw in self._all_open_orders_raw():
+            o = self._normalise_order(raw)
+            if o["id"] and o["id"] not in seen:
+                seen.add(o["id"]); orders.append(o); out["account_wide_count"] += 1
+        for sym in sorted(live) + self._orphan_scan_symbols(set(live)):
+            try:
+                for raw in (self.exchange.fetch_open_orders(sym) or []):
+                    o = self._normalise_order(raw)
+                    o["symbol"] = o["symbol"] or sym
+                    if o["id"] and o["id"] not in seen:
+                        seen.add(o["id"]); orders.append(o)
+                        out["per_symbol_count"] += 1
+            except Exception:
+                pass
+
+        for o in orders:
+            ro = o["reduce_only"]
+            sym = o["symbol"]
+            row = dict(o)
+            if not ro:
+                row["has_position"] = sym in live
+                out["stale_entries"].append(row)
+            elif sym in live:
+                out["protecting"].append(row)
+            else:
+                out["orphan_stops"].append(row)
+
+        # A position needs exactly ONE protective stop. Extras are superseded
+        # ratchets whose cancel never took; they can still fire at a stale
+        # level. Keep the most recent, list the rest as surplus.
+        out["duplicate_stops"] = []
+        by_sym: dict = {}
+        for r in out["protecting"]:
+            by_sym.setdefault(r["symbol"], []).append(r)
+        keep = []
+        for sym, rows in by_sym.items():
+            rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+            keep.append(rows[0])
+            out["duplicate_stops"].extend(rows[1:])
+        out["protecting"] = keep
+        return out
+
     def reap_orphan_stops(self) -> list:
         """
         Cancel reduce-only stops resting on symbols with NO open position.
@@ -1453,47 +1574,44 @@ class FuturesGuardian:
         # that relied on the account-wide call alone.
         orders, seen_ids = [], set()
         account_wide = 0
-        try:
-            for o in (self.exchange.fetch_open_orders() or []):
-                oid = str(o.get("id") or (o.get("info") or {}).get("orderId") or "")
-                if oid and oid not in seen_ids:
-                    seen_ids.add(oid)
-                    orders.append(o)
-                    account_wide += 1
-        except Exception as e:
-            log.warning(f"orphan-stop sweep: account-wide order list failed: {e}")
+        for raw in self._all_open_orders_raw():
+            o = self._normalise_order(raw)
+            if o["id"] and o["id"] not in seen_ids:
+                seen_ids.add(o["id"]); orders.append(o); account_wide += 1
 
         per_symbol = 0
-        for sym in self._orphan_scan_symbols(live):
+        # Per-symbol is now a top-up, not the primary source: live symbols may
+        # carry SURPLUS stops, and remembered symbols are still worth checking.
+        for sym in sorted(live) + self._orphan_scan_symbols(live):
             try:
-                for o in (self.exchange.fetch_open_orders(sym) or []):
-                    oid = str(o.get("id") or (o.get("info") or {}).get("orderId") or "")
-                    if oid and oid not in seen_ids:
-                        seen_ids.add(oid)
-                        o.setdefault("symbol", sym)
-                        orders.append(o)
-                        per_symbol += 1
+                for raw in (self.exchange.fetch_open_orders(sym) or []):
+                    o = self._normalise_order(raw)
+                    o["symbol"] = o["symbol"] or sym
+                    if o["id"] and o["id"] not in seen_ids:
+                        seen_ids.add(o["id"]); orders.append(o); per_symbol += 1
             except Exception as e:
                 log.debug(f"{sym}: per-symbol order list failed: {e}")
 
-        log.info(f"orphan-stop sweep: {account_wide} order(s) from the "
-                 f"account-wide call, {per_symbol} more found per-symbol")
+        log.info(f"orphan-stop sweep: {account_wide} order(s) account-wide, "
+                 f"{per_symbol} more per-symbol, {len(orders)} total")
 
         cancelled = []
+        surplus: dict = {}
         for o in orders or []:
-            info = o.get("info") or {}
-            reduce_only = o.get("reduceOnly")
-            if reduce_only is None:
-                reduce_only = str(info.get("reduceOnly", "")).lower() == "true"
-            if not reduce_only:
+            if not o["reduce_only"]:
                 continue                     # an entry order; not ours to judge
-            sym = o.get("symbol") or ""
-            if not sym or sym in live:
-                continue                     # protecting a real position
-            otype = (o.get("type") or info.get("origType") or "").upper()
+            sym = o["symbol"]
+            if not sym:
+                continue
+            if sym in live:
+                # A live position keeps its most recent stop; earlier ones are
+                # superseded ratchets that can still fire at a stale level.
+                surplus.setdefault(sym, []).append(o)
+                continue
+            otype = o["type"]
             if "STOP" not in otype and "TRAILING" not in otype:
                 continue                     # not a protective stop
-            oid = str(o.get("id") or info.get("orderId") or "")
+            oid = o["id"]
             try:
                 self.exchange.cancel_order(oid, sym)
                 log.warning(f"{sym}: cancelled ORPHANED protective stop {oid} "
@@ -1506,6 +1624,27 @@ class FuturesGuardian:
                     log.debug(f"{sym}: orphan {oid} already gone")
                 else:
                     log.warning(f"{sym}: could not cancel orphan {oid}: {e}")
+        # Now trim any live position down to a single protective stop.
+        for sym, rows in surplus.items():
+            if len(rows) < 2:
+                continue
+            rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+            for o in rows[1:]:
+                otype = o["type"]
+                if "STOP" not in otype and "TRAILING" not in otype:
+                    continue
+                oid = o["id"]
+                try:
+                    self.exchange.cancel_order(oid, sym)
+                    log.warning(f"{sym}: cancelled SURPLUS protective stop {oid} "
+                                f"— position already has a newer one")
+                    self._record(sym, "surplus_stop_swept", f"id={oid}")
+                    cancelled.append((sym, oid))
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "unknown order" not in msg and "-2011" not in msg:
+                        log.warning(f"{sym}: could not cancel surplus {oid}: {e}")
+
         if cancelled:
             log.warning(f"orphan-stop sweep cancelled {len(cancelled)} order(s)")
         return cancelled

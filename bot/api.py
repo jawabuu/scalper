@@ -199,6 +199,19 @@ def create_app(engine) -> FastAPI:
             log.exception("analysis failed")
             return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
 
+    @app.get("/api/futures/orders")
+    def futures_orders(user: dict = Depends(_require_auth)):
+        """Resting orders reconciled against positions — orphans made visible."""
+        if _guardian is None:
+            return {"enabled": False}
+        try:
+            rep = _guardian.reconcile_orders()
+            rep["enabled"] = True
+            return rep
+        except Exception as e:
+            log.exception("order reconciliation failed")
+            return {"enabled": True, "error": f"{type(e).__name__}: {e}"}
+
     @app.get("/api/futures/trades")
     def futures_trades(user: dict = Depends(_require_auth)):
         """Closed futures positions observed by the guardian."""

@@ -2033,3 +2033,154 @@ def test_duplicate_ids_across_paths_are_not_cancelled_twice():
     g._closed_trades = [{"symbol": "APR/USDT:USDT"}]
     res = g.reap_orphan_stops()
     assert [oid for _, oid in res].count("o7") == 1
+
+
+# ── Surplus stops on a LIVE position ─────────────────────────────────────────
+
+class _SurplusEx(FakeExchange):
+    """One APR position carrying four protective stops."""
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.cancelled = []
+        self.book = {
+            "APR/USDT:USDT": [("e", True, 1200), ("f", True, 800),
+                              ("g", True, 300), ("h", True, 200)],
+            "WLD/USDT:USDT": [("m", True, 350)],
+        }
+    def fetch_open_orders(self, symbol=None):
+        if symbol is None:
+            return []
+        return [{"id": i, "symbol": symbol, "type": "STOP_MARKET",
+                 "reduceOnly": ro, "timestamp": ts}
+                for i, ro, ts in self.book.get(symbol, [])]
+    def fetch_positions(self, symbols=None):
+        return [{"symbol": "APR/USDT:USDT", "side": "long", "entryPrice": 0.194,
+                 "contracts": 22106, "leverage": 20, "initialMargin": 214.0}]
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append((symbol, str(oid)))
+
+
+def _surplus_guardian():
+    ex = _SurplusEx()
+    g = _guardian(ex)
+    g._closed_trades = [{"symbol": s} for s in ex.book]
+    return g, ex
+
+
+def test_surplus_stops_on_a_live_position_are_trimmed():
+    """
+    Four stops on one position: only the newest can be current, the rest are
+    superseded ratchets that can still fire at a stale level.
+    """
+    g, ex = _surplus_guardian()
+    res = g.reap_orphan_stops()
+    apr = sorted(o for s, o in res if s.startswith("APR"))
+    assert apr == ["f", "g", "h"]
+
+
+def test_the_newest_stop_is_kept():
+    g, ex = _surplus_guardian()
+    g.reap_orphan_stops()
+    assert "e" not in [o for _, o in ex.cancelled]
+
+
+def test_a_single_stop_on_a_position_is_untouched():
+    class OneEx(_SurplusEx):
+        def __init__(self):
+            super().__init__()
+            self.book = {"APR/USDT:USDT": [("e", True, 1200)]}
+    g = _guardian(OneEx())
+    g._closed_trades = [{"symbol": "APR/USDT:USDT"}]
+    assert g.reap_orphan_stops() == []
+
+
+def test_reconciliation_separates_surplus_from_protecting():
+    g, _ = _surplus_guardian()
+    r = g.reconcile_orders()
+    assert len(r["protecting"]) == 1
+    assert len(r["duplicate_stops"]) == 3
+    assert len(r["orphan_stops"]) == 1
+    assert r["account_wide_count"] == 0 and r["per_symbol_count"] > 0
+
+
+# ── The sweep must not depend on bot memory ──────────────────────────────────
+
+class _RawOnlyEx(FakeExchange):
+    """
+    The realistic worst case: bot memory empty after a history reset, the
+    unified account-wide call blind, only the raw endpoint returning data.
+    """
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.cancelled = []
+        self.raw = [
+            {"orderId": "a", "symbol": "ONUSDT",
+             "origType": "TRAILING_STOP_MARKET", "reduceOnly": "false", "time": 1000},
+            {"orderId": "b", "symbol": "ONUSDT",
+             "origType": "STOP_MARKET", "reduceOnly": "true", "time": 900},
+            {"orderId": "c", "symbol": "WLDUSDT",
+             "origType": "STOP_MARKET", "reduceOnly": "true", "time": 350},
+            {"orderId": "e", "symbol": "APRUSDT",
+             "origType": "STOP_MARKET", "reduceOnly": "true", "time": 1200},
+            {"orderId": "f", "symbol": "APRUSDT",
+             "origType": "STOP_MARKET", "reduceOnly": "true", "time": 800},
+        ]
+        self.markets_by_id = {f"{b}USDT": [{"symbol": f"{b}/USDT:USDT"}]
+                              for b in ("ON", "WLD", "APR")}
+    def fetch_open_orders(self, symbol=None):
+        return []
+    def fapiPrivateGetOpenOrders(self, params=None):
+        return self.raw
+    def fetch_positions(self, symbols=None):
+        return [{"symbol": "APR/USDT:USDT", "side": "long", "entryPrice": 0.194,
+                 "contracts": 22106, "leverage": 20, "initialMargin": 214.0}]
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append((symbol, str(oid)))
+
+
+def _raw_guardian():
+    ex = _RawOnlyEx()
+    g = _guardian(ex)
+    g._closed_trades = []          # memory wiped, as after a history reset
+    return g, ex
+
+
+def test_sweep_works_with_no_bot_memory():
+    """
+    The sweep built its symbol list from bot memory, which a history reset or
+    a failed persist empties — so it queried nothing and swept nothing while
+    orders accumulated on the exchange.
+    """
+    g, ex = _raw_guardian()
+    ids = sorted(o for _, o in g.reap_orphan_stops())
+    assert ids == ["b", "c", "f"]
+
+
+def test_reduce_only_as_the_string_false_is_not_treated_as_true():
+    """bool("false") is True — this would cancel entry orders."""
+    g, ex = _raw_guardian()
+    ids = [o for _, o in g.reap_orphan_stops()]
+    assert "a" not in ids, "a non-reduce-only entry order was cancelled"
+
+
+def test_raw_symbol_ids_are_mapped_to_unified_symbols():
+    g, _ = _raw_guardian()
+    o = g._normalise_order({"orderId": "x", "symbol": "WLDUSDT",
+                            "origType": "STOP_MARKET", "reduceOnly": "true"})
+    assert o["symbol"] == "WLD/USDT:USDT"
+
+
+def test_unmapped_symbol_falls_back_to_a_sensible_guess():
+    g, _ = _raw_guardian()
+    o = g._normalise_order({"orderId": "x", "symbol": "NEWCOINUSDT",
+                            "origType": "STOP_MARKET", "reduceOnly": "true"})
+    assert o["symbol"] == "NEWCOIN/USDT:USDT"
+
+
+def test_reconciliation_also_uses_the_raw_listing():
+    g, _ = _raw_guardian()
+    r = g.reconcile_orders()
+    assert r["account_wide_count"] == 5
+    assert len(r["orphan_stops"]) == 2          # b, c
+    assert len(r["duplicate_stops"]) == 1       # f
+    assert len(r["stale_entries"]) == 1         # a
