@@ -570,3 +570,31 @@ def test_direction_value_is_normalised():
     a = _trader()
     a.update_rules({"directions": "  SHORT "})
     assert a.cfg.directions == "short"
+
+
+# ── Live edits last for the instance, not beyond it ──────────────────────────
+
+def test_live_edit_holds_while_running():
+    a = _trader()
+    a.update_rules({"directions": "short"})
+    assert a.cfg.directions == "short"
+    # and keeps holding across further evaluations
+    a.update_rules({"long_rsi_max": 52})
+    assert a.cfg.directions == "short"
+
+
+def test_a_fresh_instance_takes_the_declared_config():
+    """
+    The compose file is the declared configuration and must win on restart. A
+    dashboard change is session tuning, not a persisted override.
+    """
+    a = _trader()
+    a.update_rules({"directions": "short"})
+    b = _trader()                       # as after a redeploy
+    assert b.cfg.directions == "all"
+
+
+def test_rules_are_not_written_to_the_state_file():
+    import inspect
+    from bot import futures_state
+    assert "auto_rules" not in inspect.getsource(futures_state.save)

@@ -389,6 +389,9 @@ class AutoTrader:
                           "symbol": symbol, "detail": detail})
         self._log = self._log[-40:]
 
+    # NOTE: live rule edits are deliberately NOT persisted. The compose file is
+    # the declared configuration and must win on every restart; a dashboard
+    # change is session tuning that lasts as long as the instance does.
     def safety_snapshot(self) -> dict:
         """SafetyState in a persistable form — the daily halt must survive a restart."""
         return {

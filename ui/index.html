@@ -2522,16 +2522,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
 let _autoEditing = false;
 
-// Same as onAutoRule but for controls whose value is not numeric.
+// Same as onAutoRule, for controls whose value is not numeric.
+//
+// This must use fetch directly: api() takes (path, method) — passing it an
+// options object sent the request with NO BODY and no credentials, so the
+// server received no rules, returned the unchanged config, and the control
+// silently snapped back to the environment value.
 async function onAutoRuleValue(key, value) {
+  _autoEditing = true;
   try {
-    const r = await api('/api/auto-trade', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({rules: {[key]: value}}),
+    const r = await fetch(API + '/api/auto-trade', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules: { [key]: value } }),
     });
-    if (r && r.errors && r.errors.length) alert(r.errors.join('\n'));
-    refreshAuto();
-  } catch (e) { console.error(e); }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      setEl('auto-rule-msg', `<span style="color:var(--warn)">${e.detail || r.status}</span>`);
+    } else {
+      setEl('auto-rule-msg', 'saved');
+      setTimeout(() => setEl('auto-rule-msg', ''), 2000);
+    }
+  } catch (e) {
+    setEl('auto-rule-msg', `<span style="color:var(--warn)">${e.message}</span>`);
+  }
+  setTimeout(() => { _autoEditing = false; }, 1500);
+  refreshAuto();
 }
 
 async function onAutoRule(key, elId) {
