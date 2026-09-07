@@ -162,7 +162,15 @@ class FuturesGuardian:
             "apiKey": api_key,
             "secret": api_secret,
             "enableRateLimit": True,
-            "options": {"defaultType": "future"},
+            "options": {
+                "defaultType": "future",
+                # ccxt REFUSES fetchOpenOrders() without a symbol until this is
+                # acknowledged, raising what looks like an ExchangeError but is
+                # only a rate-limit warning. Without it the account-wide order
+                # listing never runs, so the orphan sweep had no input at all.
+                # The higher weight is acceptable: it runs once every 120s.
+                "fetchOpenOrders": {"warnWithoutSymbol": False},
+            },
         }
         if socks_proxy:
             params["proxies"] = {"http": socks_proxy, "https": socks_proxy}
@@ -869,6 +877,23 @@ class FuturesGuardian:
                         self._all_stop_ids[pos.symbol] = [
                             i for i in self._all_stop_ids.get(pos.symbol, [])
                             if i != prev_order_id]
+                    else:
+                        # This is exactly how a stop is left hanging. Make it
+                        # loud and record it, rather than leaving a warning
+                        # among routine INFO lines.
+                        log.error(
+                            f"{pos.symbol}: armed the trail but could NOT cancel "
+                            f"the fixed stop {prev_order_id} — it is still "
+                            f"resting and will be retried each cycle. If this "
+                            f"repeats, cancel_order does not work for "
+                            f"conditional orders on this account.")
+                        self._record(pos.symbol, "stop_cancel_failed",
+                                     f"id={prev_order_id} left resting at arming")
+                else:
+                    log.warning(
+                        f"{pos.symbol}: armed with NO fixed stop id on record "
+                        f"(state lost, or the order listing could not see it). "
+                        f"Any existing stop is untracked.")
                 state.native_trail_id = trail_id
                 state.stop_order_id = None
                 # Track the trail too, so close-time cleanup cancels it.
@@ -1033,6 +1058,16 @@ class FuturesGuardian:
                 self._closed_trades = list(data.get("closed_trades") or [])
         self._restored_safety = data.get("safety") or {}
         self._restored_placed_orders = data.get("placed_orders") or {}
+        with self._lock:
+            for sym, ids in (data.get("stop_ids") or {}).items():
+                cur = self._all_stop_ids.setdefault(sym, [])
+                for oid in ids:
+                    if oid not in cur:
+                        cur.append(oid)
+        if data.get("stop_ids"):
+            log.info(f"restored {sum(len(v) for v in data['stop_ids'].values())} "
+                     f"tracked stop id(s) across "
+                     f"{len(data['stop_ids'])} symbol(s)")
         for sym, st in restored.items():
             log.info(f"{sym}: restored peak {st.peak_roi:+.1f}% ROI, "
                      f"armed={st.armed}, trail={bool(st.native_trail_id)}")
@@ -1078,9 +1113,11 @@ class FuturesGuardian:
             trades = list(self._closed_trades)
         entry = getattr(self, "_entry_service", None)
         placed = entry.export_placed_orders() if entry is not None else {}
+        with self._lock:
+            stop_ids = {k: list(v) for k, v in self._all_stop_ids.items()}
         futures_state.save(self.state_path, states=states, pos_meta=meta,
                            closed_trades=trades, owner=self.state_owner,
-                           placed_orders=placed,
+                           placed_orders=placed, stop_ids=stop_ids,
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -1472,6 +1509,19 @@ class FuturesGuardian:
         remembering which symbols to check — and that memory is cleared by a
         history reset or a failed persist.
         """
+        # Belt and braces: ccxt raises a rate-limit WARNING as an ExchangeError
+        # unless this is acknowledged, and the request never leaves the
+        # process. Setting it in the constructor is not enough if anything
+        # replaces options later, and the failure mode is silent — an empty
+        # order list that looks like a clean account.
+        try:
+            opts = self.exchange.options
+            if not isinstance(opts.get("fetchOpenOrders"), dict):
+                opts["fetchOpenOrders"] = {}
+            opts["fetchOpenOrders"]["warnWithoutSymbol"] = False
+        except Exception:
+            pass
+
         rows = []
         for label, call in (
                 ("unified", lambda: self.exchange.fetch_open_orders()),

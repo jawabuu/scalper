@@ -358,3 +358,51 @@ def test_state_survives_a_full_startup_sequence(path):
     assert on_disk["closed_trades"] == []          # history intentionally cleared
     assert on_disk["states"]                        # positions kept
     assert on_disk["safety"]["day_start_balance"]   # baseline kept
+
+
+# ── Tracked stop ids must survive a restart ──────────────────────────────────
+
+def test_stop_ids_are_persisted(path):
+    """
+    _all_stop_ids was in memory only, so a restart forgot every stop the
+    guardian was responsible for cancelling. Combined with an order listing
+    that cannot see conditional orders, a forgotten stop becomes permanently
+    invisible and uncancellable.
+    """
+    futures_state.save(path, states={}, pos_meta={}, closed_trades=[],
+                       stop_ids={"ON/USDT:USDT": ["1001", "1002"]})
+    data = futures_state.load(path)
+    assert data["stop_ids"]["ON/USDT:USDT"] == ["1001", "1002"]
+
+
+def test_guardian_restores_stop_ids(path):
+    from bot.futures_guardian import FuturesGuardian
+    futures_state.save(path, states={}, pos_meta={}, closed_trades=[],
+                       stop_ids={"ON/USDT:USDT": ["1001", "1002"]})
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g.exchange = None
+    g.dry_run = True
+    g.demo = True
+    g.atr_timeframe = "3m"
+    g._init_runtime_state()
+    g.state_owner = ""
+    g.load_state(path)
+    assert g._all_stop_ids["ON/USDT:USDT"] == ["1001", "1002"]
+
+
+def test_restored_ids_merge_with_existing(path):
+    from bot.futures_guardian import FuturesGuardian
+    futures_state.save(path, states={}, pos_meta={}, closed_trades=[],
+                       stop_ids={"ON/USDT:USDT": ["1001"]})
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g.exchange = None
+    g.dry_run = True
+    g.demo = True
+    g.atr_timeframe = "3m"
+    g._init_runtime_state()
+    g.state_owner = ""
+    g._all_stop_ids["ON/USDT:USDT"] = ["9999"]
+    g.load_state(path)
+    assert set(g._all_stop_ids["ON/USDT:USDT"]) == {"1001", "9999"}

@@ -70,7 +70,8 @@ def identity(demo: bool, account_hint: str = "") -> str:
 
 def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
          safety: dict | None = None, owner: str = "",
-         placed_orders: dict | None = None) -> bool:
+         placed_orders: dict | None = None,
+         stop_ids: dict | None = None) -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
@@ -99,6 +100,11 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         # Entry orders this bot placed, so stale ones stay reapable after a
         # restart rather than resting forever and blocking their symbol.
         "placed_orders": placed_orders or {},
+        # Every protective stop id the guardian is responsible for cancelling.
+        # Held only in memory until now, so a restart forgot them all — and
+        # since the order listing cannot see conditional orders either, a
+        # forgotten stop became permanently invisible and uncancellable.
+        "stop_ids": stop_ids or {},
     }
     return _atomic_write(path, payload)
 

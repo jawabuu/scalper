@@ -2184,3 +2184,57 @@ def test_reconciliation_also_uses_the_raw_listing():
     assert len(r["orphan_stops"]) == 2          # b, c
     assert len(r["duplicate_stops"]) == 1       # f
     assert len(r["stale_entries"]) == 1         # a
+
+
+# ── ccxt's warning gate must not silence the order listing ───────────────────
+
+class _WarnGateEx(FakeExchange):
+    """
+    Mimics ccxt: fetch_open_orders() without a symbol raises a rate-limit
+    WARNING as an ExchangeError unless acknowledged. The request never leaves
+    the process, so the result looks like an account with no orders.
+    """
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.options = {"defaultType": "future"}        # option deliberately absent
+        self.urls = {"api": {"fapiPrivate": "https://demo-fapi.binance.com/fapi/v1"}}
+        self.sent = []
+    def fetch_open_orders(self, symbol=None, since=None, limit=None, params=None):
+        if symbol is None:
+            ack = (self.options.get("fetchOpenOrders") or {}).get("warnWithoutSymbol")
+            if ack is not False:
+                raise RuntimeError("ExchangeError: fetchOpenOrders() WARNING: ...")
+            self.sent.append("account-wide")
+            return [{"id": "z1", "symbol": "ON/USDT:USDT",
+                     "type": "STOP_MARKET", "reduceOnly": True}]
+        return []
+    def fapiPrivateGetOpenOrders(self, params=None):
+        return []
+    def fetch_positions(self, symbols=None):
+        return []
+
+
+def test_warning_gate_is_acknowledged_before_listing():
+    """
+    The gate made every account-wide listing return nothing, which read as a
+    clean account and left the orphan sweep with no input in any version.
+    """
+    ex = _WarnGateEx()
+    g = _guardian(ex)
+    rows = g._all_open_orders_raw()
+    assert ex.sent == ["account-wide"], "the request was never sent"
+    assert len(rows) == 1
+
+
+def test_gate_is_fixed_even_if_options_are_replaced():
+    ex = _WarnGateEx()
+    g = _guardian(ex)
+    ex.options = {"defaultType": "future"}       # something wiped it
+    assert len(g._all_open_orders_raw()) == 1
+
+
+def test_orphan_sweep_sees_orders_once_the_gate_is_open():
+    ex = _WarnGateEx()
+    g = _guardian(ex)
+    res = g.reap_orphan_stops()
+    assert [oid for _, oid in res] == ["z1"]
