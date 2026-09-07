@@ -141,6 +141,20 @@ def analyse(trades: list[dict]) -> dict:
         s["label"] = reason
         exits.append(s)
 
+    # Was the callback set by the distance ratio or overridden by the ATR
+    # floor? They measure different things — opportunity vs noise — so their
+    # outcomes are worth comparing directly rather than by impression.
+    by_cb: dict[str, list] = {}
+    for t in trades:
+        src = (t.get("entry_context") or {}).get("callback_source")
+        if src:
+            by_cb.setdefault(src, []).append(t)
+    callback_rule = []
+    for src, group in sorted(by_cb.items()):
+        st = group_stats(group)
+        st["label"] = src
+        callback_rule.append(st)
+
     reentries = [t for t in trades if (t.get("entry_context") or {}).get("was_reentry")]
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
 
@@ -194,6 +208,7 @@ def analyse(trades: list[dict]) -> dict:
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
         "by_exit_reason": exits,
+        "by_callback_rule": callback_rule,
         "reentries": {"override_reentries": group_stats(reentries),
                       "fresh_entries": group_stats(fresh)},
         "notes": notes,

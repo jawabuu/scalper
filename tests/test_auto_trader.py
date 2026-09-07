@@ -78,24 +78,24 @@ def test_missing_range_refuses_rather_than_guessing(cfg):
 # ── Callback sizing ──────────────────────────────────────────────────────────
 
 def test_callback_is_half_the_distance(cfg):
-    cb, notes = callback_for(3.0, atr_pct=0.2, cfg=cfg)
+    cb, notes, src = callback_for(3.0, atr_pct=0.2, cfg=cfg)
     assert cb == pytest.approx(1.5) and not notes
 
 
 def test_callback_floored_at_atr(cfg):
     """A callback inside one candle's range would be hit by noise alone."""
-    cb, notes = callback_for(0.4, atr_pct=0.7, cfg=cfg)
+    cb, notes, src = callback_for(0.4, atr_pct=0.7, cfg=cfg)
     assert cb == pytest.approx(0.52, abs=0.01)
     assert any("ATR" in n for n in notes)
 
 
 def test_callback_respects_exchange_minimum(cfg):
-    cb, _ = callback_for(0.05, atr_pct=None, cfg=cfg)
+    cb, _, src = callback_for(0.05, atr_pct=None, cfg=cfg)
     assert cb == pytest.approx(MIN_CALLBACK_PCT)
 
 
 def test_callback_respects_exchange_maximum(cfg):
-    cb, notes = callback_for(20.0, atr_pct=None, cfg=cfg)
+    cb, notes, src = callback_for(20.0, atr_pct=None, cfg=cfg)
     assert cb == pytest.approx(MAX_CALLBACK_PCT)
     assert any("maximum" in n for n in notes)
 
@@ -424,3 +424,39 @@ def test_no_baseline_means_no_false_halt():
     a._log = []
     a._check_daily_drawdown(100.0)
     assert a.state.halted_reason is None
+
+
+# ── Which rule set the callback ──────────────────────────────────────────────
+
+def test_callback_source_reports_the_ratio(cfg):
+    _, _, src = callback_for(3.0, atr_pct=0.2, cfg=cfg)
+    assert src == "ratio"
+
+
+def test_callback_source_reports_the_atr_floor(cfg):
+    """
+    At a low ratio the ATR floor governs nearly every entry, so the setting
+    being tuned no longer drives the result. Recording which rule applied makes
+    that visible in the outcomes instead of having to reason about it.
+    """
+    _, _, src = callback_for(0.4, atr_pct=0.7, cfg=cfg)
+    assert src == "atr_floor"
+
+
+def test_callback_source_reports_exchange_bounds(cfg):
+    assert callback_for(0.05, atr_pct=None, cfg=cfg)[2] == "exchange_min"
+    assert callback_for(20.0, atr_pct=None, cfg=cfg)[2] == "exchange_max"
+
+
+def test_decision_carries_the_callback_source(cfg):
+    d = evaluate_candidate(_short(), streak=2, cfg=cfg, atr_pct=0.5)
+    assert d.enter and d.callback_source in ("ratio", "atr_floor",
+                                             "exchange_min", "exchange_max")
+
+
+def test_low_ratio_shifts_control_to_the_floor():
+    """Demonstrates the shift the operator observed when moving 0.5 -> 0.1."""
+    loose = AutoTradeConfig(callback_ratio=0.5, callback_atr_mult=0.75)
+    tight = AutoTradeConfig(callback_ratio=0.1, callback_atr_mult=0.75)
+    assert callback_for(2.0, atr_pct=0.5, cfg=loose)[2] == "ratio"
+    assert callback_for(2.0, atr_pct=0.5, cfg=tight)[2] == "atr_floor"

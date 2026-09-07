@@ -77,6 +77,10 @@ class AutoDecision:
     callback_pct: float | None = None
     reason: str = ""
     notes: list[str] = field(default_factory=list)
+    # Which rule actually set the callback: the distance ratio, or the ATR
+    # floor overriding it. Recorded so the two can be compared on outcomes
+    # instead of impressions.
+    callback_source: str = "ratio"
 
 
 def distance_to_extreme(candidate_row: dict, side: str) -> float | None:
@@ -94,7 +98,7 @@ def distance_to_extreme(candidate_row: dict, side: str) -> float | None:
 
 
 def callback_for(distance_pct: float, atr_pct: float | None,
-                 cfg: AutoTradeConfig) -> tuple[float, list[str]]:
+                 cfg: AutoTradeConfig) -> tuple[float, list[str], str]:
     """
     Trailing callback = half the distance to the extreme, bounded.
 
@@ -102,6 +106,7 @@ def callback_for(distance_pct: float, atr_pct: float | None,
     surprising value on a filled order can be traced.
     """
     notes: list[str] = []
+    source = "ratio"
     cb = distance_pct * cfg.callback_ratio
 
     if atr_pct and cfg.callback_atr_mult:
@@ -111,15 +116,18 @@ def callback_for(distance_pct: float, atr_pct: float | None,
                 f"callback {cb:.2f}% was inside {cfg.callback_atr_mult:g}x ATR "
                 f"({atr_pct:.2f}%) — raised to {floor:.2f}%")
             cb = floor
+            source = "atr_floor"
 
     if cb < cfg.callback_min_pct:
         notes.append(f"callback raised to the {cfg.callback_min_pct}% exchange minimum")
         cb = cfg.callback_min_pct
+        source = "exchange_min"
     elif cb > cfg.callback_max_pct:
         notes.append(f"callback capped at the {cfg.callback_max_pct}% exchange maximum")
         cb = cfg.callback_max_pct
+        source = "exchange_max"
 
-    return round(cb, 2), notes
+    return round(cb, 2), notes, source
 
 
 def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
@@ -157,13 +165,13 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                             reason=f"{dist:.2f}% from the {extreme}, "
                                    f"limit {cfg.max_dist_to_extreme_pct}%")
 
-    cb, notes = callback_for(dist, atr_pct, cfg)
+    cb, notes, cb_source = callback_for(dist, atr_pct, cfg)
     extreme = "24h low" if side == "long" else "24h high"
     return AutoDecision(
         True, symbol, side, callback_pct=cb,
         reason=(f"RSI {rsi}, strengthened {streak} scans, {dist:.2f}% from the "
-                f"{extreme} -> {cb}% callback"),
-        notes=notes,
+                f"{extreme} -> {cb}% callback ({cb_source})"),
+        notes=notes, callback_source=cb_source,
     )
 
 
@@ -580,6 +588,7 @@ class AutoTrader:
                         "strength": row.get("strength"),
                         "streak": streak,
                         "callback_pct": decision.callback_pct,
+                        "callback_source": decision.callback_source,
                         "was_reentry": "cooldown overridden" in why,
                         "auto": True,
                     })

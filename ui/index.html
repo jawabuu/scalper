@@ -2575,6 +2575,7 @@ async function refreshAnalysis() {
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
       statTable('By exit reason', a.by_exit_reason || []),
+      statTable('By callback rule (distance ratio vs ATR floor)', a.by_callback_rule || []),
       statTable('Re-entries vs fresh entries', [
         Object.assign({label: 'override re-entry'}, a.reentries.override_reentries),
         Object.assign({label: 'fresh entry'}, a.reentries.fresh_entries),
