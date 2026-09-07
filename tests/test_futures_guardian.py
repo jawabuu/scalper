@@ -1958,3 +1958,78 @@ def test_sweep_can_be_disabled():
     g.sweep_orphan_stops = False
     g.run_cycle()
     assert not any(s.startswith("APR") for s, _ in ex.cancelled)
+
+
+# ── The sweep must not depend on the account-wide order list ─────────────────
+
+class _BlindAccountWideEx(FakeExchange):
+    """The account-wide list omits conditional orders; per-symbol finds them."""
+    def __init__(self):
+        super().__init__(price=1.0)
+        self.cancelled = []
+        self.all_orders = {
+            "WLD/USDT:USDT":  [("o3", "STOP_MARKET", True)],
+            "TAKE/USDT:USDT": [("o6", "STOP_MARKET", True)],
+            "APR/USDT:USDT":  [("o7", "STOP_MARKET", True), ("o9", "STOP_MARKET", True)],
+            "COTI/USDT:USDT": [("o8", "STOP_MARKET", True)],
+            "ON/USDT:USDT":   [("o10", "STOP_MARKET", True)],
+            "EPIC/USDT:USDT": [("o1", "STOP_MARKET", True)],
+        }
+    def fetch_open_orders(self, symbol=None):
+        if symbol is None:
+            return []
+        return [{"id": i, "symbol": symbol, "type": t, "reduceOnly": ro}
+                for i, t, ro in self.all_orders.get(symbol, [])]
+    def fetch_positions(self, symbols=None):
+        return [{"symbol": "EPIC/USDT:USDT", "side": "long", "entryPrice": 1.0,
+                 "contracts": 100.0, "leverage": 20, "initialMargin": 5.0}]
+    def cancel_order(self, oid, symbol):
+        self.cancelled.append((symbol, str(oid)))
+
+
+def _blind_guardian():
+    ex = _BlindAccountWideEx()
+    g = _guardian(ex)
+    g._closed_trades = [{"symbol": s} for s in
+                        ("ON/USDT:USDT", "APR/USDT:USDT", "COTI/USDT:USDT",
+                         "TAKE/USDT:USDT", "WLD/USDT:USDT")]
+    return g, ex
+
+
+def test_orphans_found_per_symbol_when_account_wide_is_blind():
+    """
+    Six orphans survived a sweep that relied on the account-wide call alone.
+    Closed-trade symbols are where stops get left behind, so those are queried
+    directly.
+    """
+    g, ex = _blind_guardian()
+    res = g.reap_orphan_stops()
+    assert len(res) == 6
+    assert {s.split("/")[0] for s, _ in res} == {"WLD", "TAKE", "APR", "COTI", "ON"}
+
+
+def test_symbol_with_a_position_is_still_skipped():
+    g, ex = _blind_guardian()
+    res = g.reap_orphan_stops()
+    assert "EPIC/USDT:USDT" not in {s for s, _ in res}
+
+
+def test_scan_list_excludes_live_symbols():
+    g, _ = _blind_guardian()
+    syms = g._orphan_scan_symbols({"APR/USDT:USDT"})
+    assert "APR/USDT:USDT" not in syms
+    assert "ON/USDT:USDT" in syms
+
+
+def test_duplicate_ids_across_paths_are_not_cancelled_twice():
+    class BothEx(_BlindAccountWideEx):
+        def fetch_open_orders(self, symbol=None):
+            if symbol is None:
+                return [{"id": "o7", "symbol": "APR/USDT:USDT",
+                         "type": "STOP_MARKET", "reduceOnly": True}]
+            return _BlindAccountWideEx.fetch_open_orders(self, symbol)
+    ex = BothEx()
+    g = _guardian(ex)
+    g._closed_trades = [{"symbol": "APR/USDT:USDT"}]
+    res = g.reap_orphan_stops()
+    assert [oid for _, oid in res].count("o7") == 1

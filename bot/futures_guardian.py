@@ -1395,6 +1395,36 @@ class FuturesGuardian:
         return {"ok": True, "dry_run": False, "symbol": symbol,
                 "side": side, "qty": qty, "order_id": oid}
 
+    def _orphan_scan_symbols(self, live: set) -> list:
+        """
+        Symbols worth checking for orphaned stops: anywhere the bot has traded
+        or is looking. Symbols with a CLOSED trade are the likeliest source —
+        that is exactly when a stop is left behind.
+        """
+        syms = set()
+        with self._lock:
+            syms.update(self._states.keys())
+            syms.update(self._pos_meta.keys())
+            syms.update(self._all_stop_ids.keys())
+            for t in self._closed_trades[-60:]:
+                if t.get("symbol"):
+                    syms.add(t["symbol"])
+        entry = getattr(self, "_entry_service", None)
+        if entry is not None:
+            try:
+                syms.update(entry.export_placed_orders().keys())
+            except Exception:
+                pass
+        scanner = getattr(self, "_scanner", None)
+        if scanner is not None:
+            try:
+                for row in (scanner.snapshot().get("candidates") or []):
+                    if row.get("symbol"):
+                        syms.add(row["symbol"])
+            except Exception:
+                pass
+        return sorted(syms - live)
+
     def reap_orphan_stops(self) -> list:
         """
         Cancel reduce-only stops resting on symbols with NO open position.
@@ -1411,15 +1441,43 @@ class FuturesGuardian:
         operator's own entries are safe.
         """
         try:
-            orders = self.exchange.fetch_open_orders()
-        except Exception as e:
-            log.warning(f"orphan-stop sweep could not list orders: {e}")
-            return []
-        try:
             live = {p.symbol for p in self.fetch_positions()}
         except Exception as e:
             log.warning(f"orphan-stop sweep could not list positions: {e}")
             return []
+
+        # Collect from BOTH paths and de-duplicate by order id. The
+        # account-wide call is cheaper, but conditional (stop / trailing)
+        # orders have been observed missing from it, so every symbol the bot
+        # has touched is also queried directly. Six orphans survived a sweep
+        # that relied on the account-wide call alone.
+        orders, seen_ids = [], set()
+        account_wide = 0
+        try:
+            for o in (self.exchange.fetch_open_orders() or []):
+                oid = str(o.get("id") or (o.get("info") or {}).get("orderId") or "")
+                if oid and oid not in seen_ids:
+                    seen_ids.add(oid)
+                    orders.append(o)
+                    account_wide += 1
+        except Exception as e:
+            log.warning(f"orphan-stop sweep: account-wide order list failed: {e}")
+
+        per_symbol = 0
+        for sym in self._orphan_scan_symbols(live):
+            try:
+                for o in (self.exchange.fetch_open_orders(sym) or []):
+                    oid = str(o.get("id") or (o.get("info") or {}).get("orderId") or "")
+                    if oid and oid not in seen_ids:
+                        seen_ids.add(oid)
+                        o.setdefault("symbol", sym)
+                        orders.append(o)
+                        per_symbol += 1
+            except Exception as e:
+                log.debug(f"{sym}: per-symbol order list failed: {e}")
+
+        log.info(f"orphan-stop sweep: {account_wide} order(s) from the "
+                 f"account-wide call, {per_symbol} more found per-symbol")
 
         cancelled = []
         for o in orders or []:
