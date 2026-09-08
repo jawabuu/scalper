@@ -287,10 +287,19 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
     """
     now = now or _time.time()
 
+    # The halt must respect the switch in BOTH directions. Disabling it used to
+    # leave an existing halted_reason in place, so trading stayed blocked while
+    # the dashboard said the halt was off — and this second, independent check
+    # below re-set the halt even when disabled. Both cost data-collection time
+    # that only shows up when someone comes back and finds it stopped.
+    halt_on = getattr(cfg, "daily_halt_enabled", True)
+    if not halt_on and state.halted_reason:
+        state.halted_reason = None
+
     if state.halted_reason:
         return False, state.halted_reason
 
-    if cfg.daily_loss_limit_pct and state.day_start_balance > 0:
+    if halt_on and cfg.daily_loss_limit_pct and state.day_start_balance > 0:
         drawdown = (state.day_start_balance - balance) / state.day_start_balance * 100
         if drawdown >= cfg.daily_loss_limit_pct:
             state.halted_reason = (
@@ -423,7 +432,12 @@ class AutoTrader:
         s.failed_entry_rsi = dict(data.get("failed_entry_rsi") or {})
         s.reentries_today = dict(data.get("reentries_today") or {})
         s.halted_reason = data.get("halted_reason")
-        if s.halted_reason:
+        if s.halted_reason and not getattr(self.cfg, "daily_halt_enabled", True):
+            _log.warning(
+                f"Discarding a persisted halt because the daily halt is "
+                f"disabled: {s.halted_reason}")
+            s.halted_reason = None
+        elif s.halted_reason:
             _log.warning(f"Auto-trade remains HALTED after restart: {s.halted_reason}")
 
     def snapshot(self) -> dict:
@@ -528,6 +542,15 @@ class AutoTrader:
                         continue
                 setattr(self.cfg, key, val)
                 applied[key] = val
+                if key == "daily_halt_enabled" and val is False:
+                    # getattr: update_rules is reachable before state exists.
+                    st = getattr(self, "state", None)
+                    if st is not None and st.halted_reason:
+                        _log.warning(
+                            f"daily halt disabled — clearing the active halt "
+                            f"({st.halted_reason})")
+                        st.halted_reason = None
+                        self._record("reset", "halt cleared: feature disabled")
                 continue
 
             try:

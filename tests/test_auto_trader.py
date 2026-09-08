@@ -667,3 +667,78 @@ def test_halt_toggle_rejects_a_typo():
     a = _trader()
     applied, errors = a.update_rules({"daily_halt_enabled": "maybe"})
     assert applied == {} and "true or false" in errors[0]
+
+
+# ── The halt switch must work in BOTH directions ─────────────────────────────
+
+def _switch_trader(halt=True, start=5000.0):
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.cfg = AutoTradeConfig(enabled=True, daily_loss_limit_pct=5.0,
+                            daily_halt_enabled=halt)
+    a.state = SafetyState()
+    a._log = []
+    a.entry = type("E", (), {"wallet_balance": lambda self: 4700.0})()
+    a.snapshot = lambda: {}
+    roll_day(a.state, start)
+    return a
+
+
+def test_disabling_clears_an_active_halt():
+    """
+    Disabling left the existing halted_reason in place, so trading stayed
+    blocked while the dashboard said the halt was off — costing collection
+    time that only surfaced when someone came back and found it stopped.
+    """
+    a = _switch_trader(True)
+    a._check_daily_drawdown(4700.0)
+    assert a.state.halted_reason
+    a.update_rules({"daily_halt_enabled": False})
+    assert a.state.halted_reason is None
+
+
+def test_entries_resume_after_disabling():
+    a = _switch_trader(True)
+    a._check_daily_drawdown(4700.0)
+    a.update_rules({"daily_halt_enabled": False})
+    ok, _ = check_safety(a.state, a.cfg, balance=4700.0,
+                         open_positions=0, symbol="X")
+    assert ok
+
+
+def test_check_safety_does_not_set_a_halt_when_disabled():
+    """check_safety had its OWN halt check that ignored the switch entirely."""
+    a = _switch_trader(False)
+    ok, why = check_safety(a.state, a.cfg, balance=4000.0,   # -20%
+                           open_positions=0, symbol="X")
+    assert ok and a.state.halted_reason is None
+
+
+def test_a_stale_halt_is_ignored_while_disabled():
+    a = _switch_trader(False)
+    a.state.halted_reason = "left over from before"
+    ok, _ = check_safety(a.state, a.cfg, balance=4900.0,
+                         open_positions=0, symbol="X")
+    assert ok and a.state.halted_reason is None
+
+
+def test_persisted_halt_is_discarded_when_disabled():
+    """Otherwise a restart reinstates a halt the feature no longer uses."""
+    a = _switch_trader(False)
+    a.restore_safety({"day_start_balance": 5000.0,
+                      "halted_reason": "daily loss limit hit"})
+    assert a.state.halted_reason is None
+
+
+def test_persisted_halt_survives_when_enabled():
+    a = _switch_trader(True)
+    a.restore_safety({"day_start_balance": 5000.0,
+                      "halted_reason": "daily loss limit hit"})
+    assert a.state.halted_reason == "daily loss limit hit"
+
+
+def test_re_enabling_lets_the_halt_fire_again():
+    a = _switch_trader(False)
+    a.update_rules({"daily_halt_enabled": True})
+    a._check_daily_drawdown(4700.0)
+    assert a.state.halted_reason
