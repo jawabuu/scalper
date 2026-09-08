@@ -598,3 +598,72 @@ def test_rules_are_not_written_to_the_state_file():
     import inspect
     from bot import futures_state
     assert "auto_rules" not in inspect.getsource(futures_state.save)
+
+
+# ── Clearing a halt must actually clear it ───────────────────────────────────
+
+def _halt_trader(start=5000.0):
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.cfg = AutoTradeConfig(enabled=True, daily_loss_limit_pct=5.0)
+    a.state = SafetyState()
+    a._log = []
+    a.entry = type("E", (), {"wallet_balance": lambda self: 4700.0})()
+    a.snapshot = lambda: {}
+    roll_day(a.state, start)
+    return a
+
+
+def test_clearing_a_halt_rebases_the_baseline():
+    """
+    reset_halt cleared the reason but left day_start_balance alone, so the next
+    cycle recomputed the same drawdown and halted again. The halt appeared to
+    clear and immediately returned.
+    """
+    a = _halt_trader()
+    a._check_daily_drawdown(4700.0)
+    assert a.state.halted_reason
+    a.reset_halt(balance=4700.0)
+    assert a.state.day_start_balance == pytest.approx(4700.0)
+    a._check_daily_drawdown(4700.0)
+    assert a.state.halted_reason is None, "halt re-fired straight after clearing"
+
+
+def test_a_further_drop_halts_again_from_the_new_baseline():
+    a = _halt_trader()
+    a._check_daily_drawdown(4700.0)
+    a.reset_halt(balance=4700.0)
+    a._check_daily_drawdown(4460.0)          # -5.1% from 4700
+    assert a.state.halted_reason
+
+
+def test_clear_without_a_balance_says_so():
+    a = _halt_trader()
+    a.entry = type("E", (), {"wallet_balance": lambda self: 0.0})()
+    a._check_daily_drawdown(4700.0)
+    a.reset_halt(balance=None)
+    assert a.state.day_start_balance == pytest.approx(5000.0)
+
+
+# ── The daily halt can be switched off ───────────────────────────────────────
+
+def test_halt_disabled_does_not_trigger():
+    a = _halt_trader()
+    a.cfg.daily_halt_enabled = False
+    a._check_daily_drawdown(4000.0)          # -20%
+    assert a.state.halted_reason is None
+
+
+def test_halt_toggle_accepts_string_and_bool_forms():
+    a = _trader()
+    for raw, want in ((False, False), ("false", False), ("off", False),
+                      ("0", False), (True, True), ("true", True), ("on", True)):
+        a.update_rules({"daily_halt_enabled": raw})
+        assert a.cfg.daily_halt_enabled is want, f"{raw!r} misparsed"
+
+
+def test_halt_toggle_rejects_a_typo():
+    """bool('maybe') is True, so an unparsed value would silently enable it."""
+    a = _trader()
+    applied, errors = a.update_rules({"daily_halt_enabled": "maybe"})
+    assert applied == {} and "true or false" in errors[0]

@@ -54,6 +54,10 @@ class AutoTradeConfig:
     # strategy's two halves can behave very differently in a given regime, so
     # being able to disable one without redeploying is worth having.
     directions: str = "all"
+    # Whether the daily-loss halt is active at all. Disabling it removes the
+    # only automatic brake on a bad day, so it is deliberately visible in the
+    # dashboard rather than hidden in a config file.
+    daily_halt_enabled: bool = True
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -439,6 +443,7 @@ class AutoTrader:
                 "long_rsi_min": self.cfg.long_rsi_min,
                 "long_rsi_max": self.cfg.long_rsi_max,
                 "directions": self.cfg.directions,
+                "daily_halt_enabled": self.cfg.daily_halt_enabled,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
@@ -472,6 +477,7 @@ class AutoTrader:
         # A string enum rather than a numeric range: the third element is the
         # set of allowed values instead of an upper bound.
         "directions": (str, None, ("all", "long", "short")),
+        "daily_halt_enabled": (bool, None, (True, False)),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),
@@ -504,6 +510,26 @@ class AutoTrader:
             if key not in self.TUNABLE:
                 continue
             typ, lo, hi = self.TUNABLE[key]
+
+            # Booleans need explicit parsing: bool("false") is True, so casting
+            # a form value through bool() would accept "false" as enabled and
+            # any typo as enabled too.
+            if typ is bool:
+                if isinstance(raw, bool):
+                    val = raw
+                else:
+                    text = str(raw).strip().lower()
+                    if text in ("true", "1", "yes", "on"):
+                        val = True
+                    elif text in ("false", "0", "no", "off"):
+                        val = False
+                    else:
+                        errors.append(f"{key} must be true or false")
+                        continue
+                setattr(self.cfg, key, val)
+                applied[key] = val
+                continue
+
             try:
                 val = typ(raw)
             except (TypeError, ValueError):
@@ -512,7 +538,9 @@ class AutoTrader:
             if isinstance(hi, (tuple, list, set)):
                 val = str(val).strip().lower()
                 if val not in hi:
-                    errors.append(f"{key} must be one of {', '.join(sorted(hi))}")
+                    errors.append(
+                        f"{key} must be one of "
+                        f"{', '.join(sorted(str(x) for x in hi))}")
                     continue
             elif not (lo <= val <= hi):
                 errors.append(f"{key} must be between {lo} and {hi}")
@@ -529,9 +557,42 @@ class AutoTrader:
             self._record("rules_updated", ", ".join(f"{k}={v}" for k, v in applied.items()))
         return applied, []
 
-    def reset_halt(self) -> dict:
+    def reset_halt(self, balance: float | None = None) -> dict:
+        """
+        Clear a daily-loss halt and REBASE the baseline to the current balance.
+
+        Clearing the reason alone was useless: the drawdown is measured from
+        day_start_balance, which had not changed, so the very next cycle
+        recomputed the same figure and halted again. The halt appeared to clear
+        and then immediately returned.
+
+        Rebasing gives the operator one further allowance measured from here,
+        which is a bounded and explicit decision rather than a no-op.
+        """
+        was = self.state.halted_reason
         self.state.halted_reason = None
-        self._record("reset", "halt cleared by operator")
+        bal = balance
+        if bal is None:
+            try:
+                bal = self.entry.wallet_balance()
+            except Exception:
+                bal = None
+        if bal and bal > 0:
+            old_base = self.state.day_start_balance
+            self.state.day_start_balance = float(bal)
+            _log.warning(
+                f"Halt cleared and baseline REBASED {old_base:.2f} -> {bal:.2f}. "
+                f"The next {self.cfg.daily_loss_limit_pct:g}% is measured from "
+                f"here, so this grants one further allowance.")
+            self._record("reset", f"halt cleared, baseline rebased to {bal:.2f}")
+        else:
+            _log.warning(
+                "Halt cleared but the balance could not be read, so the "
+                "baseline is unchanged — the halt will re-fire on the next "
+                "cycle. Retry once the balance is available.")
+            self._record("reset", "halt cleared (baseline NOT rebased)")
+        if was:
+            _log.warning(f"previous halt reason was: {was}")
         return self.snapshot()
 
     # -- main loop -------------------------------------------------------
@@ -654,6 +715,8 @@ class AutoTrader:
         exposure outstanding when it fires. That is inherent, but the halt
         should at least not be late.
         """
+        if not self.cfg.daily_halt_enabled:
+            return
         if self.state.halted_reason or not self.cfg.daily_loss_limit_pct:
             return
         start = self.state.day_start_balance

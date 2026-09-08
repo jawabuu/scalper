@@ -313,6 +313,14 @@ class BotConfig:
     # "all", "long" or "short" — disable one side without redeploying.
     auto_directions: str = field(default_factory=lambda: (
         _env("AUTO_DIRECTIONS", "all").strip().lower() or "all"))
+    # Whether the daily-loss halt is active. Disabling it removes the only
+    # automatic brake on a bad day.
+    auto_daily_halt_enabled: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_DAILY_HALT_ENABLED", True))
+    # Start with SPOT trading halted. Useful when a container is redeployed
+    # mid-session and you want to inspect before it can act.
+    kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(
+        "KILL_SWITCH_ON_START", False))
     auto_short_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MIN", 78.0))
     auto_callback_ratio: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_RATIO", 0.5))
     auto_callback_atr_mult: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_ATR_MULT", 0.75))

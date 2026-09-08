@@ -199,6 +199,7 @@ if __name__ == "__main__":
                     long_rsi_min=cfg.auto_long_rsi_min,
                     long_rsi_max=cfg.auto_long_rsi_max,
                     directions=cfg.auto_directions,
+                    daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
                     callback_atr_mult=cfg.auto_callback_atr_mult,

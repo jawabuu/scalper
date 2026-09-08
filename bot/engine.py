@@ -47,7 +47,9 @@ class ScalpingEngine:
         self._auth_alerted: set = set()
         self._sell_backoff_until: dict[str, float] = {}
         self._last_order_error_is_auth: bool = False
-        self.kill_switch: bool = False
+        # KILL_SWITCH_ON_START lets a container come up with SPOT trading
+        # already halted, so it can be inspected before it is able to act.
+        self.kill_switch: bool = bool(getattr(cfg, "kill_switch_on_start", False))
         # Trailing-stop activation threshold — in-memory only, UI-controlled.
         # enabled=False means immediate trailing (original behaviour).
         # pct seeds from config but is adjustable live via the UI.

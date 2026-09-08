@@ -480,6 +480,11 @@
     letter-spacing: 0.05em;
   }
 
+  /* Spot-only header badges. The kill switch applies to SPOT trading, so it
+     must not appear while the futures view is showing. */
+  body[data-view="futures"] #mode-badge,
+  body[data-view="futures"] #strategy-badge { display: none !important; }
+
   .version-badge {
     /* Was var(--border2) — a BORDER colour, hence barely legible. The running
        version is the first thing needed when checking whether a fix is
@@ -997,6 +1002,13 @@
             <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
           <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
             <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">daily halt&nbsp;</span>
+            <select class="pb-input" id="ar-halt" style="width:64px"
+                    title="the only automatic brake on a bad day"
+                    onchange="onAutoRuleValue('daily_halt_enabled', this.value)">
+              <option value="true">on</option>
+              <option value="false">off</option>
+            </select></span>
           <span class="pb-setting" style="border:none"><span class="k">trade&nbsp;</span>
             <select class="pb-input" id="ar-dirs" style="width:82px"
                     onchange="onAutoRuleValue('directions', this.value)">
@@ -2439,6 +2451,11 @@ function restoreSpotStatLabels() {
 
 function applyView() {
   const futures = _view === 'futures';
+  // Expose the view to CSS so spot-only header badges can be hidden. The
+  // KILL SWITCH badge replaces the spot mode badge, and it was showing on the
+  // FUTURES view where it says nothing about the futures account — the futures
+  // environment is shown by the guardian's own DEMO/LIVE badge instead.
+  document.body.dataset.view = futures ? 'futures' : 'spot';
   const sBtn = document.getElementById('view-spot');
   const fBtn = document.getElementById('view-futures');
   if (sBtn) sBtn.className = futures ? '' : 'active';
@@ -2592,6 +2609,10 @@ function fillAutoRules(c) {
   set('ar-tph', c.max_trades_per_hour);
   const dirs = document.getElementById('ar-dirs');
   if (dirs && c.directions) dirs.value = c.directions;
+  const halt = document.getElementById('ar-halt');
+  if (halt && c.daily_halt_enabled !== undefined) {
+    halt.value = c.daily_halt_enabled ? 'true' : 'false';
+  }
 }
 
 
@@ -2793,7 +2814,7 @@ async function refreshAuto() {
       + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `
       + `short RSI>${c.short_rsi_min} · callback ${c.callback_ratio}x distance · `
       + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${c.max_trades_per_hour} trades/h · `
-      + `daily stop ${c.daily_loss_limit_pct}% · `
+      + `daily stop ${c.daily_halt_enabled ? c.daily_loss_limit_pct + '%' : 'OFF'} · `
       + `re-entry cap ${c.max_reentries_per_symbol}/symbol/day`
       + `${Object.keys(a.reentries_today || {}).length ? ' · used: ' + Object.entries(a.reentries_today).map(([k,v]) => k.split('/')[0] + ':' + v).join(', ') : ''}`
       + (cool ? ` · ${cool} on cooldown` : ''));
