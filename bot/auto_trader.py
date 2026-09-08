@@ -444,6 +444,11 @@ class AutoTrader:
         return {
             "enabled": self.cfg.enabled,
             "halted_reason": self.state.halted_reason,
+            # Why each visible candidate was NOT entered. Rule-level refusals
+            # used to be silent, so a dashboard full of candidates with no
+            # entries gave no way to tell a broken bot from rules that simply
+            # do not match the current market.
+            "skip_reasons": dict(getattr(self, "_skip_reasons", {})),
             "day_start_balance": round(self.state.day_start_balance, 2),
             "trades_last_hour": len(self.state.recent_entry_times),
             "cooldowns": {k: int(v - _time.time())
@@ -643,6 +648,9 @@ class AutoTrader:
         # and the halt could lag well past its limit.
         self._check_daily_drawdown(balance)
 
+        # Reasons are rebuilt each pass so they always describe the CURRENT
+        # candidate list rather than accumulating stale entries.
+        self._skip_reasons = {}
         open_syms = {p.symbol for p in positions}
         # Also skip symbols with a resting entry order. The entry service
         # refuses these too, but checking here avoids a pointless preview and
@@ -660,18 +668,25 @@ class AutoTrader:
             symbol = row.get("symbol", "")
             side = row.get("direction", "")
             if symbol in open_syms:
+                self._skip_reasons[symbol] = "position or order already open"
                 continue
 
             streak = self.tracker.streak(symbol, side)
             decision = evaluate_candidate(
                 row, streak, self.cfg, atr_pct=row.get("atr_pct"))
             if not decision.enter:
+                # Record WHY. Rule-level refusals were previously silent, so a
+                # dashboard full of candidates with no entries gave no clue
+                # whether the bot was broken or the rules simply did not match.
+                self._skip_reasons[symbol] = decision.reason
                 continue
+            self._skip_reasons.pop(symbol, None)
 
             ok, why = check_safety(self.state, self.cfg, balance=balance,
                                    open_positions=len(positions), symbol=symbol,
                                    current_rsi=row.get("rsi"), side=side)
             if not ok:
+                self._skip_reasons[symbol] = why
                 _log.info(f"auto-trade: {symbol} qualified but blocked — {why}")
                 self._record("blocked", why, symbol)
                 continue
@@ -683,6 +698,7 @@ class AutoTrader:
                                       callback_pct=decision.callback_pct)
             if not prev.get("ok"):
                 errs = "; ".join(prev.get("errors", []))
+                self._skip_reasons[symbol] = errs
                 _log.warning(f"auto-trade: {symbol} preview refused — {errs}")
                 self._record("preview_refused", errs, symbol)
                 continue

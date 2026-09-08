@@ -2255,6 +2255,10 @@ function renderScan(data) {
       <td class="num ${c.change_24h_pct >= 0 ? 'pos' : 'neg'}">${c.change_24h_pct >= 0 ? '+' : ''}${c.change_24h_pct}%</td>
       <td class="num">$${(c.volume_24h_usdt/1e6).toFixed(0)}M</td>
       <td><span class="scan-badge sb-${c.strength}">${c.strength}${cross}</span></td>
+      <td class="scan-note" title="why auto-trade did or did not take this">${
+        _skipReasons[c.symbol]
+          ? `<span style="color:var(--muted)">${_skipReasons[c.symbol]}</span>`
+          : '<span class="pos">eligible</span>'}</td>
       <td>${_entryEnabled ? `
         <button class="btn-entry btn-entry-long${c.direction === 'long' ? ' suggested' : ''}"
                 onclick="openEntry('${c.symbol}','long')">Long</button>
@@ -2268,7 +2272,7 @@ function renderScan(data) {
     <thead><tr>
       <th>Pair</th><th>Dir</th><th class="num">RSI</th><th class="num">&Delta;RSI</th>
       <th class="num">EMA gap</th><th class="num">ATR</th><th>24h range</th><th class="num">24h</th><th class="num">Vol</th>
-      <th>Status</th><th></th><th>Change since last scan</th>
+      <th>Status</th><th>Auto</th><th></th><th>Change since last scan</th>
     </tr></thead><tbody>${rows}</tbody></table>`);
 }
 
@@ -2838,6 +2842,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// Why each candidate was not entered, keyed by symbol. Populated from the
+// auto-trade snapshot so the candidates table can explain itself.
+let _skipReasons = {};
+
 async function refreshAuto() {
   const bar = document.getElementById('auto-bar');
   if (!bar) return;
@@ -2845,6 +2853,7 @@ async function refreshAuto() {
     const a = await api('/api/auto-trade');
     if (!a || !a.available) { bar.style.display = 'none'; return; }
     bar.style.display = '';
+    _skipReasons = a.skip_reasons || {};
     const t = document.getElementById('auto-toggle');
     if (t) t.checked = !!a.enabled;
 
@@ -3112,8 +3121,11 @@ async function refresh() {
     // scanner rows render entry buttons. Sequenced, not concurrent.
     await refreshGuardian();
     await refreshFuturesHistory();
-    await refreshScan();
+    // Auto BEFORE scan: the candidates table shows why each row was or was
+    // not entered, and that lookup is populated from the auto-trade snapshot.
+    // Rendering the table first left every row reading "eligible".
     await refreshAuto();
+    await refreshScan();
     await refreshAnalysis();
     renderFuturesStats(_lastGuardian, _lastFuturesHist);
     if (status.strategy === 'pullback' && summary && summary.by_regime) {

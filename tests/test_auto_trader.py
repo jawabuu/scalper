@@ -742,3 +742,53 @@ def test_re_enabling_lets_the_halt_fire_again():
     a.update_rules({"daily_halt_enabled": True})
     a._check_daily_drawdown(4700.0)
     assert a.state.halted_reason
+
+
+# ── Why a candidate was not entered ──────────────────────────────────────────
+
+def test_rule_refusals_are_recorded_with_a_reason():
+    """
+    Rule-level refusals were silent, so a dashboard full of candidates and no
+    entries gave no way to tell a broken bot from rules that simply do not
+    match the current market.
+    """
+    cfg = AutoTradeConfig(long_rsi_min=45, long_rsi_max=52, short_rsi_min=75,
+                          max_dist_to_extreme_pct=3.0,
+                          required_strength_sweeps=2)
+    far = {"symbol": "ATOM/USDT:USDT", "direction": "long", "rsi": 47.7,
+           "atr_pct": 0.307, "pct_above_24h_low": 12.06,
+           "pct_below_24h_high": -0.83, "range_pos_24h": 0.93}
+    d = evaluate_candidate(far, streak=2, cfg=cfg, atr_pct=0.307)
+    assert not d.enter
+    assert d.reason and "24h low" in d.reason
+
+
+def test_low_rsi_refusal_names_the_floor():
+    cfg = AutoTradeConfig(long_rsi_min=45, long_rsi_max=52, short_rsi_min=75,
+                          max_dist_to_extreme_pct=3.0,
+                          required_strength_sweeps=2)
+    row = {"symbol": "SOPH/USDT:USDT", "direction": "long", "rsi": 40.7,
+           "atr_pct": 1.29, "pct_above_24h_low": 1.0,
+           "pct_below_24h_high": -5.0, "range_pos_24h": 0.3}
+    d = evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=1.29)
+    assert not d.enter and "floor" in d.reason
+
+
+def _snapshot_ready():
+    """A trader with the attributes snapshot() touches."""
+    a = _trader()
+    a.state = SafetyState()
+    a._last_run = 0.0
+    a.scanner = None
+    return a
+
+
+def test_snapshot_exposes_skip_reasons():
+    a = _snapshot_ready()
+    a._skip_reasons = {"X/USDT:USDT": "too far from the 24h low"}
+    assert a.snapshot()["skip_reasons"]["X/USDT:USDT"] == "too far from the 24h low"
+
+
+def test_skip_reasons_default_to_empty():
+    a = _snapshot_ready()
+    assert a.snapshot()["skip_reasons"] == {}
