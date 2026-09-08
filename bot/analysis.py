@@ -223,6 +223,15 @@ SESSIONS = [
 ]
 
 
+def _ctx(t: dict, key: str):
+    """Read a numeric value from the trade's recorded entry context."""
+    v = (t.get("entry_context") or {}).get(key)
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _entry_hour(t: dict) -> int | None:
     """
     Hour of day (UTC) the position was OPENED.
@@ -386,6 +395,38 @@ def analyse(trades: list[dict]) -> dict:
         for h in range(24)
     ]
 
+    # ── Regime splits: measurement only ──────────────────────────────────
+    # Does a direction work better in a particular market regime? Breadth is a
+    # DIRECT measure of it (how much of the market is rising), where session is
+    # a proxy. Both are reported so they can be compared — they will correlate,
+    # since trading hours have characteristic breadth, and if both light up
+    # they may be measuring the same thing twice.
+    BREADTH_BUCKETS = [("<30% up", -1, 30), ("30-50% up", 30, 50),
+                       ("50-70% up", 50, 70), (">70% up", 70, 1000)]
+    by_breadth = [
+        _time_split(trades, name,
+                    lambda t, lo=lo, hi=hi: (
+                        (_ctx(t, "breadth_pct") is not None)
+                        and lo <= _ctx(t, "breadth_pct") < hi))
+        for name, lo, hi in BREADTH_BUCKETS
+    ]
+
+    # Is the 3-minute signal running with the coin's hourly trend or against
+    # it? A short taken while the hour is still rising is a different trade
+    # from one taken while the hour is falling.
+    def _aligned(t, want):
+        htf = _ctx(t, "htf_trend_pct")
+        side = t.get("side")
+        if htf is None or side not in ("long", "short"):
+            return False
+        with_trend = (htf > 0) if side == "long" else (htf < 0)
+        return with_trend is want
+
+    by_htf = [
+        _time_split(trades, "with the hourly trend", lambda t: _aligned(t, True)),
+        _time_split(trades, "against the hourly trend", lambda t: _aligned(t, False)),
+    ]
+
     reentries = [t for t in trades if (t.get("entry_context") or {}).get("was_reentry")]
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
 
@@ -467,6 +508,8 @@ def analyse(trades: list[dict]) -> dict:
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
         "by_exit_reason": exits,
+        "by_breadth": by_breadth,
+        "by_htf_alignment": by_htf,
         "by_session": by_session,
         "by_hour": [b for b in by_hour if b.get("n")],
         "by_callback_rule": callback_rule,

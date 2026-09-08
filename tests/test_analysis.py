@@ -542,3 +542,71 @@ def test_no_baseline_yields_no_percentage():
     from bot.analysis import account_return
     r = account_return([], baseline=None)
     assert r["pct"] is None
+
+
+# ── Regime splits (measurement only) ─────────────────────────────────────────
+
+def _regime_trade(side, roi, pnl, breadth, htf):
+    import time
+    now = time.time()
+    return {"symbol": "X", "side": side, "final_roi": roi,
+            "peak_roi": max(roi, 0) + 3, "realised_pnl_usdt": pnl,
+            "margin": 100.0, "pnl_verified": True,
+            "opened_at": now, "closed_at": now,
+            "entry_context": {"breadth_pct": breadth, "htf_trend_pct": htf}}
+
+
+def _regime_trades():
+    """Shorts win while the market falls; longs win while it rises."""
+    return [_regime_trade("short", 18, 18, 20, -1.2),
+            _regime_trade("short", 16, 16, 25, -0.9),
+            _regime_trade("long", -12, -12, 22, -1.1),
+            _regime_trade("long", 15, 15, 80, 1.4),
+            _regime_trade("long", 13, 13, 75, 1.1),
+            _regime_trade("short", -11, -11, 78, 1.0)]
+
+
+def test_breadth_split_separates_directions():
+    """
+    Breadth is a DIRECT measure of regime — the share of the scanned universe
+    up on 24h — where session is only a proxy for it.
+    """
+    r = analyse(_regime_trades())
+    by = {b["label"]: b for b in r["by_breadth"] if b["n"]}
+    assert by["<30% up"]["short"]["win_rate"] == 100.0
+    assert by["<30% up"]["long"]["win_rate"] == 0.0
+    assert by[">70% up"]["long"]["win_rate"] == 100.0
+    assert by[">70% up"]["short"]["win_rate"] == 0.0
+
+
+def test_htf_alignment_split():
+    r = analyse(_regime_trades())
+    by = {b["label"]: b for b in r["by_htf_alignment"] if b["n"]}
+    assert by["with the hourly trend"]["n"] == 4
+    assert by["with the hourly trend"]["win_rate"] == 100.0
+    assert by["against the hourly trend"]["n"] == 2
+    assert by["against the hourly trend"]["win_rate"] == 0.0
+
+
+def test_alignment_is_direction_aware():
+    """A negative hourly trend is WITH a short and AGAINST a long."""
+    r = analyse([_regime_trade("short", 5, 5, 40, -1.0),
+                 _regime_trade("long", 5, 5, 40, -1.0)])
+    by = {b["label"]: b for b in r["by_htf_alignment"] if b["n"]}
+    assert by["with the hourly trend"]["short"]["n"] == 1
+    assert by["against the hourly trend"]["long"]["n"] == 1
+
+
+def test_trades_without_regime_context_are_skipped():
+    t = [{"symbol": "X", "side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+          "realised_pnl_usdt": 5.0, "pnl_verified": True, "entry_context": {}}]
+    r = analyse(t)
+    assert all(not b["n"] for b in r["by_breadth"])
+    assert all(not b["n"] for b in r["by_htf_alignment"])
+
+
+def test_regime_splits_carry_confidence_labels():
+    r = analyse(_regime_trades())
+    for b in r["by_breadth"] + r["by_htf_alignment"]:
+        if b["n"]:
+            assert b["confidence"] in ("insufficient", "thin", "usable")

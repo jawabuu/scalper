@@ -2800,6 +2800,15 @@ async function refreshAnalysis() {
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
       statTable('By exit reason', a.by_exit_reason || []),
+      timeTable('By market breadth at entry', a.by_breadth || [],
+                'Breadth is a DIRECT measure of regime: the share of the '
+                + 'scanned universe up on 24h. If fading highs only works '
+                + 'while the market is falling, it shows here. Measurement '
+                + 'only — nothing gates on it.'),
+      timeTable('By higher-timeframe alignment', a.by_htf_alignment || [],
+                'Whether the 3-minute signal ran WITH the coin\'s hourly '
+                + 'trend or against it. A short taken while the hour is still '
+                + 'rising is a different trade from one taken while it falls.'),
       timeTable('By session (entry time, UTC)', a.by_session || [],
                 'Comparing directions WITHIN the same hours controls for the '
                 + 'market regime — unlike comparing long against short across '

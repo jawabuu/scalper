@@ -706,3 +706,39 @@ def test_tolerance_is_configurable():
         assert _env_float("_T_EMA", 0.15) == pytest.approx(0.4)
     finally:
         os.environ.pop("_T_EMA", None)
+
+
+# ── Higher-timeframe trend, from candles already fetched ─────────────────────
+
+def test_htf_trend_sign_follows_the_trend():
+    """
+    Resampled from the same candles used for the 24h range, so it costs no
+    extra requests.
+    """
+    import numpy as np
+    import pandas as pd
+    from bot.scanner import htf_trend
+    n = 600
+    assert htf_trend(pd.DataFrame({"close": np.linspace(100, 130, n)})) > 0
+    assert htf_trend(pd.DataFrame({"close": np.linspace(130, 100, n)})) < 0
+
+
+def test_htf_trend_is_flat_on_a_flat_series():
+    import numpy as np
+    import pandas as pd
+    from bot.scanner import htf_trend
+    assert htf_trend(pd.DataFrame({"close": np.full(600, 100.0)})) == pytest.approx(0.0)
+
+
+def test_htf_trend_needs_enough_history():
+    import pandas as pd
+    from bot.scanner import htf_trend
+    assert htf_trend(pd.DataFrame({"close": [1, 2, 3]})) is None
+    assert htf_trend(None) is None
+
+
+def test_candidate_carries_the_htf_field():
+    from bot.scanner import Candidate
+    import dataclasses
+    names = {f.name for f in dataclasses.fields(Candidate)}
+    assert "htf_trend_pct" in names

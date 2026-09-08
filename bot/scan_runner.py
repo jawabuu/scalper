@@ -65,6 +65,10 @@ class ScanRunner:
         self._last_error: str | None = None
         self._universe_size: int = 0
         self._effective_vol_floor: float = 0.0
+        # Regime measures, derived from the ticker set already fetched.
+        self._breadth_pct: float | None = None
+        self._breadth_counts: tuple = (0, 0)
+        self._btc_change_pct: float | None = None
         # How many symbols needed the candle fallback for their 24h range —
         # a high count means the ticker feed is not supplying high/low.
         self._range_misses: int = 0
@@ -99,6 +103,27 @@ class ScanRunner:
                 log.info(f"Volume floor (p{self.cfg.vol_percentile:.0f}) = "
                          f"{vol_floor/1e6:.1f}M across {len(vols)} symbols")
         self._effective_vol_floor = vol_floor
+
+        # Market breadth, computed from tickers we have already fetched, so it
+        # costs nothing. A direct measure of regime rather than a proxy: if
+        # most of the market is falling, fading highs runs with the tide; if
+        # most is rising, it runs against it.
+        up = down = 0
+        btc_pct = None
+        for sym, t in tickers.items():
+            pc = t.get("percentage")
+            if pc is None:
+                continue
+            if sym.startswith("BTC/"):
+                btc_pct = float(pc)
+            if float(pc) > 0:
+                up += 1
+            elif float(pc) < 0:
+                down += 1
+        total = up + down
+        self._breadth_pct = round(up / total * 100, 1) if total else None
+        self._breadth_counts = (up, down)
+        self._btc_change_pct = btc_pct
 
         out = []
         for sym, t in tickers.items():
@@ -243,7 +268,13 @@ class ScanRunner:
                     "delta_note": str(d.note),
                 })
                 rows.append(row)
-            return {
+            # Regime context travels with the snapshot so every entry can be
+        # stamped with the market conditions it was taken in.
+        return {
+            "breadth_pct": self._breadth_pct,
+            "breadth_up": self._breadth_counts[0],
+            "breadth_down": self._breadth_counts[1],
+            "btc_change_pct": self._btc_change_pct,
                 "candidates": rows,
                 "last_scan_ts": self._last_scan_ts,
                 "last_scan_ago_s": (time.time() - self._last_scan_ts) if self._last_scan_ts else None,

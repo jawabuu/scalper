@@ -708,6 +708,13 @@ class AutoTrader:
                             else row.get("pct_below_24h_high")),
                         "range_pos_24h": row.get("range_pos_24h"),
                         "ema_gap_pct": row.get("ema_gap_pct"),
+                        # Regime context at entry. Recorded ONLY — nothing
+                        # gates on these yet. The point is to find out whether
+                        # they predict which direction works before acting on
+                        # a guess about which threshold matters.
+                        "htf_trend_pct": row.get("htf_trend_pct"),
+                        "breadth_pct": snap.get("breadth_pct"),
+                        "btc_change_pct": snap.get("btc_change_pct"),
                         "strength": row.get("strength"),
                         "streak": streak,
                         "callback_pct": decision.callback_pct,

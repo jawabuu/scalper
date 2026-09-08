@@ -126,6 +126,10 @@ class Candidate:
         if favourable >= 0.40:
             return "neutral"
         return "weak"
+    # Higher-timeframe EMA gap, resampled from the same candles. Recorded
+    # only — nothing gates on it yet. Defaulted, so it must follow every
+    # non-defaulted field in the dataclass.
+    htf_trend_pct: float | None = None
 
     def as_row(self) -> dict:
         # Everything cast to native Python types — the API layer must never see
@@ -135,6 +139,7 @@ class Candidate:
             "direction": str(self.direction),
             "rsi": round(float(self.rsi), 1),
             "ema_gap_pct": round(float(self.ema_gap_pct), 3),
+            "htf_trend_pct": self.htf_trend_pct,
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
@@ -163,6 +168,35 @@ def prepare(df: pd.DataFrame, cfg: ScanConfig) -> pd.DataFrame:
     df["rsi"] = ta.rsi(df["close"], length=cfg.rsi_len)
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg.atr_len)
     return df
+
+
+def htf_trend(df, factor: int = 20) -> float | None:
+    """
+    The coin's HIGHER-TIMEFRAME trend, as a signed EMA gap percentage.
+
+    Resampled from the candles already fetched for the 24h range, so it costs
+    no extra requests. On a 3m chart a factor of 20 gives 1-hour bars.
+
+    Answers whether the 3-minute signal is aligned with the hourly trend or
+    fighting it — a short taken while the hour is still rising is a different
+    proposition from one taken while the hour is falling, and nothing in the
+    system currently distinguishes them.
+    """
+    try:
+        if df is None or len(df) < factor * 25:
+            return None
+        closes = df["close"].astype(float)
+        # Take every Nth close: a cheap resample that needs no date index.
+        htf = closes.iloc[::factor].reset_index(drop=True)
+        if len(htf) < 22:
+            return None
+        fast = htf.ewm(span=9, adjust=False).mean().iloc[-1]
+        slow = htf.ewm(span=21, adjust=False).mean().iloc[-1]
+        if not slow:
+            return None
+        return round(float((fast - slow) / slow * 100), 3)
+    except Exception:
+        return None
 
 
 def ema_gap_pct(row) -> float:
@@ -251,6 +285,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     rsi = float(row["rsi"])
     gap = ema_gap_pct(row)
     narrowing, gap_change = is_converging(df, cfg)
+    htf = htf_trend(df)
     close_px = float(row["close"])
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
@@ -278,6 +313,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     if gap > -cfg.ema_tolerance_pct and rsi >= cfg.short_rsi_min:
         return Candidate(
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
+            htf_trend_pct=htf,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
@@ -294,6 +330,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     if gap < cfg.ema_tolerance_pct and cfg.long_rsi_min <= rsi <= cfg.long_rsi_max:
         return Candidate(
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
+            htf_trend_pct=htf,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
