@@ -412,3 +412,133 @@ def test_return_on_capital_works_without_recorded_margin():
     o = analyse(trades)["overall"]
     assert o["return_on_capital"] is not None
     assert o["capital_deployed"] is not None
+
+
+# ── Invented P&L must not pollute the totals ─────────────────────────────────
+
+def _verified_trade(sym, roi, pnl, margin):
+    return {"symbol": sym, "side": "long", "final_roi": roi, "peak_roi": roi + 2,
+            "realised_pnl_usdt": pnl, "margin": margin, "pnl_source": "ledger",
+            "pnl_verified": True, "entry_context": {}}
+
+
+def _invented_trade(sym, roi, pnl):
+    return {"symbol": sym, "side": "short", "final_roi": roi, "peak_roi": 0.0,
+            "realised_pnl_usdt": pnl, "pnl_source": "computed",
+            "pnl_verified": False, "exit_is_estimate": True,
+            "entry_context": {}}
+
+
+def test_unverified_trades_are_excluded_and_counted():
+    """
+    With neither the ledger nor the fills readable, the exit was reconstructed
+    from a guess: one trade reported -75% ROI on a position whose stop was
+    capped at -30%, another a flat zero. Averaging those corrupts every total.
+    """
+    trades = [_verified_trade("COLLECT", 34.27, 29.3911, 85.8),
+              _invented_trade("BTR", -75.12, -64.6411),
+              _invented_trade("ZORA", 0.0, 0.0)]
+    r = analyse(trades)
+    assert r["overall"]["n"] == 1
+    assert r["unverified_trades"] == 2
+    assert set(r["unverified_symbols"]) == {"BTR", "ZORA"}
+    assert any("EXCLUDED" in n for n in r["notes"])
+
+
+def test_excluding_them_lets_the_totals_mean_something():
+    trades = [_verified_trade("A", 10.0, 10.0, 100.0),
+              _invented_trade("B", -75.0, -64.0)]
+    o = analyse(trades)["overall"]
+    assert o["total_realised"] == pytest.approx(10.0)
+    assert o["win_rate"] == pytest.approx(100.0)
+
+
+def test_older_records_without_a_flag_use_the_estimate_marker():
+    from bot.analysis import _verified
+    assert _verified({"exit_is_estimate": True}) is False
+    assert _verified({"exit_is_estimate": False}) is True
+    assert _verified({"pnl_source": "ledger"}) is True
+    assert _verified({"pnl_source": "computed"}) is False
+
+
+def test_no_verified_trades_reports_zero_not_a_crash():
+    r = analyse([_invented_trade("B", -75.0, -64.0)])
+    assert r["overall"]["n"] == 0
+    assert r["unverified_trades"] == 1
+
+
+# ── Account return ───────────────────────────────────────────────────────────
+
+def _ar_trade(pnl, net, when, verified=True):
+    return {"symbol": "X", "realised_pnl_usdt": pnl, "net_pnl_usdt": net,
+            "fees_usdt": round(pnl - net, 4), "pnl_verified": verified,
+            "closed_at": when}
+
+
+def test_account_return_divides_by_the_starting_balance():
+    """
+    Distinct from return on capital, which divides by the SUM of margins across
+    sequential trades — the same money recycled, so that is return per unit of
+    turnover rather than growth of the account.
+    """
+    from bot.analysis import account_return
+    import time
+    now = time.time()
+    r = account_return([_ar_trade(29.39, 26.80, now - 7200),
+                        _ar_trade(-25.26, -27.85, now - 600)],
+                       baseline=5000.0)
+    assert r["net_pnl"] == pytest.approx(-1.05, abs=0.01)
+    assert r["pct"] == pytest.approx(-0.021, abs=0.001)
+
+
+def test_today_is_reported_separately():
+    from bot.analysis import account_return
+    import time
+    now = time.time()
+    r = account_return([_ar_trade(29.39, 26.80, now - 7200),
+                        _ar_trade(-25.26, -27.85, now - 600)],
+                       baseline=5000.0, day_baseline=5000.0,
+                       day_start_ts=now - 3600)
+    assert r["day_trades"] == 1
+    assert r["day_net_pnl"] == pytest.approx(-27.85, abs=0.01)
+
+
+def test_unverified_trades_are_excluded_from_account_return():
+    from bot.analysis import account_return
+    import time
+    now = time.time()
+    r = account_return([_ar_trade(10.0, 8.0, now),
+                        _ar_trade(-64.64, -64.64, now, verified=False)],
+                       baseline=5000.0)
+    assert r["trades"] == 1
+    assert r["net_pnl"] == pytest.approx(8.0)
+
+
+def test_disagreement_with_the_wallet_is_flagged():
+    """
+    Excluded trades mean the record can disagree with the balance. Saying so
+    beats showing a figure that quietly contradicts the wallet above it.
+    """
+    from bot.analysis import account_return
+    import time
+    now = time.time()
+    r = account_return([_ar_trade(10.0, 8.0, now),
+                        _ar_trade(-64.64, -64.64, now, verified=False)],
+                       baseline=5000.0, wallet_now=5029.66)
+    assert r["disagrees_with_wallet"] is True
+    assert r["wallet_gap"] == pytest.approx(21.66, abs=0.01)
+
+
+def test_agreement_is_not_flagged():
+    from bot.analysis import account_return
+    import time
+    now = time.time()
+    r = account_return([_ar_trade(10.0, 8.0, now)],
+                       baseline=5000.0, wallet_now=5008.0)
+    assert r["disagrees_with_wallet"] is False
+
+
+def test_no_baseline_yields_no_percentage():
+    from bot.analysis import account_return
+    r = account_return([], baseline=None)
+    assert r["pct"] is None

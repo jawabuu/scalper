@@ -155,9 +155,16 @@ def reset(path: str, mode: str) -> str:
         import shutil
         shutil.copy2(path, backup)
         data["closed_trades"] = []
+        # Clearing the trade record restarts P&L measurement, so the wallet
+        # baseline must restart too — otherwise "wallet change" is measured
+        # from a balance that predates the trades being counted, and the
+        # reconciliation can never close. This is separate from the daily-loss
+        # baseline, which is deliberately preserved so a halt is not reset.
+        data["wallet_start"] = None
         _atomic_write(path, data)
         log.warning(f"FUTURES_STATE_RESET=history — dropped {dropped} closed "
-                    f"trade(s); open positions and the daily baseline kept. "
+                    f"trade(s) and the wallet baseline; open positions and the "
+                    f"daily-loss baseline kept. "
                     f"Previous state archived at {backup}.")
         return backup
     except Exception as e:

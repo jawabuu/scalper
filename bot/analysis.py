@@ -257,12 +257,93 @@ def _time_split(trades: list[dict], label: str, members) -> dict:
     return out
 
 
+def _verified(t: dict) -> bool:
+    """
+    Did the money figure come from the exchange?
+
+    Where neither the ledger nor the fills were readable, the exit price was
+    reconstructed from a guess. One such trade reported -75% ROI on a position
+    whose stop was capped at -30%; another reported a flat zero. Those are
+    fabrications, not estimates, and averaging them corrupts every total —
+    including the wallet reconciliation, which then cannot close.
+    """
+    v = t.get("pnl_verified")
+    if v is not None:
+        return bool(v)
+    # Older records have no flag; treat a computed source as unverified.
+    src = t.get("pnl_source")
+    if src in ("ledger", "fills"):
+        return True
+    if src in ("computed", "none"):
+        return False
+    # No provenance at all: fall back to the exit-estimate marker.
+    return not t.get("exit_is_estimate")
+
+
+def account_return(trades: list[dict], baseline: float | None,
+                   wallet_now: float | None = None,
+                   day_baseline: float | None = None,
+                   day_start_ts: float | None = None) -> dict:
+    """
+    Account growth: net P&L divided by the balance it started from.
+
+    Distinct from return on capital, which divides by the SUM of margins across
+    sequential trades — the same money recycled, so that figure is return per
+    dollar of turnover rather than growth of the account. This one compounds;
+    that one measures edge per trade.
+
+    Computed from the TRADE RECORD rather than the wallet, so it matches the
+    tables below it and does not swing with unrealised P&L on open positions.
+    The cost is that it excludes unverified trades and can therefore disagree
+    with the actual balance — so the disagreement is reported rather than left
+    to be discovered.
+    """
+    scored = [t for t in trades if _verified(t)
+              and t.get("realised_pnl_usdt") is not None]
+    net = sum((_realised(t) or 0.0) for t in scored)
+
+    out = {"trades": len(scored), "net_pnl": round(net, 4),
+           "baseline": baseline, "pct": None,
+           "day_pct": None, "day_net_pnl": None, "day_trades": 0,
+           "wallet_pct": None, "disagrees_with_wallet": False}
+
+    if baseline and baseline > 0:
+        out["pct"] = round(net / baseline * 100, 3)
+
+    # Today's slice, on its own baseline.
+    if day_start_ts is not None:
+        today = [t for t in scored
+                 if (t.get("closed_at") or 0) >= day_start_ts]
+        day_net = sum((_realised(t) or 0.0) for t in today)
+        out["day_trades"] = len(today)
+        out["day_net_pnl"] = round(day_net, 4)
+        base = day_baseline or baseline
+        if base and base > 0:
+            out["day_pct"] = round(day_net / base * 100, 3)
+
+    # Does the trade record agree with the money? A gap means excluded or
+    # mis-recorded trades, or unrealised P&L on something still open.
+    if wallet_now is not None and baseline and baseline > 0:
+        moved = wallet_now - baseline
+        out["wallet_pct"] = round(moved / baseline * 100, 3)
+        out["wallet_gap"] = round(moved - net, 4)
+        out["disagrees_with_wallet"] = abs(moved - net) > max(1.0, abs(net) * 0.05)
+
+    return out
+
+
 def analyse(trades: list[dict]) -> dict:
     """
     Full report. Every section carries its own sample size so a striking
     difference across three trades is not mistaken for a finding.
+
+    Trades whose P&L could not be read from the exchange are EXCLUDED from
+    every statistic and reported separately, because an invented number is
+    worse than a missing one.
     """
-    trades = list(trades or [])
+    all_trades = list(trades or [])
+    unverified = [t for t in all_trades if not _verified(t)]
+    trades = [t for t in all_trades if _verified(t)]
     overall = group_stats(trades)
 
     longs = [t for t in trades if t.get("side") == "long"]
@@ -309,6 +390,12 @@ def analyse(trades: list[dict]) -> dict:
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
 
     notes: list[str] = []
+    if unverified:
+        notes.append(
+            f"{len(unverified)} trade(s) EXCLUDED: their P&L could not be read "
+            f"from the exchange, so the exit price was reconstructed from a "
+            f"guess. Those figures are invented, not approximate — including "
+            f"them would corrupt every total below.")
     if overall.get("n", 0) < MIN_INDICATIVE:
         notes.append(
             f"Only {overall.get('n', 0)} closed trades. Nothing here supports a "
@@ -368,6 +455,8 @@ def analyse(trades: list[dict]) -> dict:
             f"money: a price-based exit estimate can invent a profit.")
 
     return {
+        "unverified_trades": len(unverified),
+        "unverified_symbols": sorted({t.get("symbol", "?") for t in unverified}),
         "roi_mismatches": mismatched,
         "stop_impact": stop_impact,
         "trough_note": notes_extra,

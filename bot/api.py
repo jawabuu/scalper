@@ -191,9 +191,27 @@ def create_app(engine) -> FastAPI:
         if _guardian is None:
             return {"enabled": False, "message": "Guardian not enabled"}
         try:
-            from bot.analysis import analyse, reconcile
+            from bot.analysis import analyse, reconcile, account_return
             trades = _guardian.closed_trades()
             report = analyse(trades)
+            try:
+                day_start = None
+                day_base = None
+                if _auto is not None:
+                    day_base = getattr(_auto.state, "day_start_balance", None)
+                # Start of the current UTC day, matching the daily-loss window.
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                day_start = now.replace(hour=0, minute=0, second=0,
+                                        microsecond=0).timestamp()
+                report["account_return"] = account_return(
+                    trades,
+                    baseline=getattr(_guardian, "wallet_start", None),
+                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    day_baseline=day_base,
+                    day_start_ts=day_start)
+            except Exception as e:
+                report["account_return"] = {"error": str(e)}
             try:
                 report["reconciliation"] = reconcile(
                     trades,

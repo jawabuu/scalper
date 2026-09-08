@@ -1575,6 +1575,14 @@ class FuturesGuardian:
                 if realised is not None and margin
                 and self._last_trade_fees is not None else None),
             "pnl_source": pnl_source,
+            # Whether the money figure came from the EXCHANGE at all. When
+            # neither the income ledger nor the fills are available, the
+            # fallback reconstructs the exit from a price it has to guess —
+            # which produced a -75% ROI on a position whose stop was capped at
+            # -30%, and a flat 0 on another. Such numbers are not merely
+            # imprecise, they are invented, so they are marked and excluded
+            # from every total rather than silently averaged in.
+            "pnl_verified": pnl_source in ("ledger", "fills"),
             "observed_roi": _r2(meta.get("current_roi")),
             "exit_from_exchange": exit_from_exchange,
             "stop_roi": None if state.stop_roi is None else round(state.stop_roi, 2),

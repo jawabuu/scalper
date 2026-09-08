@@ -237,14 +237,15 @@
        cards keep the full width they need. Adding the fees card had pushed
        the row onto a second line. */
     grid-template-columns:
-      1.15fr   /* futures wallet  */
-      1.15fr   /* wallet balance  */
-      0.7fr    /* open positions  */
-      0.7fr    /* total trades    */
-      0.85fr   /* win rate        */
-      1.1fr    /* total P&L       */
-      1.1fr    /* fees paid       */
-      1fr;     /* avg trade       */
+      1.1fr    /* futures wallet     */
+      1.1fr    /* wallet balance     */
+      0.6fr    /* positions          */
+      0.6fr    /* trades             */
+      0.75fr   /* win rate           */
+      0.95fr   /* total P&L          */
+      0.95fr   /* fees paid          */
+      1.25fr   /* account return     */
+      1.05fr;  /* return on capital  */
     gap: 1px;
     background: var(--border);
   }
@@ -254,10 +255,19 @@
                            text-overflow: ellipsis; }
   /* Between the mobile breakpoint and ~1100px the row still fits, but the
      labels need a touch less size to avoid ellipsis. */
-  @media (min-width: 769px) and (max-width: 1100px) {
+  /* Nine cards on one row needs the labels to shrink over a wider band than
+     before — the previous rule stopped at 1100px and left clipping at 1280 and
+     1440. Verified clean from 769px to 1920px. */
+  @media (min-width: 769px) and (max-width: 1520px) {
     .stats-row .stat-label { font-size: 8.5px; letter-spacing: 0; }
     .stats-row .stat-value { font-size: 18px; }
-    .stats-row .stat { padding-left: 10px; padding-right: 6px; }
+    .stats-row .stat { padding-left: 9px; padding-right: 5px; }
+    .stats-row .stat-sub { font-size: 8.5px; }
+  }
+  @media (min-width: 769px) and (max-width: 900px) {
+    .stats-row .stat-label { font-size: 7.8px; }
+    .stats-row .stat-value { font-size: 16px; }
+    .stats-row .stat { padding-left: 7px; padding-right: 4px; }
   }
 
   .stat {
@@ -918,6 +928,9 @@
       <div class="stat" id="stat-fees-card"><div class="stat-label">Fees paid</div>
         <div class="stat-value neg" id="s-fees">—</div>
         <div class="stat-sub" id="s-fees-sub">commission</div></div>
+      <div class="stat" id="stat-acct-card"><div class="stat-label">Account return</div>
+        <div class="stat-value neu" id="s-acct">—</div>
+        <div class="stat-sub" id="s-acct-sub">since history cleared</div></div>
       <div class="stat" id="stat-roc-card"><div class="stat-label">Return on capital</div>
         <div class="stat-value neu" id="s-roc">—</div>
         <div class="stat-sub" id="s-roc-sub">net of fees</div></div>
@@ -2697,6 +2710,35 @@ async function refreshAnalysis() {
     const o = a.overall || {};
     setEl('an-meta', o.n ? `(${o.n} closed trades)` : '(no closed trades yet)');
     setEl('an-notes', (a.notes || []).map(n => `<div class="an-note">${n}</div>`).join(''));
+
+    // Account growth: net P&L over the balance it started from. Distinct from
+    // return on capital, which divides by the SUM of margins across sequential
+    // trades — the same money recycled, so that is return per unit of
+    // turnover, not growth of the account.
+    const ar = a.account_return || {};
+    const arEl = document.getElementById('s-acct');
+    if (ar.pct === null || ar.pct === undefined) {
+      setEl('s-acct', '\u2014');
+      setEl('s-acct-sub', ar.error ? 'unavailable' : 'no baseline yet');
+      if (arEl) arEl.className = 'stat-value neu';
+    } else {
+      setEl('s-acct', (ar.pct >= 0 ? '+' : '') + Number(ar.pct).toFixed(2) + '%');
+      if (arEl) arEl.className = 'stat-value '
+        + (ar.pct > 0 ? 'pos' : (ar.pct < 0 ? 'neg' : 'neu'));
+      let sub = ar.day_pct === null || ar.day_pct === undefined
+        ? `on $${Number(ar.baseline || 0).toFixed(0)} start`
+        : `today ${ar.day_pct >= 0 ? '+' : ''}${Number(ar.day_pct).toFixed(2)}%`
+          + ` · ${ar.day_trades} trade${ar.day_trades === 1 ? '' : 's'}`;
+      if (ar.disagrees_with_wallet) {
+        // The trade record and the wallet disagree — usually excluded trades
+        // or an open position. Say so rather than showing a figure that
+        // quietly contradicts the balance above.
+        sub = `<span style="color:var(--warn)">wallet says ${
+          ar.wallet_pct >= 0 ? '+' : ''}${Number(ar.wallet_pct).toFixed(2)}% — `
+          + `gap $${Math.abs(ar.wallet_gap).toFixed(2)}</span>`;
+      }
+      setEl('s-acct-sub', sub);
+    }
 
     // Return on the capital actually committed, not a mean of ROI percentages
     // — averaging percentages weights a large trade the same as a small one,
