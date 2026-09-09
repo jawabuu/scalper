@@ -155,6 +155,19 @@ def validate_request(*, side: str, margin_pct: float, callback_pct: float,
     return errs
 
 
+def _binance_code(err) -> str | None:
+    """Pull Binance's numeric error code out of a ccxt exception."""
+    import re
+    m = re.search(r'"code"\s*:\s*(-?\d+)', str(err))
+    return m.group(1) if m else None
+
+
+def _binance_msg(err) -> str | None:
+    import re
+    m = re.search(r'"msg"\s*:\s*"([^"]+)"', str(err))
+    return m.group(1) if m else None
+
+
 class EntryService:
     """
     Builds and executes operator-initiated futures entries.
@@ -774,8 +787,19 @@ class EntryService:
                 params={"callbackRate": plan.callback_pct, "reduceOnly": False},
             )
         except Exception as e:
-            log.exception("entry order failed")
-            return {"ok": False, "errors": [f"{type(e).__name__}: {e}"]}
+            # An exchange rejection is a routine outcome, not a crash. A full
+            # traceback buries the one useful part — Binance's own code and
+            # message — and the rejection was invisible in the dashboard, so
+            # lost entries could only be found by reading the exchange's own
+            # order list.
+            code = _binance_code(e)
+            msg = _binance_msg(e) or str(e)
+            log.warning(f"ENTRY REJECTED {plan.side.upper()} {plan.symbol}: "
+                        f"{code or type(e).__name__} — {msg}")
+            log.debug("entry rejection detail", exc_info=True)
+            return {"ok": False,
+                    "errors": [f"{code or type(e).__name__}: {msg}"],
+                    "rejected": True, "code": code}
 
         oid = str(order.get("id") or order.get("orderId") or "")
         log.warning(

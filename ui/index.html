@@ -1015,6 +1015,10 @@
             <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
           <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
             <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
+          <span class="pb-setting" style="border:none"><span class="k">window&nbsp;</span>
+            <input type="text" class="pb-input" id="ar-window" style="width:96px"
+                   placeholder="all day" title="UTC entry window, e.g. 05:00-11:00. Exits are never restricted."
+                   onchange="onAutoRuleValue('trading_window', this.value)"></span>
           <span class="pb-setting" style="border:none"><span class="k">daily halt&nbsp;</span>
             <select class="pb-input" id="ar-halt" style="width:64px"
                     title="the only automatic brake on a bad day"
@@ -2626,6 +2630,8 @@ function fillAutoRules(c) {
   set('ar-tph', c.max_trades_per_hour);
   const dirs = document.getElementById('ar-dirs');
   if (dirs && c.directions) dirs.value = c.directions;
+  const win = document.getElementById('ar-window');
+  if (win && document.activeElement !== win) win.value = c.trading_window || '';
   const halt = document.getElementById('ar-halt');
   if (halt && c.daily_halt_enabled !== undefined) {
     halt.value = c.daily_halt_enabled ? 'true' : 'false';
@@ -2870,10 +2876,16 @@ async function refreshAuto() {
     const cool = Object.keys(a.cooldowns || {}).length;
     setEl('auto-meta',
       (a.halted_reason ? a.halted_reason + ' · ' : '')
+      + `${c.trading_window ? c.trading_window + ' UTC' : 'all day'} · `
+      + `${c.directions && c.directions !== 'all' ? c.directions + ' only' : 'both sides'} · `
       + `within ${c.max_dist_to_extreme_pct}% of extreme · `
       + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `
       + `short RSI>${c.short_rsi_min} · callback ${c.callback_ratio}x distance · `
-      + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${c.max_trades_per_hour} trades/h · `
+      + `max ${c.max_open_positions} pos · ${a.trades_last_hour}/${
+          c.max_trades_per_hour || '\u221e'} trades/h · `
+      + (a.rejections
+         ? `<span style="color:var(--warn)">${a.rejections} rejected</span> · `
+         : '')
       + `daily stop ${c.daily_halt_enabled ? c.daily_loss_limit_pct + '%' : 'OFF'} · `
       + `re-entry cap ${c.max_reentries_per_symbol}/symbol/day`
       + `${Object.keys(a.reentries_today || {}).length ? ' · used: ' + Object.entries(a.reentries_today).map(([k,v]) => k.split('/')[0] + ':' + v).join(', ') : ''}`

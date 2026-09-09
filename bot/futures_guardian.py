@@ -228,6 +228,8 @@ class FuturesGuardian:
         self._risk_overshoots: dict[str, dict] = {}
         self._capped_stop_reported: dict[str, float] = {}
         self._listing_warned: bool = False
+        self.max_closed_trades: int = getattr(
+            self, "max_closed_trades", self.DEFAULT_MAX_CLOSED_TRADES)
         self._empty_listings: int = 0
         self._pending_cancels: dict[str, list] = {}
         self._cancel_attempts: dict[str, int] = {}
@@ -362,6 +364,9 @@ class FuturesGuardian:
     # Cancels are retried well past the position's life: an order that reports
     # -2011 may still be resting, so give it many chances before abandoning it.
     MAX_CANCEL_ATTEMPTS = 60
+    # How many closed trades to keep. Analysis needs the whole run, not a
+    # window; at ~100 trades a day this holds well over a month.
+    DEFAULT_MAX_CLOSED_TRADES = 5000
     # Seconds of slack before the order-placed stamp when querying the income
     # ledger, so the entry fill's commission is inside the window.
     INCOME_LOOKBACK_PAD_S = 120.0
@@ -1609,7 +1614,13 @@ class FuturesGuardian:
         }
         with self._lock:
             self._closed_trades.append(rec)
-            self._closed_trades = self._closed_trades[-100:]
+            # A 100-trade cap silently truncated the record: a 24-hour run kept
+            # reporting exactly 100 trades while far more had closed, so every
+            # split was computed on a moving window rather than the whole
+            # sample. Data collection is the point, so the ceiling is now high
+            # enough not to bind in practice and configurable if it ever does.
+            if len(self._closed_trades) > self.max_closed_trades:
+                self._closed_trades = self._closed_trades[-self.max_closed_trades:]
         log.info(
             f"CLOSED {symbol} {rec['side']} peak={rec['peak_roi']:+.1f}% ROI "
             f"final={rec['final_roi']}% realised="

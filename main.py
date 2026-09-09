@@ -96,6 +96,7 @@ if __name__ == "__main__":
         )
         # The guardian needs the risk budget to police the sizing/stop invariant.
         guardian.risk_pct = cfg.entry_risk_pct
+        guardian.max_closed_trades = cfg.max_closed_trades
         guardian.pending_poll_interval = cfg.guardian_pending_poll_interval
         guardian.sweep_orphan_stops = cfg.guard_sweep_orphan_stops
         # Restore before the first cycle so discovered positions keep the stop
@@ -200,6 +201,7 @@ if __name__ == "__main__":
                     long_rsi_max=cfg.auto_long_rsi_max,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
+                    trading_window=cfg.auto_trading_window,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
                     callback_atr_mult=cfg.auto_callback_atr_mult,

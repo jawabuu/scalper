@@ -97,7 +97,9 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
                   "opened_seen_at": (m or {}).get("opened_seen_at")}
             for sym, m in (pos_meta or {}).items()
         },
-        "closed_trades": list(closed_trades or [])[-200:],
+        # Was capped at 200, which silently discarded history a long run had
+        # collected. The file is small — a few hundred bytes per trade.
+        "closed_trades": list(closed_trades or [])[-5000:],
         "safety": safety or {},
         # Entry orders this bot placed, so stale ones stay reapable after a
         # restart rather than resting forever and blocking their symbol.

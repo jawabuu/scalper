@@ -261,6 +261,9 @@ class BotConfig:
     # file is archived, not deleted. Leave UNSET in normal operation — it
     # applies on every restart while it is set.
     futures_state_reset: str = field(default_factory=lambda: _env("FUTURES_STATE_RESET", ""))
+    # How many closed trades to retain for analysis.
+    max_closed_trades: int = field(default_factory=lambda: _env_int(
+        "MAX_CLOSED_TRADES", 5000))
     # Thresholds in ROI% (Binance UI convention: PnL / margin * 100).
     guard_initial_stop_roi: float = field(default_factory=lambda: _env_float("GUARD_INITIAL_STOP_ROI", 7.0))
     guard_arm_roi: float = field(default_factory=lambda: _env_float("GUARD_ARM_ROI", 15.0))
@@ -317,6 +320,10 @@ class BotConfig:
     # automatic brake on a bad day.
     auto_daily_halt_enabled: bool = field(default_factory=lambda: _env_bool(
         "AUTO_DAILY_HALT_ENABLED", True))
+    # Restrict ENTRIES to a UTC window, e.g. "05:00-11:00". Exits are never
+    # restricted. Empty trades around the clock.
+    auto_trading_window: str = field(default_factory=lambda: _env(
+        "AUTO_TRADING_WINDOW", "").strip())
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(

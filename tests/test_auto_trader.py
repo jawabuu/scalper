@@ -792,3 +792,69 @@ def test_snapshot_exposes_skip_reasons():
 def test_skip_reasons_default_to_empty():
     a = _snapshot_ready()
     assert a.snapshot()["skip_reasons"] == {}
+
+
+# ── Trading window ───────────────────────────────────────────────────────────
+
+def _utc(h, m=0):
+    from datetime import datetime, timezone
+    return datetime(2026, 9, 9, h, m, tzinfo=timezone.utc)
+
+
+def test_window_parsing_and_membership():
+    from bot.auto_trader import parse_window, in_window
+    w = parse_window("05:00-11:00")
+    assert not in_window(w, _utc(4))
+    assert in_window(w, _utc(5))
+    assert in_window(w, _utc(10, 59))
+    assert not in_window(w, _utc(11))
+
+
+def test_window_can_wrap_past_midnight():
+    from bot.auto_trader import parse_window, in_window
+    w = parse_window("22:00-04:00")
+    assert in_window(w, _utc(23))
+    assert in_window(w, _utc(0))
+    assert in_window(w, _utc(3, 59))
+    assert not in_window(w, _utc(5))
+
+
+def test_empty_or_bad_window_means_no_restriction():
+    from bot.auto_trader import parse_window, in_window
+    assert in_window(parse_window("")) is True
+    assert in_window(parse_window("not a window")) is True
+    assert in_window(parse_window("99:00-11:00")) is True
+
+
+def test_entries_declined_outside_the_window():
+    a = _switch_trader(False)
+    a.cfg.trading_window = "05:00-11:00"
+    import bot.auto_trader as at
+    real = at.in_window
+    try:
+        at.in_window = lambda w, now=None: False
+        ok, why = check_safety(a.state, a.cfg, balance=5000.0,
+                               open_positions=0, symbol="X")
+        assert not ok and "trading window" in why
+    finally:
+        at.in_window = real
+
+
+def test_entries_allowed_inside_the_window():
+    a = _switch_trader(False)
+    a.cfg.trading_window = "05:00-11:00"
+    import bot.auto_trader as at
+    real = at.in_window
+    try:
+        at.in_window = lambda w, now=None: True
+        ok, _ = check_safety(a.state, a.cfg, balance=5000.0,
+                             open_positions=0, symbol="X")
+        assert ok
+    finally:
+        at.in_window = real
+
+
+def test_window_is_live_editable():
+    a = _trader()
+    applied, errors = a.update_rules({"trading_window": "05:00-11:00"})
+    assert not errors and a.cfg.trading_window == "05:00-11:00"

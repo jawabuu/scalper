@@ -58,6 +58,10 @@ class AutoTradeConfig:
     # only automatic brake on a bad day, so it is deliberately visible in the
     # dashboard rather than hidden in a config file.
     daily_halt_enabled: bool = True
+    # Restrict entries to a window of the UTC day, e.g. "05:00-11:00". Empty
+    # means trade around the clock. Exits are NEVER restricted — a position
+    # opened inside the window is managed normally until it closes.
+    trading_window: str = ""
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -273,6 +277,44 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
     return state
 
 
+def parse_window(text: str):
+    """
+    Parse "HH:MM-HH:MM" into (start_minutes, end_minutes) from UTC midnight.
+
+    A window that wraps past midnight (e.g. "22:00-04:00") is supported: the
+    end being less than the start means it spans the day boundary.
+    Returns None for an empty or unparseable value, meaning no restriction.
+    """
+    if not text:
+        return None
+    try:
+        a, b = str(text).strip().split("-", 1)
+        def mins(v):
+            h, m = (v.strip().split(":") + ["0"])[:2]
+            h, m = int(h), int(m)
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError(v)
+            return h * 60 + m
+        return mins(a), mins(b)
+    except Exception:
+        return None
+
+
+def in_window(window, now_utc=None) -> bool:
+    """Is the current UTC time inside the window? True when unrestricted."""
+    if window is None:
+        return True
+    from datetime import datetime, timezone
+    now = now_utc or datetime.now(timezone.utc)
+    cur = now.hour * 60 + now.minute
+    start, end = window
+    if start == end:
+        return True                      # a zero-width window means no limit
+    if start < end:
+        return start <= cur < end
+    return cur >= start or cur < end     # wraps past midnight
+
+
 def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
                  open_positions: int, symbol: str,
                  current_rsi: float | None = None, side: str = "short",
@@ -292,6 +334,13 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
     # the dashboard said the halt was off — and this second, independent check
     # below re-set the halt even when disabled. Both cost data-collection time
     # that only shows up when someone comes back and finds it stopped.
+    # Outside the trading window nothing new is opened. Checked first because
+    # it is the cheapest test and the most common reason to decline.
+    win = parse_window(getattr(cfg, "trading_window", ""))
+    if not in_window(win):
+        return False, (f"outside the trading window "
+                       f"{getattr(cfg, 'trading_window', '')} UTC")
+
     halt_on = getattr(cfg, "daily_halt_enabled", True)
     if not halt_on and state.halted_reason:
         state.halted_reason = None
@@ -449,6 +498,9 @@ class AutoTrader:
             # entries gave no way to tell a broken bot from rules that simply
             # do not match the current market.
             "skip_reasons": dict(getattr(self, "_skip_reasons", {})),
+            # Entries the exchange refused. Counted so lost opportunities are
+            # visible without reading the exchange's own order list.
+            "rejections": getattr(self, "_rejections", 0),
             "day_start_balance": round(self.state.day_start_balance, 2),
             "trades_last_hour": len(self.state.recent_entry_times),
             "cooldowns": {k: int(v - _time.time())
@@ -463,6 +515,7 @@ class AutoTrader:
                 "long_rsi_max": self.cfg.long_rsi_max,
                 "directions": self.cfg.directions,
                 "daily_halt_enabled": self.cfg.daily_halt_enabled,
+                "trading_window": self.cfg.trading_window,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
@@ -497,6 +550,7 @@ class AutoTrader:
         # set of allowed values instead of an upper bound.
         "directions": (str, None, ("all", "long", "short")),
         "daily_halt_enabled": (bool, None, (True, False)),
+        "trading_window": (str, None, None),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),
@@ -533,6 +587,17 @@ class AutoTrader:
             # Booleans need explicit parsing: bool("false") is True, so casting
             # a form value through bool() would accept "false" as enabled and
             # any typo as enabled too.
+            # Free-text settings (no allowed-value set and no bounds) are
+            # validated by their own parser, not by a numeric range.
+            if typ is str and lo is None and hi is None:
+                val = str(raw).strip()
+                if key == "trading_window" and val and parse_window(val) is None:
+                    errors.append(f"{key} must look like 05:00-11:00")
+                    continue
+                setattr(self.cfg, key, val)
+                applied[key] = val
+                continue
+
             if typ is bool:
                 if isinstance(raw, bool):
                     val = raw
@@ -651,6 +716,8 @@ class AutoTrader:
         # Reasons are rebuilt each pass so they always describe the CURRENT
         # candidate list rather than accumulating stale entries.
         self._skip_reasons = {}
+        if not hasattr(self, "_rejections"):
+            self._rejections = 0
         open_syms = {p.symbol for p in positions}
         # Also skip symbols with a resting entry order. The entry service
         # refuses these too, but checking here avoids a pointless preview and
@@ -750,7 +817,15 @@ class AutoTrader:
                              f"{side} · {decision.reason}"
                              + (f" · {note}" if note else ""), symbol)
             else:
-                self._record("execute_failed", str(res.get("error")), symbol)
+                # execute() returns `errors` (a list); reading `error` recorded
+                # the literal string "None", so every rejection showed up blank
+                # in the dashboard and could only be found on the exchange.
+                detail = "; ".join(res.get("errors") or []) or str(
+                    res.get("error") or "unknown")
+                self._record("execute_failed", detail, symbol)
+                self._skip_reasons[symbol] = f"exchange rejected: {detail}"
+                self._rejections += 1
+                _log.warning(f"auto-trade: {symbol} entry rejected — {detail}")
 
     def _check_daily_drawdown(self, balance: float):
         """

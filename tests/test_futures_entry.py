@@ -1222,3 +1222,47 @@ def test_no_cap_published_returns_none():
         def market(self, s):
             return {"limits": {}, "info": {"filters": []}}
     assert _guardian(NoneEx()).market_max_qty("X/USDT:USDT") is None
+
+
+# ── Exchange rejections must be visible ──────────────────────────────────────
+
+def test_binance_code_and_message_are_extracted():
+    """
+    A full traceback buried the one useful part — the exchange's own code and
+    message — and the rejection was invisible in the dashboard, so lost entries
+    could only be found by reading the exchange's order list.
+    """
+    from bot.futures_entry import _binance_code, _binance_msg
+    err = 'binanceusdm {"code":-4005,"msg":"Quantity greater than max quantity."}'
+    assert _binance_code(err) == "-4005"
+    assert _binance_msg(err) == "Quantity greater than max quantity."
+
+
+def test_non_binance_errors_yield_none():
+    from bot.futures_entry import _binance_code, _binance_msg
+    assert _binance_code("connection reset") is None
+    assert _binance_msg("connection reset") is None
+
+
+def test_rejection_returns_errors_not_error():
+    """
+    The auto-trader read res['error'] while execute returns res['errors'],
+    recording the literal string "None" for every rejection.
+    """
+    ex = _PendingEx()
+    ex.fetch_open_orders = lambda s: []
+    def boom(**kw):
+        raise RuntimeError('binanceusdm {"code":-2021,"msg":"Order would immediately trigger."}')
+    ex.create_order = boom
+    guardian = _LevGuardian(ex)
+    guardian.dry_run = False
+    from bot.futures_entry import EntryService, EntryLimits
+    svc = EntryService(guardian, EntryLimits(
+        max_positions=6, max_margin_pct=15, default_margin_pct=10,
+        default_callback_pct=0.1, assumed_leverage=20.0,
+        atr_stop_mult=1.5, risk_pct=1.0))
+    prev = svc.preview(symbol="BR/USDT:USDT", side="long")
+    res = svc.execute(prev["plan"]["token"])
+    assert res["ok"] is False
+    assert res.get("errors") and "-2021" in res["errors"][0]
+    assert res.get("rejected") is True

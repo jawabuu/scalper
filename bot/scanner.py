@@ -183,7 +183,12 @@ def htf_trend(df, factor: int = 20) -> float | None:
     system currently distinguishes them.
     """
     try:
-        if df is None or len(df) < factor * 25:
+        # 24h on a 3m chart is 480 candles, and requiring factor*25 = 500 made
+        # this return None on every single call — the field was recorded but
+        # always empty, so the alignment table never populated. The real
+        # requirement is enough resampled bars for a 21-period EMA, which the
+        # len(htf) check below enforces.
+        if df is None or len(df) < factor * 22:
             return None
         closes = df["close"].astype(float)
         # Take every Nth close: a cheap resample that needs no date index.
