@@ -67,6 +67,13 @@ class GuardState:
     # Worst ROI seen while open. Peak alone cannot answer "would a tighter stop
     # have cut this winner short?" — that needs the trough.
     trough_roi: float = 0.0
+    # When the position first showed a positive ROI, and what it was at fixed
+    # ages. Recorded so a fail-fast rule can be judged on evidence rather than
+    # guessed at: without these, a winner that dipped for four minutes before
+    # running is indistinguishable from one that went green immediately, and
+    # the cost of any cutoff is unmeasurable.
+    first_positive_at: float | None = None
+    roi_checkpoints: dict = field(default_factory=dict)
     armed: bool = False            # has the trailing stop armed?
     stop_order_id: str | None = None
     stop_roi: float | None = None  # ROI level the resting stop sits at

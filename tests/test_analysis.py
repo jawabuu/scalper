@@ -610,3 +610,64 @@ def test_regime_splits_carry_confidence_labels():
     for b in r["by_breadth"] + r["by_htf_alignment"]:
         if b["n"]:
             assert b["confidence"] in ("insufficient", "thin", "usable")
+
+
+# ── Fail-fast impact (measurement only) ──────────────────────────────────────
+
+def _ff_winner(roi, pnl, secs):
+    return {"side": "short", "final_roi": roi, "peak_roi": roi + 3,
+            "realised_pnl_usdt": pnl, "margin": 100.0, "pnl_verified": True,
+            "secs_to_first_positive": secs, "entry_context": {}}
+
+
+def _ff_loser(final, at60, at180, at300):
+    return {"side": "short", "final_roi": final, "peak_roi": 0.0,
+            "realised_pnl_usdt": final, "margin": 100.0, "pnl_verified": True,
+            "secs_to_first_positive": None, "roi_at_60s": at60,
+            "roi_at_180s": at180, "roi_at_300s": at300, "entry_context": {}}
+
+
+def _ff_set():
+    return [_ff_winner(20, 20, 15), _ff_winner(18, 18, 45),
+            _ff_winner(25, 25, 240), _ff_winner(30, 30, 400),
+            _ff_loser(-25, -4, -11, -19), _ff_loser(-24, -6, -14, -21),
+            _ff_loser(-25, -3, -9, -17)]
+
+
+def test_cutoff_counts_the_winners_it_would_have_killed():
+    """
+    A winner that dipped for four minutes before running is indistinguishable
+    from one that went green immediately unless the timing is recorded — so
+    the cost of any cutoff would otherwise be unmeasurable.
+    """
+    r = {f["cutoff_s"]: f for f in analyse(_ff_set())["fail_fast_impact"]}
+    assert r[60]["winners_cut"] == 2      # the 240s and 400s winners
+    assert r[300]["winners_cut"] == 1     # only the 400s one
+    assert r[60]["of_winners"] == 4
+
+
+def test_cutoff_values_the_cost():
+    r = {f["cutoff_s"]: f for f in analyse(_ff_set())["fail_fast_impact"]}
+    assert r[60]["winner_value_lost"] == pytest.approx(55.0)
+    assert r[300]["winner_value_lost"] == pytest.approx(30.0)
+
+
+def test_cutoff_shows_what_it_would_have_saved():
+    """Where a never-green loser stood at the cutoff versus where it ended."""
+    r = {f["cutoff_s"]: f for f in analyse(_ff_set())["fail_fast_impact"]}
+    assert r[60]["losers_never_green"] == 3
+    assert r[60]["avg_roi_at_cutoff"] == pytest.approx(-4.33, abs=0.05)
+    assert r[60]["avg_roi_saved"] > r[300]["avg_roi_saved"]
+
+
+def test_later_cutoffs_save_less():
+    """The longer you wait, the more of the loss has already happened."""
+    r = {f["cutoff_s"]: f for f in analyse(_ff_set())["fail_fast_impact"]}
+    assert r[60]["avg_roi_saved"] > r[180]["avg_roi_saved"] > r[300]["avg_roi_saved"]
+
+
+def test_no_timing_data_yields_empty_counts():
+    t = [{"side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+          "realised_pnl_usdt": 5.0, "pnl_verified": True, "entry_context": {}}]
+    for f in analyse(t)["fail_fast_impact"]:
+        assert f["of_winners"] == 0

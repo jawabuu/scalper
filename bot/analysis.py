@@ -427,6 +427,44 @@ def analyse(trades: list[dict]) -> dict:
         _time_split(trades, "against the hourly trend", lambda t: _aligned(t, False)),
     ]
 
+    # ── What a fail-fast cutoff would have cost, and saved ───────────────
+    # Two questions a cutoff needs answered before it can be chosen:
+    #   1. how many WINNERS took longer than the cutoff to go green — the cost
+    #   2. where the LOSERS stood at that moment — the saving
+    # Neither is answerable from peak and final alone, which is why the
+    # underlying fields are recorded per trade.
+    winners = [t for t in trades if (_roi(t) or 0) > 0]
+    losers = [t for t in trades if (_roi(t) or 0) < 0]
+    fail_fast = []
+    for secs, key in ((60, "roi_at_60s"), (180, "roi_at_180s"),
+                      (300, "roi_at_300s")):
+        # A winner is cut if it had not yet gone positive at the cutoff.
+        timed = [t for t in winners if t.get("secs_to_first_positive") is not None]
+        cut = [t for t in timed if float(t["secs_to_first_positive"]) > secs]
+        cut_value = sum((_realised(t) or 0.0) for t in cut)
+
+        # Losers that never went green: where were they at the cutoff?
+        never = [t for t in losers if not t.get("peak_roi")]
+        at_mark = [float(t[key]) for t in never if t.get(key) is not None]
+        avg_at = round(sum(at_mark) / len(at_mark), 2) if at_mark else None
+        avg_final = (round(sum((_roi(t) or 0) for t in never) / len(never), 2)
+                     if never else None)
+        fail_fast.append({
+            "cutoff_s": secs,
+            "winners_cut": len(cut),
+            "of_winners": len(timed),
+            "winner_value_lost": round(cut_value, 2),
+            "losers_never_green": len(never),
+            "avg_roi_at_cutoff": avg_at,
+            "avg_final_roi": avg_final,
+            # The saving per trade is the gap between where it stood at the
+            # cutoff and where it ended.
+            "avg_roi_saved": (round(avg_at - avg_final, 2)
+                              if avg_at is not None and avg_final is not None
+                              else None),
+            "confidence": confidence_for(len(timed)),
+        })
+
     reentries = [t for t in trades if (t.get("entry_context") or {}).get("was_reentry")]
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
 
@@ -508,6 +546,7 @@ def analyse(trades: list[dict]) -> dict:
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
         "by_exit_reason": exits,
+        "fail_fast_impact": fail_fast,
         "by_breadth": by_breadth,
         "by_htf_alignment": by_htf,
         "by_session": by_session,

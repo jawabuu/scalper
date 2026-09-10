@@ -2804,7 +2804,40 @@ async function refreshAnalysis() {
       : `<div><div class="panel-label">Would a tighter stop have cut your winners?</div>
          <div class="empty" style="padding:12px">${a.trough_note || 'no trough data yet'}</div></div>`;
 
+    // What a fail-fast cutoff would cost and save. Both halves matter: the
+    // winners it would have killed, and how much of the loss it would have
+    // avoided on trades that never went green.
+    const ff = (a.fail_fast_impact || []).filter(r => r.of_winners || r.losers_never_green);
+    const ffTable = ff.length ? `<div><div class="panel-label">
+      Would closing early have helped?</div>
+      <table><thead><tr><th>cut after</th>
+      <th class="num">winners lost</th><th class="num">cost</th>
+      <th class="num">losers never green</th>
+      <th class="num">ROI at cutoff</th><th class="num">ROI at stop</th>
+      <th class="num">saved</th></tr></thead><tbody>` +
+      ff.map(r => `<tr>
+        <td class="sym">${r.cutoff_s}s${confBadge(r.confidence)}</td>
+        <td class="num ${r.winners_cut ? 'neg' : 'pos'}">${r.winners_cut}/${r.of_winners}</td>
+        <td class="num ${r.winner_value_lost ? 'neg' : ''}">${
+          r.winner_value_lost ? '-$' + Number(r.winner_value_lost).toFixed(2) : '—'}</td>
+        <td class="num">${r.losers_never_green}</td>
+        <td class="num ${(r.avg_roi_at_cutoff ?? 0) < 0 ? 'neg' : ''}">${
+          r.avg_roi_at_cutoff === null || r.avg_roi_at_cutoff === undefined
+            ? '—' : r.avg_roi_at_cutoff + '%'}</td>
+        <td class="num neg">${r.avg_final_roi === null || r.avg_final_roi === undefined
+            ? '—' : r.avg_final_roi + '%'}</td>
+        <td class="num ${(r.avg_roi_saved ?? 0) > 0 ? 'pos' : ''}">${
+          r.avg_roi_saved === null || r.avg_roi_saved === undefined
+            ? '—' : '+' + r.avg_roi_saved + '%'}</td></tr>`).join('')
+      + `</tbody></table><div class="scan-note" style="margin-top:6px">
+      Cost is the winners that had not yet turned green by the cutoff. Saving
+      is the gap between where a never-green loser stood at the cutoff and
+      where it finished. Measurement only — nothing closes early yet.</div></div>`
+      : `<div><div class="panel-label">Would closing early have helped?</div>
+         <div class="empty" style="padding:12px">no timing data yet — recorded from this version on</div></div>`;
+
     setEl('an-grid', [
+      ffTable,
       siTable,
       statTable('By RSI at entry', a.by_rsi || []),
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),

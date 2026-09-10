@@ -487,6 +487,23 @@ class FuturesGuardian:
                     "ratio": round(loss / budget, 2), "stop_roi": round(stop_roi, 2),
                 }
 
+    # Ages at which the position's ROI is sampled, in seconds.
+    ROI_CHECKPOINTS_S = (60, 180, 300)
+
+    def _note_progress(self, pos, state, current_roi: float):
+        """Record when the trade first went green, and its ROI at fixed ages."""
+        now = time.time()
+        if state.first_positive_at is None and current_roi > 0:
+            state.first_positive_at = now
+        opened = (self._pos_meta.get(pos.symbol, {}) or {}).get("opened_seen_at")
+        if not opened:
+            return
+        age = now - float(opened)
+        for mark in self.ROI_CHECKPOINTS_S:
+            key = str(mark)
+            if age >= mark and key not in state.roi_checkpoints:
+                state.roi_checkpoints[key] = round(current_roi, 2)
+
     def _capture_entry_context(self, pos: FuturesPosition, price: float,
                                range_pos: float | None) -> dict:
         """
@@ -966,6 +983,11 @@ class FuturesGuardian:
         prev_order_id = state.stop_order_id
         prev_stop_roi = state.stop_roi
         was_armed = state.armed
+        # Instrumentation for a fail-fast rule: when the position first turned
+        # positive, and where it stood at fixed ages. Recorded only — nothing
+        # acts on these yet, but without them any cutoff would be chosen blind.
+        self._note_progress(pos, state, current_roi)
+
         _stop_roi_used = self._cap_stop_to_budget(pos, self.effective_stop_roi(pos))
         stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
@@ -1567,6 +1589,14 @@ class FuturesGuardian:
             "leverage": meta.get("leverage"),
             "peak_roi": round(state.peak_roi, 2),
             "trough_roi": round(state.trough_roi, 2),
+            # Seconds from first sighting to the first positive ROI. None means
+            # it never went green — the case a fail-fast rule targets.
+            "secs_to_first_positive": (
+                round(state.first_positive_at - float(meta["opened_seen_at"]), 1)
+                if state.first_positive_at and meta.get("opened_seen_at") else None),
+            "roi_at_60s": state.roi_checkpoints.get("60"),
+            "roi_at_180s": state.roi_checkpoints.get("180"),
+            "roi_at_300s": state.roi_checkpoints.get("300"),
             "final_roi": final_roi,
             # ROI DERIVED from the same figure as the money, so the two can
             # never disagree. Previously ROI came from entry/exit prices while
