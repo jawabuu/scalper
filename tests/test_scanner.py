@@ -742,3 +742,60 @@ def test_candidate_carries_the_htf_field():
     import dataclasses
     names = {f.name for f in dataclasses.fields(Candidate)}
     assert "htf_trend_pct" in names
+
+
+# ── Breakout structure (measurement only) ────────────────────────────────────
+
+def _bdf(rows):
+    import pandas as pd
+    return pd.DataFrame(rows, columns=["open", "close"])
+
+
+_RISING = [[0.98, 1.00], [1.0, 1.02], [1.02, 1.05], [1.05, 1.09]]
+
+
+def test_full_breakout_is_detected():
+    """
+    New extreme + consecutive candles + a gap that is wide AND widening. The
+    widening is what separates a breakout from a blow-off top.
+    """
+    from bot.scanner import breakout_structure
+    r = breakout_structure(_bdf(_RISING), 1.09, 0.8, "short", 1.4, 0.3)
+    assert r["breakout"] is True
+    assert r["at_extreme"] and r["gap_wide"] and r["gap_widening"]
+    assert r["consecutive"] == 3
+
+
+def test_a_narrowing_gap_is_not_a_breakout():
+    from bot.scanner import breakout_structure
+    assert breakout_structure(_bdf(_RISING), 1.09, 0.8, "short", 1.4, -0.3)["breakout"] is False
+
+
+def test_a_narrow_gap_is_not_a_breakout():
+    from bot.scanner import breakout_structure
+    assert breakout_structure(_bdf(_RISING), 1.09, 0.8, "short", 0.2, 0.3)["breakout"] is False
+
+
+def test_away_from_the_extreme_is_not_a_breakout():
+    from bot.scanner import breakout_structure
+    assert breakout_structure(_bdf(_RISING), 1.30, 0.8, "short", 1.4, 0.3)["breakout"] is False
+
+
+def test_a_broken_run_is_counted_accurately():
+    from bot.scanner import breakout_structure
+    mixed = _bdf([[0.98, 1.00], [1.0, 1.02], [1.02, 0.99], [0.99, 1.09]])
+    r = breakout_structure(mixed, 1.09, 0.8, "short", 1.4, 0.3)
+    assert r["consecutive"] == 1 and r["breakout"] is False
+
+
+def test_downside_breakout_uses_red_candles_and_the_low():
+    from bot.scanner import breakout_structure
+    falling = _bdf([[1.09, 1.05], [1.05, 1.02], [1.02, 1.0], [1.0, 0.97]])
+    r = breakout_structure(falling, 1.3, 0.97, "long", -1.4, 0.3)
+    assert r["breakout"] is True and r["consecutive"] == 3
+
+
+def test_too_little_history_is_safe():
+    from bot.scanner import breakout_structure
+    assert breakout_structure(_bdf([[1, 1]]), 1, 1, "short", 1, 1)["breakout"] is False
+    assert breakout_structure(None, 1, 1, "short", 1, 1)["breakout"] is False

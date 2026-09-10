@@ -25,7 +25,7 @@ cross, i.e. the move is developing but has not yet completed):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 import pandas_ta as ta
@@ -130,6 +130,8 @@ class Candidate:
     # only — nothing gates on it yet. Defaulted, so it must follow every
     # non-defaulted field in the dataclass.
     htf_trend_pct: float | None = None
+    # Breakout structure components. Recorded only — nothing gates on it.
+    breakout: dict = field(default_factory=dict)
 
     def as_row(self) -> dict:
         # Everything cast to native Python types — the API layer must never see
@@ -140,6 +142,7 @@ class Candidate:
             "rsi": round(float(self.rsi), 1),
             "ema_gap_pct": round(float(self.ema_gap_pct), 3),
             "htf_trend_pct": self.htf_trend_pct,
+            "breakout": dict(self.breakout or {}),
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
@@ -168,6 +171,65 @@ def prepare(df: pd.DataFrame, cfg: ScanConfig) -> pd.DataFrame:
     df["rsi"] = ta.rsi(df["close"], length=cfg.rsi_len)
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg.atr_len)
     return df
+
+
+def breakout_structure(df, high_24h, low_24h, direction: str,
+                       gap_pct: float, gap_change: float,
+                       green_needed: int = 3,
+                       min_gap_pct: float = 0.5) -> dict:
+    """
+    Is this a BREAKOUT rather than an exhaustion?
+
+    A wide EMA gap on its own is ambiguous — it fits a blow-off top as well as
+    a breakout. What distinguishes them is whether the move is still
+    EXPANDING: price making a new extreme, consecutive candles carrying it
+    there, and the gap widening rather than rolling over.
+
+    Returns the components as well as the verdict, so a split can show which
+    part carries the information rather than only the combination.
+
+    Recorded only — nothing acts on this.
+    """
+    out = {"at_extreme": False, "consecutive": 0, "gap_wide": False,
+           "gap_widening": False, "breakout": False}
+    try:
+        if df is None or len(df) < green_needed + 1:
+            return out
+        closes = df["close"].astype(float)
+        opens = df["open"].astype(float)
+        price = float(closes.iloc[-1])
+
+        # At the extreme in the direction of the move: a NEW high for an
+        # upside breakout, a new low for a downside one.
+        if direction == "short" and high_24h:
+            out["at_extreme"] = price >= float(high_24h) * 0.999
+        elif direction == "long" and low_24h:
+            out["at_extreme"] = price <= float(low_24h) * 1.001
+
+        # Consecutive candles carrying the move. For an upside breakout that
+        # means green closes; downside, red.
+        want_green = (direction == "short")
+        run = 0
+        for i in range(1, green_needed + 1):
+            c, o = float(closes.iloc[-i]), float(opens.iloc[-i])
+            if (c > o) if want_green else (c < o):
+                run += 1
+            else:
+                break
+        out["consecutive"] = run
+
+        out["gap_wide"] = abs(float(gap_pct)) >= min_gap_pct
+        # gap_change is the change in the ABSOLUTE gap: negative means it
+        # narrowed, positive means it widened.
+        out["gap_widening"] = float(gap_change) > 0
+
+        out["breakout"] = bool(out["at_extreme"]
+                               and run >= green_needed
+                               and out["gap_wide"]
+                               and out["gap_widening"])
+    except Exception:
+        pass
+    return out
 
 
 def htf_trend(df, factor: int = 20) -> float | None:
@@ -319,6 +381,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
         return Candidate(
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
             htf_trend_pct=htf,
+            breakout=breakout_structure(df, high_24h, low_24h, "short",
+                                        gap, gap_change),
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
@@ -336,6 +400,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
         return Candidate(
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             htf_trend_pct=htf,
+            breakout=breakout_structure(df, high_24h, low_24h, "long",
+                                        gap, gap_change),
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,

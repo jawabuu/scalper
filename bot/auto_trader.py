@@ -796,6 +796,15 @@ class AutoTrader:
                         # they predict which direction works before acting on
                         # a guess about which threshold matters.
                         "htf_trend_pct": row.get("htf_trend_pct"),
+                        # Breakout structure at entry. The question is whether
+                        # a wide, WIDENING gap at a new extreme means the move
+                        # is still expanding — in which case fading it is the
+                        # wrong side. Recorded only.
+                        "breakout": (row.get("breakout") or {}).get("breakout"),
+                        "brk_at_extreme": (row.get("breakout") or {}).get("at_extreme"),
+                        "brk_consecutive": (row.get("breakout") or {}).get("consecutive"),
+                        "brk_gap_wide": (row.get("breakout") or {}).get("gap_wide"),
+                        "brk_gap_widening": (row.get("breakout") or {}).get("gap_widening"),
                         "breadth_pct": snap.get("breadth_pct"),
                         "btc_change_pct": snap.get("btc_change_pct"),
                         "strength": row.get("strength"),

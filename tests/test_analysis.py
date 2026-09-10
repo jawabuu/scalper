@@ -671,3 +671,56 @@ def test_no_timing_data_yields_empty_counts():
           "realised_pnl_usdt": 5.0, "pnl_verified": True, "entry_context": {}}]
     for f in analyse(t)["fail_fast_impact"]:
         assert f["of_winners"] == 0
+
+
+# ── Breakout splits ──────────────────────────────────────────────────────────
+
+def _brk_trade(side, roi, pnl, brk, ext=True, wide=True, widening=True, run=3):
+    return {"symbol": "X", "side": side, "final_roi": roi,
+            "peak_roi": max(roi, 0) + 3, "realised_pnl_usdt": pnl,
+            "margin": 100.0, "pnl_verified": True,
+            "entry_context": {"breakout": brk, "brk_at_extreme": ext,
+                              "brk_gap_wide": wide, "brk_gap_widening": widening,
+                              "brk_consecutive": run}}
+
+
+def _brk_set():
+    """The hypothesis: shorts lose into breakout structure, win without it."""
+    return [_brk_trade("short", -20, -20, True),
+            _brk_trade("short", -18, -18, True),
+            _brk_trade("short", -22, -22, True),
+            _brk_trade("short", 15, 15, False, ext=False, widening=False, run=1),
+            _brk_trade("short", 18, 18, False, ext=False, widening=False, run=1),
+            _brk_trade("short", 12, 12, False, ext=False, widening=False, run=0)]
+
+
+def test_breakout_split_separates_the_two_cases():
+    r = analyse(_brk_set())
+    by = {b["label"]: b for b in r["by_breakout"] if b["n"]}
+    assert by["breakout structure"]["win_rate"] == 0.0
+    assert by["no breakout structure"]["win_rate"] == 100.0
+
+
+def test_components_show_which_part_carries_the_signal():
+    """
+    gap_wide is true for every trade here, so it discriminates nothing — which
+    is exactly what the component table is for.
+    """
+    r = analyse(_brk_set())
+    by = {b["label"]: b for b in r["by_breakout_parts"] if b["n"]}
+    assert by["gap wide"]["n"] == 6
+    assert by["gap widening"]["n"] == 3
+    assert by["gap widening"]["win_rate"] == 0.0
+
+
+def test_consecutive_threshold_is_three():
+    r = analyse(_brk_set())
+    by = {b["label"]: b for b in r["by_breakout_parts"] if b["n"]}
+    assert by["3+ candles in a row"]["n"] == 3
+
+
+def test_trades_without_breakout_data_are_skipped():
+    t = [{"symbol": "X", "side": "short", "final_roi": 5.0, "peak_roi": 8.0,
+          "realised_pnl_usdt": 5.0, "pnl_verified": True, "entry_context": {}}]
+    r = analyse(t)
+    assert all(not b["n"] for b in r["by_breakout"])

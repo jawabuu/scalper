@@ -465,6 +465,29 @@ def analyse(trades: list[dict]) -> dict:
             "confidence": confidence_for(len(timed)),
         })
 
+    # ── Breakout structure: is fading an expanding move the wrong side? ──
+    # A wide EMA gap alone fits a blow-off top as well as a breakout. The
+    # question is whether a WIDENING gap at a new extreme, with consecutive
+    # candles carrying it, means the move is still expanding — in which case
+    # the fade is on the wrong side of it.
+    def _flag(t, key):
+        return bool((t.get("entry_context") or {}).get(key))
+
+    by_breakout = [
+        _time_split(trades, "breakout structure", lambda t: _flag(t, "breakout")),
+        _time_split(trades, "no breakout structure",
+                    lambda t: (t.get("entry_context") or {}).get("breakout") is False),
+    ]
+    # Components separately, so it is visible WHICH part carries the signal
+    # rather than only the combination.
+    by_breakout_parts = [
+        _time_split(trades, "at a new extreme", lambda t: _flag(t, "brk_at_extreme")),
+        _time_split(trades, "gap wide", lambda t: _flag(t, "brk_gap_wide")),
+        _time_split(trades, "gap widening", lambda t: _flag(t, "brk_gap_widening")),
+        _time_split(trades, "3+ candles in a row",
+                    lambda t: ((t.get("entry_context") or {}).get("brk_consecutive") or 0) >= 3),
+    ]
+
     reentries = [t for t in trades if (t.get("entry_context") or {}).get("was_reentry")]
     fresh = [t for t in trades if not (t.get("entry_context") or {}).get("was_reentry")]
 
@@ -546,6 +569,8 @@ def analyse(trades: list[dict]) -> dict:
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
         "by_exit_reason": exits,
+        "by_breakout": by_breakout,
+        "by_breakout_parts": by_breakout_parts,
         "fail_fast_impact": fail_fast,
         "by_breadth": by_breadth,
         "by_htf_alignment": by_htf,

@@ -2843,6 +2843,15 @@ async function refreshAnalysis() {
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
       statTable('By exit reason', a.by_exit_reason || []),
+      timeTable('By breakout structure', a.by_breakout || [],
+                'A wide EMA gap alone fits a blow-off top as well as a '
+                + 'breakout. This asks whether a WIDENING gap at a new extreme '
+                + 'with consecutive candles means the move is still expanding '
+                + '— in which case the fade is on the wrong side of it.'),
+      timeTable('Breakout components separately', a.by_breakout_parts || [],
+                'Which part carries the signal, rather than only the '
+                + 'combination. Rows overlap by design — a trade can appear in '
+                + 'several.'),
       timeTable('By market breadth at entry', a.by_breadth || [],
                 'Breadth is a DIRECT measure of regime: the share of the '
                 + 'scanned universe up on 24h. If fading highs only works '
