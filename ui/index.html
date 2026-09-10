@@ -495,6 +495,26 @@
   body[data-view="futures"] #mode-badge,
   body[data-view="futures"] #strategy-badge { display: none !important; }
 
+  .ft-scroll {
+    /* Rows measure ~33px; 30 rows plus the sticky header needs ~1060px.
+       Verified by rendering rather than estimated. */
+    max-height: 1060px;
+    overflow-y: auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--border);
+  }
+  .ft-scroll table { margin: 0; }
+  .ft-scroll thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg2);
+    z-index: 2;
+  }
+  @media (max-width: 768px) {
+    .ft-scroll { max-height: 520px; }
+  }
+
   .version-badge {
     /* Was var(--border2) — a BORDER colour, hence barely legible. The running
        version is the first thing needed when checking whether a fix is
@@ -976,8 +996,17 @@
       </div>
       <div id="guard-body">
         <div id="guard-wrap"><div class="empty">No futures positions being guarded</div></div>
-        <div class="panel-label" style="margin-top:18px">Futures trade history</div>
-        <div id="guard-history"><div class="empty">No closed futures trades yet</div></div>
+        <div class="controls-head" style="margin-top:18px">
+          <div class="panel-label" style="margin-bottom:0">Futures trade history
+            <span id="ft-count" style="color:var(--muted);font-weight:normal;font-size:10px"></span>
+          </div>
+          <button class="btn" id="ft-csv" onclick="downloadTradesCsv()"
+                  title="every recorded field, not just the columns shown">CSV</button>
+        </div>
+        <!-- Scrolls rather than growing the page: a full run is hundreds of
+             rows, and the analysis below it becomes unreachable otherwise.
+             Sized to show ~30 rows with the header pinned. -->
+        <div id="guard-history" class="ft-scroll"><div class="empty">No closed futures trades yet</div></div>
         <div class="scan-note" style="margin-top:10px" id="guard-actions"></div>
       </div>
     </div>
@@ -2397,6 +2426,48 @@ async function doFuturesClose(sym) {
   await refreshFuturesHistory();
 }
 
+// Export every recorded field, not only the columns on screen — the useful
+// ones for analysis (trough, fees, pnl_source, timing, breakout components)
+// are not all displayed, and a spreadsheet is where slicing actually happens.
+function downloadTradesCsv() {
+  const trades = (_lastFuturesHist && _lastFuturesHist.trades) || [];
+  if (!trades.length) { alert('No closed trades to export yet.'); return; }
+
+  // Union of keys across all rows: later trades carry fields older ones lack.
+  const keys = [];
+  trades.forEach(t => Object.keys(t).forEach(k => {
+    if (!keys.includes(k) && k !== 'entry_context') keys.push(k);
+  }));
+  const ctxKeys = [];
+  trades.forEach(t => Object.keys(t.entry_context || {}).forEach(k => {
+    if (!ctxKeys.includes(k)) ctxKeys.push(k);
+  }));
+
+  const esc = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const header = keys.concat(ctxKeys.map(k => 'ctx_' + k));
+  const lines = [header.join(',')];
+  trades.forEach(t => {
+    const row = keys.map(k => esc(t[k]))
+      .concat(ctxKeys.map(k => esc((t.entry_context || {})[k])));
+    lines.push(row.join(','));
+  });
+
+  const blob = new Blob([lines.join('\n')], {type: 'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  a.href = url;
+  a.download = `futures-trades-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 async function refreshFuturesHistory() {
   try {
     const d = await api('/api/futures/trades');
@@ -2407,6 +2478,7 @@ async function refreshFuturesHistory() {
       el.innerHTML = '<div class="empty">No closed futures trades yet</div>';
       return;
     }
+    setEl('ft-count', `· ${d.trades.length} trade${d.trades.length === 1 ? '' : 's'}`);
     const rows = d.trades.map(t => {
       const pnl = t.realised_pnl_usdt;
       const pnlCell = (pnl === null || pnl === undefined)

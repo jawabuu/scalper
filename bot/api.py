@@ -259,6 +259,40 @@ def create_app(engine) -> FastAPI:
             log.exception("futures trades failed")
             return {"enabled": True, "trades": [], "error": f"{type(e).__name__}: {e}"}
 
+    @app.get("/api/futures/trades.csv")
+    def futures_trades_csv(user: dict = Depends(_require_auth)):
+        """
+        The full closed-trade record as CSV, including every recorded field.
+
+        The dashboard exports the same thing client-side; this exists so a run
+        can be pulled with curl without opening a browser.
+        """
+        from fastapi.responses import PlainTextResponse
+        if _guardian is None:
+            return PlainTextResponse("", media_type="text/csv")
+        trades = _guardian.closed_trades()
+        if not trades:
+            return PlainTextResponse("", media_type="text/csv")
+
+        keys, ctx_keys = [], []
+        for t in trades:
+            for k in t:
+                if k != "entry_context" and k not in keys:
+                    keys.append(k)
+            for k in (t.get("entry_context") or {}):
+                if k not in ctx_keys:
+                    ctx_keys.append(k)
+
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(keys + [f"ctx_{k}" for k in ctx_keys])
+        for t in trades:
+            ctx = t.get("entry_context") or {}
+            w.writerow([t.get(k) for k in keys] + [ctx.get(k) for k in ctx_keys])
+        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
     @app.get("/api/auto-trade")
     def auto_trade_status(user: dict = Depends(_require_auth)):
         if _auto is None:
