@@ -138,6 +138,13 @@ class GuardConfig:
     # round-trip fee — at 20x that is roughly 2% ROI, so a small positive
     # value is closer to true breakeven.
     breakeven_stop_roi: float = 0.0
+    # Fail-fast: close a position that has not gone green within this many
+    # seconds AND is worse than the loss floor. Two conditions, because a
+    # trade sitting at -1% is slow, not failing — cutting it pays a fee to
+    # avoid nothing. 0 disables.
+    fail_fast_s: float = 0.0
+    fail_fast_max_peak_roi: float = 0.0
+    fail_fast_loss_roi: float = 5.0
 
 
     # Only move a resting stop if the new level differs by at least this much

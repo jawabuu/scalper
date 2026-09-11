@@ -324,6 +324,15 @@ class BotConfig:
     # restricted. Empty trades around the clock.
     auto_trading_window: str = field(default_factory=lambda: _env(
         "AUTO_TRADING_WINDOW", "").strip())
+    # Minimum ATR% to enter. 0 disables.
+    auto_min_atr_pct: float = field(default_factory=lambda: _env_float(
+        "AUTO_MIN_ATR_PCT", 0.0))
+    guard_fail_fast_s: float = field(default_factory=lambda: _env_float(
+        "GUARD_FAIL_FAST_S", 0.0))
+    guard_fail_fast_max_peak_roi: float = field(default_factory=lambda: _env_float(
+        "GUARD_FAIL_FAST_MAX_PEAK_ROI", 0.0))
+    guard_fail_fast_loss_roi: float = field(default_factory=lambda: _env_float(
+        "GUARD_FAIL_FAST_LOSS_ROI", 5.0))
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(

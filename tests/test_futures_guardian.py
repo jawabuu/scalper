@@ -2732,3 +2732,124 @@ def test_window_falls_back_when_no_placement_stamp():
     for _ in range(g.MISSING_CONFIRMATIONS):
         g.run_cycle()
     assert g.closed_trades()[0]["fees_usdt"] == pytest.approx(1.0)
+
+
+# ── D5: sizing must use REALISED equity ──────────────────────────────────────
+
+def test_wallet_balance_is_preferred_over_margin_balance():
+    """
+    ccxt maps USDT.total to marginBalance = wallet + unrealised PnL. Preferring
+    it made the risk budget swing with open-position marks: one jump of +74% in
+    34 seconds scaled every subsequent entry 1.74x.
+    """
+    from bot.futures_guardian import resolve_usdt_balance
+    val, src = resolve_usdt_balance({
+        "USDT": {"total": 7221.24, "free": 3000.0},
+        "info": {"totalWalletBalance": "4148.61",
+                 "assets": [{"asset": "USDT", "walletBalance": "4148.61"}]}})
+    assert val == pytest.approx(4148.61)
+    assert "totalWalletBalance" in src
+
+
+def test_a_balance_spike_is_not_used_for_sizing():
+    class BalEx(FakeExchange):
+        seq = [4148.61, 4148.61, 7221.24, 4150.0]
+        def __init__(self):
+            super().__init__(price=1.0)
+            self.i = 0
+        def fetch_balance(self):
+            v = self.seq[min(self.i, len(self.seq) - 1)]
+            self.i += 1
+            return {"info": {"totalWalletBalance": str(v)}}
+        def fetch_positions(self, symbols=None):
+            return []
+    g = _guardian(BalEx())
+    for _ in range(3):
+        g.run_cycle()
+    assert g._wallet_balance_cached == pytest.approx(4148.61), "spike was used"
+
+
+# ── D3: untracked positions ──────────────────────────────────────────────────
+
+def test_a_position_with_no_state_is_reported_and_adopted():
+    """One ran to +70% ROI untracked, unprotected, absent from the history."""
+    fake = FakeExchange(positions=[_raw_pos("short", entry=1.0)], price=1.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    assert "DOGE/USDT:USDT" in g._states
+    assert any(a.get("action") == "untracked_adopted" for a in g._actions)
+
+
+# ── D2: a position row is never discarded silently ───────────────────────────
+
+def test_missing_side_is_recovered_from_positionAmt():
+    """
+    On one-way mode the direction lives in the SIGN of positionAmt. Discarding
+    the row when ccxt fails to derive it leaves a real position unguarded.
+    """
+    class OddEx(FakeExchange):
+        def fetch_positions(self, symbols=None):
+            return [{"symbol": "PUFFER/USDT:USDT", "side": None,
+                     "contracts": 156526.0, "entryPrice": 0.31, "leverage": 20,
+                     "initialMargin": 153.94,
+                     "info": {"positionAmt": "-156526", "entryPrice": "0.31",
+                              "positionSide": "BOTH", "symbol": "PUFFERUSDT"}}]
+    pos = _guardian(OddEx()).fetch_positions()
+    assert len(pos) == 1 and pos[0].side == "short"
+
+
+# ── D6: destructive action requires sight ────────────────────────────────────
+
+def test_repeated_failures_make_the_guardian_blind():
+    g = _guardian(FakeExchange())
+    assert not g.is_blind
+    for _ in range(g.BLIND_AFTER_FAILURES):
+        g.note_api_failure("fetch_positions")
+    assert g.is_blind
+    g.note_api_success()
+    assert not g.is_blind
+
+
+# ── Fail-fast needs BOTH conditions ──────────────────────────────────────────
+
+def _ff_guardian(age, roi, was_green=False):
+    from bot.futures_guard import GuardConfig, price_for_roi
+    import time as _t
+    cfg = GuardConfig(fail_fast_s=180, fail_fast_max_peak_roi=0.0,
+                      fail_fast_loss_roi=5.0, atr_stop_mult=0.0,
+                      initial_stop_roi=25)
+    fake = FakeExchange(positions=[_raw_pos("long", entry=1.0)], price=1.0)
+    g = _guardian(fake, cfg=cfg)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    if was_green:
+        fake._price = price_for_roi(pos, 4.0)
+        g.run_cycle()
+    g._pos_meta["DOGE/USDT:USDT"]["opened_seen_at"] = _t.time() - age
+    return g, pos, g._states["DOGE/USDT:USDT"]
+
+
+def test_fail_fast_fires_when_both_conditions_hold():
+    g, pos, st = _ff_guardian(age=300, roi=-8)
+    assert g._should_fail_fast(pos, st, -8) is True
+
+
+def test_fail_fast_waits_for_the_timeout():
+    g, pos, st = _ff_guardian(age=60, roi=-8)
+    assert g._should_fail_fast(pos, st, -8) is False
+
+
+def test_fail_fast_ignores_a_merely_slow_trade():
+    """A trade at -2% is slow, not failing — cutting it pays a fee for nothing."""
+    g, pos, st = _ff_guardian(age=300, roi=-2)
+    assert g._should_fail_fast(pos, st, -2) is False
+
+
+def test_fail_fast_leaves_a_trade_that_went_green():
+    g, pos, st = _ff_guardian(age=300, roi=-8, was_green=True)
+    assert g._should_fail_fast(pos, st, -8) is False
+
+
+def test_fail_fast_off_by_default():
+    from bot.futures_guard import GuardConfig
+    assert GuardConfig().fail_fast_s == 0

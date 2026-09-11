@@ -155,6 +155,23 @@ def validate_request(*, side: str, margin_pct: float, callback_pct: float,
     return errs
 
 
+def _safe_err(err) -> str:
+    """
+    An exchange error reduced to its code and message.
+
+    The raw ccxt string is the full signed request URL, which buries the
+    useful part and writes the API SIGNATURE into the log.
+    """
+    code = _binance_code(err)
+    msg = _binance_msg(err)
+    if code or msg:
+        return f"{code or type(err).__name__}: {msg or ''}".strip()
+    text = str(err)
+    if "http" in text:
+        text = text.split("http")[0].strip() or type(err).__name__
+    return f"{type(err).__name__}: {text}"[:200]
+
+
 def _binance_code(err) -> str | None:
     """Pull Binance's numeric error code out of a ccxt exception."""
     import re
@@ -414,13 +431,18 @@ class EntryService:
         default: an operator who places entries by hand would have them
         cancelled, which is exactly what the tracked reaper avoids.
         """
+        if getattr(self.guardian, "is_blind", False):
+            log.warning("skipping entry reaping — cannot currently read the "
+                        "exchange")
+            return []
+
         cancelled = []
         now = time.time() * 1000
         for symbol in symbols:
             try:
                 orders = self.guardian.exchange.fetch_open_orders(symbol) or []
             except Exception as e:
-                log.warning(f"{symbol}: could not list orders to reap: {e}")
+                log.warning(f"{symbol}: could not list orders to reap: {_safe_err(e)}")
                 continue
             for o in orders:
                 info = o.get("info") or {}
@@ -452,6 +474,10 @@ class EntryService:
         """
         Cancel entry orders this bot placed that should no longer rest.
 
+        Refuses to run while the guardian cannot see the exchange. Reaping is
+        destructive and irreversible, and the original incident cancelled a
+        FILLED order two minutes after every endpoint had begun failing.
+
         Two cases:
           * older than ttl_s and still unfilled — it would open a position
             sized for a wallet and volatility that no longer apply, and it
@@ -460,6 +486,11 @@ class EntryService:
 
         Orders the bot did not place are never touched.
         """
+        if getattr(self.guardian, "is_blind", False):
+            log.warning("skipping stale-entry reaping — cannot currently read the "
+                        "exchange")
+            return []
+
         cancelled = []
         now = time.time()
         for symbol, rows in list(self._placed_orders.items()):
@@ -467,7 +498,7 @@ class EntryService:
                 resting = {str(o.get("id")) for o in
                            (self.guardian.exchange.fetch_open_orders(symbol) or [])}
             except Exception as e:
-                log.warning(f"{symbol}: could not list open orders to reap: {e}")
+                log.warning(f"{symbol}: could not list open orders to reap: {_safe_err(e)}")
                 continue
 
             for row in list(rows):
@@ -497,6 +528,24 @@ class EntryService:
                     pass
                 reason = ("position already open" if has_pos
                           else f"unfilled after {age/60:.0f}m")
+                # An entry order that is absent from both books may have been
+                # cancelled OR FILLED — the exchange reports -2011 either way.
+                # Resolve that BEFORE acting: a filled order means a live
+                # position, and cancelling it as "stale" erased the bot's only
+                # record of one that later ran to +70% ROI unprotected.
+                try:
+                    if self._position_exists(symbol):
+                        log.error(
+                            f"{symbol}: entry {oid} FILLED — a position is open. "
+                            f"NOT cancelling it as stale; the guardian will "
+                            f"adopt and protect it.")
+                        self.forget_order(symbol, oid)
+                        continue
+                except Exception:
+                    log.warning(f"{symbol}: cannot confirm whether entry {oid} "
+                                f"filled — leaving it alone this cycle.")
+                    continue
+
                 if self._cancel(oid, symbol):
                     log.warning(f"{symbol}: cancelled stale entry order {oid} "
                                 f"({reason})")
@@ -506,6 +555,18 @@ class EntryService:
                                 f"either book ({reason})")
                 self.forget_order(symbol, oid)
         return cancelled
+
+    def _position_exists(self, symbol: str) -> bool:
+        """Is there an open position on this symbol right now?"""
+        try:
+            for p in (self.guardian.fetch_positions() or []):
+                if getattr(p, "symbol", None) == symbol:
+                    return True
+        except Exception as e:
+            log.warning(f"{symbol}: could not check for a position: {e}")
+            # Unknown is NOT "no position" — say so, and let the caller hold off.
+            raise
+        return False
 
     def _cancel(self, order_id: str, symbol: str) -> bool:
         """
@@ -537,7 +598,7 @@ class EntryService:
         try:
             orders = self.guardian.exchange.fetch_open_orders(symbol)
         except Exception as e:
-            log.warning(f"{symbol}: could not read open orders: {e}")
+            log.warning(f"{symbol}: could not read open orders: {_safe_err(e)}")
             return []
         pending = []
         total = len(orders or [])

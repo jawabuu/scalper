@@ -84,6 +84,9 @@ if __name__ == "__main__":
             close_if_past_stop=cfg.guard_close_if_past_stop,
             breakeven_at_roi=cfg.guard_breakeven_at_roi,
             breakeven_stop_roi=cfg.guard_breakeven_stop_roi,
+        fail_fast_s=cfg.guard_fail_fast_s,
+        fail_fast_max_peak_roi=cfg.guard_fail_fast_max_peak_roi,
+        fail_fast_loss_roi=cfg.guard_fail_fast_loss_roi,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,
@@ -202,6 +205,7 @@ if __name__ == "__main__":
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     trading_window=cfg.auto_trading_window,
+                    min_atr_pct=cfg.auto_min_atr_pct,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
                     callback_atr_mult=cfg.auto_callback_atr_mult,

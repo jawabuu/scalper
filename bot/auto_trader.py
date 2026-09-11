@@ -62,6 +62,10 @@ class AutoTradeConfig:
     # means trade around the clock. Exits are NEVER restricted — a position
     # opened inside the window is managed normally until it closes.
     trading_window: str = ""
+    # Minimum ATR to enter at all. A coin that barely moves cannot clear its
+    # own round-trip fee: 68 entries below 0.3% ATR won 26.5% and lost 747
+    # USDT, while 0.7-1.5% won 82.4% and made 285.
+    min_atr_pct: float = 0.0
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -164,6 +168,13 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     if allowed in ("long", "short") and side != allowed:
         return AutoDecision(False, symbol, side,
                             reason=f"{side}s disabled ({allowed} only)")
+
+    if cfg.min_atr_pct:
+        a = atr_pct if atr_pct is not None else row.get("atr_pct")
+        if a is None or float(a) < cfg.min_atr_pct:
+            return AutoDecision(False, symbol, side,
+                                reason=f"ATR {a}% below the {cfg.min_atr_pct}% "
+                                       f"floor — too quiet to clear fees")
 
     rsi = row.get("rsi")
     if rsi is None:
@@ -516,6 +527,7 @@ class AutoTrader:
                 "directions": self.cfg.directions,
                 "daily_halt_enabled": self.cfg.daily_halt_enabled,
                 "trading_window": self.cfg.trading_window,
+                "min_atr_pct": self.cfg.min_atr_pct,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
                 "daily_loss_limit_pct": self.cfg.daily_loss_limit_pct,
@@ -551,6 +563,7 @@ class AutoTrader:
         "directions": (str, None, ("all", "long", "short")),
         "daily_halt_enabled": (bool, None, (True, False)),
         "trading_window": (str, None, None),
+        "min_atr_pct": (float, 0.0, 10.0),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
         "callback_atr_mult": (float, 0.0, 5.0),

@@ -43,6 +43,15 @@ from .futures_guard import (
 log = logging.getLogger("futures_guardian")
 
 
+def _safe_err(err) -> str:
+    """Exchange error as code + message, never the signed request URL."""
+    from bot.futures_entry import _safe_err as _f
+    try:
+        return _f(err)
+    except Exception:
+        return f"{type(err).__name__}"
+
+
 def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
     """
     Total USDT wallet balance from a ccxt futures balance payload.
@@ -54,24 +63,37 @@ def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
     """
     candidates: list[tuple[str, object]] = []
 
+    # ORDER MATTERS. Sizing must use REALISED equity.
+    #
+    # ccxt maps USDT.total to marginBalance = walletBalance + unrealised PnL,
+    # so preferring it made the risk budget swing with the mark price of every
+    # open position: winning trades inflated the budget and sized the NEXT
+    # position larger, precisely when exposure was already highest. One
+    # observed jump of +74% in 34 seconds scaled every subsequent entry 1.74x.
+    #
+    # totalWalletBalance excludes unrealised PnL and is the figure "0.5% of
+    # the wallet" is supposed to mean.
+    info = (bal or {}).get("info") or {}
+    if isinstance(info, dict):
+        candidates.append(("info.totalWalletBalance", info.get("totalWalletBalance")))
+        assets = info.get("assets")
+        if isinstance(assets, list):
+            for a in assets:
+                if (a or {}).get("asset") == "USDT":
+                    candidates.append(("assets[USDT].walletBalance", a.get("walletBalance")))
+
     usdt = (bal or {}).get("USDT") or {}
     if isinstance(usdt, dict):
-        candidates.append(("USDT.total", usdt.get("total")))
+        # Fallbacks only: these include unrealised PnL.
+        candidates.append(("USDT.total (margin balance)", usdt.get("total")))
         candidates.append(("USDT.free", usdt.get("free")))
 
     total_map = (bal or {}).get("total") or {}
     if isinstance(total_map, dict):
         candidates.append(("total.USDT", total_map.get("USDT")))
 
-    info = (bal or {}).get("info") or {}
     if isinstance(info, dict):
-        candidates.append(("info.totalWalletBalance", info.get("totalWalletBalance")))
         candidates.append(("info.availableBalance", info.get("availableBalance")))
-        assets = info.get("assets")
-        if isinstance(assets, list):
-            for a in assets:
-                if (a or {}).get("asset") == "USDT":
-                    candidates.append(("assets[USDT].walletBalance", a.get("walletBalance")))
 
     for source, raw in candidates:
         try:
@@ -231,6 +253,15 @@ class FuturesGuardian:
         self.max_closed_trades: int = getattr(
             self, "max_closed_trades", self.DEFAULT_MAX_CLOSED_TRADES)
         self._empty_listings: int = 0
+        self._balance_outliers: int = 0
+        self._untracked_reported: dict = {}
+        self._dropped_reported: dict = {}
+        # Consecutive API failures across ALL endpoints. Each call used to
+        # handle its own failure locally, so the bot had no concept of "I
+        # cannot currently see the exchange" — and cancelled a filled order
+        # two minutes after failing to read the order book at all.
+        self._api_failures: int = 0
+        self._blind_since: float | None = None
         self._pending_cancels: dict[str, list] = {}
         self._cancel_attempts: dict[str, int] = {}
         self._last_trade_fees: float | None = None
@@ -269,20 +300,101 @@ class FuturesGuardian:
 
     # ── reading ─────────────────────────────────────────────────────────────
 
+    def note_api_failure(self, where: str, err=None):
+        """Record a failed exchange read and enter read-only if they pile up."""
+        self._api_failures = getattr(self, "_api_failures", 0) + 1
+        if self._api_failures == self.BLIND_AFTER_FAILURES:
+            self._blind_since = time.time()
+            log.error(
+                f"BLIND: {self._api_failures} consecutive exchange failures "
+                f"(latest at {where}). Suspending entries, cancellations and "
+                f"reaping until reads succeed. Positions are still monitored.")
+
+    def note_api_success(self):
+        if getattr(self, "_api_failures", 0):
+            if getattr(self, "_blind_since", None):
+                log.warning(
+                    f"Exchange reads recovered after "
+                    f"{time.time() - self._blind_since:.0f}s blind — resuming.")
+            self._api_failures = 0
+            self._blind_since = None
+
+    @property
+    def is_blind(self) -> bool:
+        """True when the bot cannot currently see the exchange."""
+        return getattr(self, "_api_failures", 0) >= self.BLIND_AFTER_FAILURES
+
+    def _log_dropped_position(self, raw, why: str):
+        """Report a position row discarded during normalisation."""
+        try:
+            info = (raw or {}).get("info") or {}
+            sym = (raw or {}).get("symbol") or info.get("symbol") or "?"
+            key = f"{sym}:{why}"
+            if self._dropped_reported.get(key):
+                return
+            self._dropped_reported[key] = True
+            recovered = "RECOVERED" in why
+            log.warning(
+                f"POSITION ROW {'REPAIRED' if recovered else 'DISCARDED'} "
+                f"{sym}: {why}. "
+                f"positionAmt={info.get('positionAmt')!r} "
+                f"entryPrice={info.get('entryPrice')!r} "
+                f"positionSide={info.get('positionSide')!r} "
+                f"ccxt side={(raw or {}).get('side')!r} "
+                f"contracts={(raw or {}).get('contracts')!r}. "
+                + ("" if recovered
+                   else "If a position IS open on this symbol it is UNGUARDED."))
+        except Exception as e:
+            # Do NOT swallow: a silent reporter is how the original defect
+            # stayed invisible.
+            log.warning(f"could not report a discarded position row: {e}")
+
     def fetch_positions(self) -> list[FuturesPosition]:
         """Open positions with non-zero size, normalised to FuturesPosition."""
-        raw = self.exchange.fetch_positions()
+        try:
+            raw = self.exchange.fetch_positions()
+            self.note_api_success()
+        except Exception as e:
+            self.note_api_failure("fetch_positions", e)
+            raise
         out = []
         for p in raw:
             try:
                 contracts = float(p.get("contracts") or 0)
                 if contracts == 0:
+                    # Never drop a position silently: an unguarded position is
+                    # the worst failure the system has, and this path used to
+                    # produce no output at all.
+                    self._log_dropped_position(p, "zero contracts")
                     continue
                 side = (p.get("side") or "").lower()
                 if side not in ("long", "short"):
-                    continue
+                    # RECOVER rather than discard. On one-way mode Binance
+                    # reports positionSide BOTH and the direction lives in the
+                    # SIGN of positionAmt; if ccxt fails to derive it, throwing
+                    # the row away leaves a real position unguarded.
+                    amt = ((p.get("info") or {}).get("positionAmt")
+                           or p.get("contracts"))
+                    try:
+                        amt = float(amt)
+                    except (TypeError, ValueError):
+                        amt = 0.0
+                    if amt > 0:
+                        side = "long"
+                    elif amt < 0:
+                        side = "short"
+                    if side in ("long", "short"):
+                        self._log_dropped_position(
+                            p, f"side missing from ccxt — RECOVERED as {side}")
+                    else:
+                        self._log_dropped_position(p, "unrecognised side")
+                        continue
                 entry = float(p.get("entryPrice") or 0)
                 if entry <= 0:
+                    # Never drop a position silently: an unguarded position is
+                    # the worst failure the system has, and this path used to
+                    # produce no output at all.
+                    self._log_dropped_position(p, "no entry price")
                     continue
                 info = p.get("info") or {}
                 # The `leverage` field has been observed to come back as 1 on
@@ -367,6 +479,12 @@ class FuturesGuardian:
     # How many closed trades to keep. Analysis needs the whole run, not a
     # window; at ~100 trades a day this holds well over a month.
     DEFAULT_MAX_CLOSED_TRADES = 5000
+    # Guard against a single bad balance reading scaling position size.
+    BALANCE_JUMP_TOLERANCE = 0.25
+    BALANCE_JUMP_CONFIRMATIONS = 3
+    # Consecutive failures before the bot treats itself as unable to see the
+    # exchange and stops taking destructive action.
+    BLIND_AFTER_FAILURES = 3
     # Seconds of slack before the order-placed stamp when querying the income
     # ledger, so the entry fill's commission is inside the window.
     INCOME_LOOKBACK_PAD_S = 120.0
@@ -489,6 +607,27 @@ class FuturesGuardian:
 
     # Ages at which the position's ROI is sampled, in seconds.
     ROI_CHECKPOINTS_S = (60, 180, 300)
+
+    def _should_fail_fast(self, pos, state, current_roi: float) -> bool:
+        """
+        Cut a trade that never went green and is now losing.
+
+        BOTH conditions are required. Time alone would cut trades that are
+        merely slow; the loss floor targets "going wrong" rather than "not
+        going right yet".
+        """
+        cfg = self.cfg
+        if not getattr(cfg, "fail_fast_s", 0):
+            return False
+        if state.peak_roi > getattr(cfg, "fail_fast_max_peak_roi", 0.0):
+            return False                      # it has been green — leave it
+        floor = getattr(cfg, "fail_fast_loss_roi", 5.0)
+        if current_roi > -abs(floor):
+            return False                      # losing, but not badly
+        opened = (self._pos_meta.get(pos.symbol, {}) or {}).get("opened_seen_at")
+        if not opened:
+            return False
+        return (time.time() - float(opened)) >= cfg.fail_fast_s
 
     def _note_progress(self, pos, state, current_roi: float):
         """Record when the trade first went green, and its ROI at fixed ages."""
@@ -988,6 +1127,19 @@ class FuturesGuardian:
         # acts on these yet, but without them any cutoff would be chosen blind.
         self._note_progress(pos, state, current_roi)
 
+        if self._should_fail_fast(pos, state, current_roi):
+            log.warning(
+                f"FAIL-FAST {pos.symbol}: no positive peak after "
+                f"{self.cfg.fail_fast_s:.0f}s and ROI {current_roi:+.1f}% — "
+                f"closing at market rather than waiting for the stop.")
+            self._record(pos.symbol, "fail_fast",
+                         f"peak {state.peak_roi:+.1f}%, ROI {current_roi:+.1f}%")
+            try:
+                self.close_position(pos.symbol)
+            except Exception as e:
+                log.warning(f"{pos.symbol}: fail-fast close failed: {e}")
+            return
+
         _stop_roi_used = self._cap_stop_to_budget(pos, self.effective_stop_roi(pos))
         stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
@@ -1307,6 +1459,30 @@ class FuturesGuardian:
                 log.warning("Could not resolve a positive USDT futures balance")
             elif abs(val - self._wallet_balance_cached) > 0.01:
                 log.info(f"Futures wallet balance {val:.2f} USDT (from {source})")
+            # A single reading must not be able to scale position size. A jump
+            # beyond this fraction between polls is treated as suspect: the
+            # last good value is kept and the reading is logged rather than
+            # acted on. Real deposits and withdrawals settle after
+            # BALANCE_JUMP_CONFIRMATIONS consecutive readings agree.
+            prev = self._wallet_balance_cached
+            if prev and val > 0:
+                ratio = val / prev
+                if ratio > (1 + self.BALANCE_JUMP_TOLERANCE) or ratio < (1 - self.BALANCE_JUMP_TOLERANCE):
+                    self._balance_outliers += 1
+                    if self._balance_outliers < self.BALANCE_JUMP_CONFIRMATIONS:
+                        log.warning(
+                            f"Balance reading {val:.2f} is {(ratio - 1) * 100:+.1f}% "
+                            f"from {prev:.2f} ({source}) — IGNORED for sizing "
+                            f"({self._balance_outliers}/{self.BALANCE_JUMP_CONFIRMATIONS}). "
+                            f"A bad reading would scale every new position.")
+                        val = prev
+                    else:
+                        log.warning(
+                            f"Balance {val:.2f} confirmed after "
+                            f"{self._balance_outliers} readings — accepting.")
+                        self._balance_outliers = 0
+                else:
+                    self._balance_outliers = 0
             self._wallet_balance_cached = val
             if self.wallet_start is None and val > 0:
                 self.wallet_start = val
@@ -1315,6 +1491,31 @@ class FuturesGuardian:
             log.debug(f"balance fetch failed: {e}")
 
         live_symbols = {p.symbol for p in positions}
+
+        # BACKSTOP: is there a position on the exchange we are not guarding?
+        #
+        # Every other consistency check is internal — they compare the bot's
+        # view against itself. This is the only one that asks the exchange.
+        # An unguarded position is the worst failure the system has (one ran
+        # to +70% ROI untracked, unprotected, and absent from the history),
+        # and it can arrive by several routes: a filled order mistaken for a
+        # cancelled one, a row dropped in normalisation, or a restart that
+        # lost state. This catches all of them regardless of cause.
+        with self._lock:
+            tracked = set(self._states)
+        untracked = live_symbols - tracked
+        for sym in sorted(untracked):
+            if self._untracked_reported.get(sym):
+                continue
+            self._untracked_reported[sym] = True
+            log.error(
+                f"UNTRACKED POSITION {sym} is open on the exchange but the "
+                f"guardian has no state for it — it is unprotected. Adopting "
+                f"it now and placing a stop.")
+            self._record(sym, "untracked_adopted", "found open but not guarded")
+        for sym in list(self._untracked_reported):
+            if sym not in live_symbols:
+                self._untracked_reported.pop(sym, None)
         with self._lock:
             tracked = len(self._states)
         if tracked and not positions:
@@ -2132,7 +2333,7 @@ class FuturesGuardian:
         try:
             live = {p.symbol for p in self.fetch_positions()}
         except Exception as e:
-            log.warning(f"orphan-stop sweep could not list positions: {e}")
+            log.warning(f"orphan-stop sweep could not list positions: {_safe_err(e)}")
             return []
 
         # Collect from BOTH paths and de-duplicate by order id. The

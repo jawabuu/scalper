@@ -858,3 +858,43 @@ def test_window_is_live_editable():
     a = _trader()
     applied, errors = a.update_rules({"trading_window": "05:00-11:00"})
     assert not errors and a.cfg.trading_window == "05:00-11:00"
+
+
+# ── ATR floor ────────────────────────────────────────────────────────────────
+
+def _atr_cfg(floor):
+    return AutoTradeConfig(min_atr_pct=floor, long_rsi_min=45, long_rsi_max=52,
+                           short_rsi_min=75, max_dist_to_extreme_pct=3.0,
+                           required_strength_sweeps=2)
+
+
+def _atr_row(atr):
+    return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": 48,
+            "atr_pct": atr, "pct_above_24h_low": 1.0,
+            "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
+
+
+def test_quiet_coins_are_refused():
+    """
+    68 entries below 0.3% ATR won 26.5% and lost $747 — a coin that barely
+    moves cannot clear its own round-trip fee.
+    """
+    cfg = _atr_cfg(0.5)
+    d = evaluate_candidate(_atr_row(0.29), 2, cfg, atr_pct=0.29)
+    assert not d.enter and "below the 0.5% floor" in d.reason
+
+
+def test_volatile_enough_is_allowed():
+    cfg = _atr_cfg(0.5)
+    assert evaluate_candidate(_atr_row(0.8), 2, cfg, atr_pct=0.8).enter
+
+
+def test_floor_of_zero_disables_it():
+    cfg = _atr_cfg(0.0)
+    assert evaluate_candidate(_atr_row(0.1), 2, cfg, atr_pct=0.1).enter
+
+
+def test_atr_floor_is_live_editable():
+    a = _trader()
+    applied, errors = a.update_rules({"min_atr_pct": 0.5})
+    assert not errors and a.cfg.min_atr_pct == 0.5
