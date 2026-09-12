@@ -41,6 +41,16 @@ class AutoTradeConfig:
     enabled: bool = False
 
     # ── Entry rules ─────────────────────────────────────────────────────
+    # Floor the entry callback on CURRENT velocity rather than ATR(14) when
+    # velocity is the larger of the two. Off by default: it changes the price
+    # at which entries trigger.
+    callback_use_velocity: bool = False
+    # Refuse candidates the scanner flagged as an EXPANDING move rather than an
+    # exhausted one (price at the 24h extreme, consecutive candles carrying it,
+    # EMA gap wide AND widening). scanner.breakout_structure() has computed this
+    # on every candidate all along and nothing acted on it. OFF by default so it
+    # can be A/B'd against the recorded verdict rather than assumed.
+    veto_breakout: bool = False
     max_dist_to_extreme_pct: float = 3.0   # within 3% of the 24h low/high
     required_strength_sweeps: int = 2      # strengthened on N consecutive scans
     long_rsi_min: float = 48.0
@@ -120,7 +130,8 @@ def distance_to_extreme(candidate_row: dict, side: str) -> float | None:
 
 
 def callback_for(distance_pct: float, atr_pct: float | None,
-                 cfg: AutoTradeConfig) -> tuple[float, list[str], str]:
+                 cfg: AutoTradeConfig,
+                 recent_tr_pct: float | None = None) -> tuple[float, list[str], str]:
     """
     Trailing callback = half the distance to the extreme, bounded.
 
@@ -131,14 +142,34 @@ def callback_for(distance_pct: float, atr_pct: float | None,
     source = "ratio"
     cb = distance_pct * cfg.callback_ratio
 
-    if atr_pct and cfg.callback_atr_mult:
-        floor = atr_pct * cfg.callback_atr_mult
+    # The floor is meant to keep the callback outside noise. ATR(14) is the
+    # wrong yardstick for that on an accelerating move: STORJ was logged at
+    # atr_pct 0.512 while its last candles were covering ~2.7%, so the floor
+    # came out at 0.38% and the entry triggered on a wiggle, then the move
+    # resumed 3.3% against it within seconds. Taking the larger of the two
+    # keeps the floor honest when velocity is rising and changes nothing when
+    # it is not — over a normal tape the two measures agree.
+    vol_pct = atr_pct
+    if cfg.callback_use_velocity and recent_tr_pct and atr_pct:
+        if recent_tr_pct > atr_pct:
+            vol_pct = recent_tr_pct
+            notes.append(
+                f"velocity {recent_tr_pct:.2f}% exceeds ATR {atr_pct:.2f}% — "
+                f"floor taken from recent range")
+    elif cfg.callback_use_velocity and recent_tr_pct and not atr_pct:
+        vol_pct = recent_tr_pct
+
+    if vol_pct and cfg.callback_atr_mult:
+        floor = vol_pct * cfg.callback_atr_mult
         if cb < floor:
             notes.append(
-                f"callback {cb:.2f}% was inside {cfg.callback_atr_mult:g}x ATR "
-                f"({atr_pct:.2f}%) — raised to {floor:.2f}%")
+                f"callback {cb:.2f}% was inside {cfg.callback_atr_mult:g}x "
+                f"{'recent range' if vol_pct != atr_pct else 'ATR'} "
+                f"({vol_pct:.2f}%) — raised to {floor:.2f}%")
             cb = floor
-            source = "atr_floor"
+            source = ("velocity_floor"
+                      if cfg.callback_use_velocity and recent_tr_pct
+                      and atr_pct and recent_tr_pct > atr_pct else "atr_floor")
 
     if cb < cfg.callback_min_pct:
         notes.append(f"callback raised to the {cfg.callback_min_pct}% exchange minimum")
@@ -194,6 +225,22 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                             reason=f"RSI {rsi} above the long ceiling of "
                                    f"{cfg.long_rsi_max}")
 
+    # A wide EMA gap fits a blow-off top and a breakout equally well; what
+    # separates them is whether the move is still expanding. Note this veto is
+    # in tension with max_dist_to_extreme_pct, which SELECTS for price at the
+    # extreme — so the distance filter recruits exactly these candidates and
+    # callback_for() then gives them the loosest trigger, because the callback
+    # is proportional to distance from the extreme and collapses to its ATR
+    # floor at zero distance.
+    if cfg.veto_breakout:
+        brk = row.get("breakout") or {}
+        if brk.get("breakout"):
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"breakout structure: at the 24h extreme, "
+                        f"{brk.get('consecutive', 0)} consecutive candles, EMA "
+                        f"gap wide and widening — still expanding, not exhausted"))
+
     if streak < cfg.required_strength_sweeps:
         return AutoDecision(False, symbol, side,
                             reason=f"strengthened on {streak} scan(s), "
@@ -209,7 +256,8 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                             reason=f"{dist:.2f}% from the {extreme}, "
                                    f"limit {cfg.max_dist_to_extreme_pct}%")
 
-    cb, notes, cb_source = callback_for(dist, atr_pct, cfg)
+    cb, notes, cb_source = callback_for(dist, atr_pct, cfg,
+                                       recent_tr_pct=row.get("recent_tr_pct"))
     extreme = "24h low" if side == "long" else "24h high"
     return AutoDecision(
         True, symbol, side, callback_pct=cb,
@@ -520,6 +568,9 @@ class AutoTrader:
             "last_run_ago_s": (_time.time() - self._last_run) if self._last_run else None,
             "recent": list(reversed(self._log[-15:])),
             "config": {
+                "callback_min_pct": self.cfg.callback_min_pct,
+                "callback_use_velocity": self.cfg.callback_use_velocity,
+                "veto_breakout": self.cfg.veto_breakout,
                 "max_dist_to_extreme_pct": self.cfg.max_dist_to_extreme_pct,
                 "required_strength_sweeps": self.cfg.required_strength_sweeps,
                 "long_rsi_min": self.cfg.long_rsi_min,
@@ -554,6 +605,11 @@ class AutoTrader:
     # dashboard — right after a halt fires — is exactly when you should not.
     # Those stay env-only so changing them is a conscious redeploy.
     TUNABLE = {
+        # Entry quality, not a safety limit — tunable so the A/B can be run
+        # from the dashboard without a redeploy.
+        "callback_min_pct": (float, 0.1, 5.0),
+        "callback_use_velocity": (bool, None, (True, False)),
+        "veto_breakout": (bool, None, (True, False)),
         "max_dist_to_extreme_pct": (float, 0.1, 50.0),
         "required_strength_sweeps": (int, 1, 10),
         "long_rsi_min": (float, 0.0, 100.0),
@@ -799,6 +855,7 @@ class AutoTrader:
                     self.guardian.note_entry_context(symbol, {
                         "rsi": row.get("rsi"),
                         "atr_pct": row.get("atr_pct"),
+                        "recent_tr_pct": row.get("recent_tr_pct"),
                         "dist_to_extreme_pct": abs(
                             row.get("pct_above_24h_low") if side == "long"
                             else row.get("pct_below_24h_high")),

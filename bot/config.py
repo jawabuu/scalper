@@ -308,6 +308,23 @@ class BotConfig:
     auto_trade_enabled: bool = field(default_factory=lambda: _env_bool("AUTO_TRADE_ENABLED", False))
     auto_interval: int = field(default_factory=lambda: _env_int("AUTO_TRADE_INTERVAL", 30))
     auto_max_dist_pct: float = field(default_factory=lambda: _env_float("AUTO_MAX_DIST_PCT", 3.0))
+    # Absolute floor on the entry callback, as a % of price. The exchange
+    # minimum is far below noise width on a mover: the two losers of 2026-09-12
+    # triggered on 0.38% and 0.58% retraces, while the winner that morning had
+    # 1.15%. Unlike the velocity floor this depends on no measure the bot has
+    # not been recording. 0 keeps the exchange minimum.
+    auto_callback_min_pct: float = field(default_factory=lambda: _env_float(
+        "AUTO_CALLBACK_MIN_PCT", 0.0))
+    auto_callback_use_velocity: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_CALLBACK_USE_VELOCITY", False))
+    auto_recent_tr_candles: int = field(default_factory=lambda: _env_int(
+        "AUTO_RECENT_TR_CANDLES", 3))
+    scan_extreme_band_pct: float = field(default_factory=lambda: _env_float(
+        "SCAN_EXTREME_BAND_PCT", 0.1))
+    # Veto candidates whose move is still expanding. Default OFF — this changes
+    # which trades are taken, so it is opt-in.
+    auto_veto_breakout: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_VETO_BREAKOUT", False))
     auto_strength_sweeps: int = field(default_factory=lambda: _env_int("AUTO_STRENGTH_SWEEPS", 2))
     auto_long_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_LONG_RSI_MIN", 48.0))
     # Ceiling for longs. 0 disables it (the previous behaviour, where longs

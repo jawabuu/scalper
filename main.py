@@ -166,6 +166,8 @@ if __name__ == "__main__":
             vol_percentile=cfg.scan_vol_percentile,
             min_atr_pct=cfg.scan_min_atr_pct,
             max_atr_pct=cfg.scan_max_atr_pct,
+            recent_tr_candles=cfg.auto_recent_tr_candles,
+            extreme_band_pct=cfg.scan_extreme_band_pct,
             # Express the guardian's stop in ATRs: at L leverage a -R% ROI stop
             # is an R/L % price move.
             stop_pct_for_ratio=(cfg.guard_initial_stop_roi /
@@ -199,6 +201,10 @@ if __name__ == "__main__":
                 auto_cfg = AutoTradeConfig(
                     enabled=cfg.auto_trade_enabled,
                     max_dist_to_extreme_pct=cfg.auto_max_dist_pct,
+                    veto_breakout=cfg.auto_veto_breakout,
+                    callback_use_velocity=cfg.auto_callback_use_velocity,
+                    **({"callback_min_pct": cfg.auto_callback_min_pct}
+                       if cfg.auto_callback_min_pct > 0 else {}),
                     required_strength_sweeps=cfg.auto_strength_sweeps,
                     long_rsi_min=cfg.auto_long_rsi_min,
                     long_rsi_max=cfg.auto_long_rsi_max,

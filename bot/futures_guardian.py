@@ -605,8 +605,14 @@ class FuturesGuardian:
                     "ratio": round(loss / budget, 2), "stop_roi": round(stop_roi, 2),
                 }
 
-    # Ages at which the position's ROI is sampled, in seconds.
-    ROI_CHECKPOINTS_S = (60, 180, 300)
+    # Ages at which the position's ROI is sampled, in seconds. 0 captures the
+    # ROI at FIRST OBSERVATION: for a bot-placed entry the pending poll runs
+    # every second, so this is the position's ROI before the market has had
+    # time to move it — i.e. the fill-versus-trigger gap expressed in ROI.
+    # peak_roi cannot carry this (it is clamped at 0 and only ratchets up) and
+    # neither can trough_roi (it cannot separate "opened at -13%" from "opened
+    # flat and fell to -13%").
+    ROI_CHECKPOINTS_S = (0, 60, 180, 300)
 
     def _should_fail_fast(self, pos, state, current_roi: float) -> bool:
         """
@@ -1795,6 +1801,7 @@ class FuturesGuardian:
             "secs_to_first_positive": (
                 round(state.first_positive_at - float(meta["opened_seen_at"]), 1)
                 if state.first_positive_at and meta.get("opened_seen_at") else None),
+            "roi_at_0s": state.roi_checkpoints.get("0"),
             "roi_at_60s": state.roi_checkpoints.get("60"),
             "roi_at_180s": state.roi_checkpoints.get("180"),
             "roi_at_300s": state.roi_checkpoints.get("300"),
@@ -1838,6 +1845,16 @@ class FuturesGuardian:
                 else None),
             "exit_is_estimate": not exit_from_exchange,
             "entry_context": meta.get("entry_context") or {},
+            # Seconds between the entry being SIZED and the position first
+            # being seen. A TRAILING_STOP_MARKET entry rests until price
+            # retraces, so the conditions that sized the callback can be many
+            # minutes stale by the time it fills — STORJ rested 305s while
+            # price ran. Computed from fields already recorded.
+            "signal_age_s": (
+                round(meta["opened_seen_at"] - (meta.get("entry_context") or {})["sized_at"], 1)
+                if meta.get("opened_seen_at")
+                and (meta.get("entry_context") or {}).get("sized_at")
+                else None),
             "exit_reason": ("trail" if state.native_trail_id
                             else ("stop" if state.stop_roi is not None else "unknown")),
             "opened_at": meta.get("opened_seen_at"),

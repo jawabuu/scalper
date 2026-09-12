@@ -1,0 +1,381 @@
+"""
+Tests for the two additions made after the STORJ/TA losses:
+
+  * AutoTradeConfig.veto_breakout — refuse candidates whose move is still
+    expanding (scanner.breakout_structure's verdict, previously recorded only).
+  * ROI checkpoint at age 0 — the ROI at first observation, which neither
+    peak_roi (clamped at 0, ratchets up) nor trough_roi (cannot separate
+    "opened at -13%" from "opened flat and fell to -13%") can express.
+"""
+import pytest
+
+from bot.auto_trader import (AutoTradeConfig, AutoTrader, callback_for,
+                             evaluate_candidate)
+from bot.scanner import breakout_structure
+
+
+def _short(**kw):
+    row = {"symbol": "X/USDT:USDT", "direction": "short", "rsi": 88.0,
+           "pct_below_24h_high": -0.1, "pct_above_24h_low": 110.0,
+           "strength": "strengthening"}
+    row.update(kw)
+    return row
+
+
+def _brk(**kw):
+    out = {"at_extreme": True, "consecutive": 3, "gap_wide": True,
+           "gap_widening": True, "breakout": True}
+    out.update(kw)
+    return out
+
+
+def _long(**kw):
+    """A coin pinned to its 24h low that is still dipping — the long-side
+    mirror of the STORJ/TA case."""
+    row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 40.0,
+           "pct_above_24h_low": 0.1, "pct_below_24h_high": -60.0,
+           "strength": "strengthening"}
+    row.update(kw)
+    return row
+
+
+# ── The veto ────────────────────────────────────────────────────────────────
+
+def test_veto_off_by_default_keeps_current_behaviour():
+    """The default must not change which trades are taken."""
+    cfg = AutoTradeConfig(enabled=True)
+    assert cfg.veto_breakout is False
+    d = evaluate_candidate(_short(breakout=_brk()), streak=2, cfg=cfg, atr_pct=2.0)
+    assert d.enter
+
+
+def test_veto_on_refuses_an_expanding_move():
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True)
+    d = evaluate_candidate(_short(breakout=_brk()), streak=2, cfg=cfg, atr_pct=2.0)
+    assert not d.enter
+    assert "expanding" in d.reason
+
+
+def test_veto_on_still_allows_an_exhausted_move():
+    """
+    Same RSI and same distance to the extreme — only the structure differs.
+    A gap that has stopped widening is the exhaustion case the fade targets.
+    """
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True)
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+def test_veto_tolerates_a_missing_breakout_block():
+    """Older scanner rows, or a scan that errored, must not become un-enterable."""
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True)
+    assert evaluate_candidate(_short(), streak=2, cfg=cfg, atr_pct=2.0).enter
+    assert evaluate_candidate(_short(breakout=None), streak=2,
+                              cfg=cfg, atr_pct=2.0).enter
+
+
+def test_veto_is_live_tunable_but_not_a_safety_limit():
+    assert "veto_breakout" in AutoTrader.TUNABLE
+    assert "veto_breakout" not in AutoTrader.SAFETY_ONLY
+
+
+# ── The long side: same failure, mirrored ───────────────────────────────────
+
+def test_veto_on_refuses_a_long_that_is_still_dipping():
+    """
+    A coin on its 24h low with consecutive red candles and a widening gap is
+    still falling. Buying it is the same mistake as shorting STORJ, mirrored —
+    and max_dist_to_extreme_pct selects for it the same way.
+    """
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True, long_rsi_min=38.0,
+                          long_rsi_max=65.0)
+    d = evaluate_candidate(_long(breakout=_brk()), streak=2, cfg=cfg, atr_pct=2.0)
+    assert not d.enter
+    assert "expanding" in d.reason
+
+
+def test_veto_on_still_allows_a_long_whose_fall_has_stalled():
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True, long_rsi_min=38.0,
+                          long_rsi_max=65.0)
+    row = _long(breakout=_brk(gap_widening=False, breakout=False))
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+def test_breakout_structure_is_symmetric_for_longs():
+    """
+    Price at the 24h low, three consecutive RED candles, gap wide and widening.
+    breakout_structure flips both the extreme test and the candle colour on
+    direction, so the long verdict must come out the same as the short one.
+    """
+    df = _frame([0.0490, 0.0483, 0.0477, 0.0470],
+                [0.0497, 0.0490, 0.0483, 0.0477])
+    out = breakout_structure(df, high_24h=0.0900, low_24h=0.0470,
+                             direction="long", gap_pct=-2.5, gap_change=0.4)
+    assert out["at_extreme"]
+    assert out["consecutive"] == 3      # counts red closes, not green
+    assert out["gap_wide"]             # keys on abs(gap), so a negative gap counts
+    assert out["breakout"]
+
+
+# ── The structure the veto keys on, against the two real trades ─────────────
+
+def _frame(closes, opens):
+    pd = pytest.importorskip("pandas")
+    return pd.DataFrame({"close": closes, "open": opens})
+
+
+def test_storj_shape_is_flagged_as_a_breakout():
+    """
+    STORJ at 11:33: last price 0.06804 exactly equal to the 24h high, a run of
+    green candles, EMA9 0.06542 vs EMA21 0.06349 (+3.04%) and widening.
+    """
+    df = _frame([0.0655, 0.0662, 0.0671, 0.06804],
+                [0.0650, 0.0655, 0.0662, 0.0671])
+    out = breakout_structure(df, high_24h=0.06804, low_24h=0.03163,
+                             direction="short", gap_pct=3.04, gap_change=0.4)
+    assert out["at_extreme"]
+    assert out["consecutive"] == 3
+    assert out["gap_wide"]
+    assert out["gap_widening"]
+    assert out["breakout"]
+
+
+def test_a_rolled_over_gap_is_not_a_breakout():
+    """Identical price structure; only the gap direction differs."""
+    df = _frame([0.0655, 0.0662, 0.0671, 0.06804],
+                [0.0650, 0.0655, 0.0662, 0.0671])
+    out = breakout_structure(df, high_24h=0.06804, low_24h=0.03163,
+                             direction="short", gap_pct=3.04, gap_change=-0.4)
+    assert not out["breakout"]
+    assert not out["gap_widening"]
+
+
+# ── ROI at first observation ────────────────────────────────────────────────
+
+def test_zero_is_the_first_roi_checkpoint():
+    from bot.futures_guardian import FuturesGuardian
+    assert FuturesGuardian.ROI_CHECKPOINTS_S[0] == 0
+    for mark in (60, 180, 300):
+        assert mark in FuturesGuardian.ROI_CHECKPOINTS_S
+
+
+def test_roi_at_0s_records_a_position_that_opened_underwater():
+    """
+    The case the STORJ and TA rows could not express: peak_roi reports +0% for
+    a trade that opened at -12%, because it is clamped at 0 and only ratchets
+    upward. The age-0 checkpoint keeps the real figure.
+    """
+    from bot.futures_guard import GuardState
+    from bot.futures_guardian import FuturesGuardian
+
+    state = GuardState(peak_roi=max(-12.0, 0.0))
+    assert state.peak_roi == 0.0          # the existing clamp, unchanged
+
+    # Replay what _note_progress does, without constructing a live guardian.
+    age = 0.0
+    for mark in FuturesGuardian.ROI_CHECKPOINTS_S:
+        if age >= mark and str(mark) not in state.roi_checkpoints:
+            state.roi_checkpoints[str(mark)] = round(-12.0, 2)
+
+    assert state.roi_checkpoints["0"] == -12.0
+    assert "60" not in state.roi_checkpoints    # not yet 60s old
+
+
+def test_roi_checkpoints_survive_a_restart(tmp_path):
+    """The age-0 value must persist, or it is lost on every redeploy."""
+    from bot import futures_state
+    from bot.futures_guard import GuardState
+
+    s = GuardState(peak_roi=0.0)
+    s.roi_checkpoints = {"0": -12.0, "60": -30.0}
+
+    path = str(tmp_path / "futures_state.json")
+    assert futures_state.save(path, states={"X/USDT:USDT": s},
+                              pos_meta={}, closed_trades=[], owner="t")
+    restored = futures_state.restore_states(futures_state.load(path, owner="t"))
+    assert restored["X/USDT:USDT"].roi_checkpoints["0"] == -12.0
+
+
+# ── Velocity-aware callback floor ───────────────────────────────────────────
+
+def test_velocity_floor_off_by_default():
+    cfg = AutoTradeConfig(enabled=True)
+    assert cfg.callback_use_velocity is False
+    cb, _, src = callback_for(0.15, 0.512, cfg, recent_tr_pct=2.69)
+    assert cb == pytest.approx(0.38, abs=0.01)   # STORJ, exactly as logged
+    assert src == "atr_floor"
+
+
+def test_velocity_floor_widens_the_storj_callback():
+    """
+    STORJ was logged at atr_pct 0.512 with its last candles covering ~2.69%.
+    The 0.38% callback that resulted triggered on a wiggle mid-run.
+    """
+    cfg = AutoTradeConfig(enabled=True, callback_use_velocity=True)
+    cb, notes, src = callback_for(0.15, 0.512, cfg, recent_tr_pct=2.69)
+    assert cb == pytest.approx(2.02, abs=0.01)
+    assert src == "velocity_floor"
+    assert any("recent range" in n for n in notes)
+
+
+def test_velocity_floor_is_inert_when_atr_already_leads():
+    """A quiet tape must size exactly as before — ATR is the larger measure."""
+    cfg_off = AutoTradeConfig(enabled=True)
+    cfg_on = AutoTradeConfig(enabled=True, callback_use_velocity=True)
+    a, _, sa = callback_for(1.0, 0.83, cfg_off, recent_tr_pct=0.70)
+    b, _, sb = callback_for(1.0, 0.83, cfg_on, recent_tr_pct=0.70)
+    assert a == b and sa == sb == "atr_floor"
+
+
+def test_velocity_floor_tolerates_a_missing_measure():
+    """Older rows carry no recent_tr_pct; sizing must fall back, not crash."""
+    cfg = AutoTradeConfig(enabled=True, callback_use_velocity=True)
+    cb, _, src = callback_for(0.15, 0.512, cfg, recent_tr_pct=None)
+    assert cb == pytest.approx(0.38, abs=0.01)
+    assert src == "atr_floor"
+
+
+def test_velocity_floor_is_live_tunable():
+    assert "callback_use_velocity" in AutoTrader.TUNABLE
+    assert "callback_use_velocity" not in AutoTrader.SAFETY_ONLY
+
+
+# ── Configurable extreme band ───────────────────────────────────────────────
+
+def test_default_band_preserves_the_old_constant():
+    """0.1% is what 0.999 meant — the default must not change recorded data."""
+    df = _frame([0.0655, 0.0662, 0.0671, 0.06794],
+                [0.0650, 0.0655, 0.0662, 0.0671])
+    out = breakout_structure(df, high_24h=0.06804, low_24h=0.03163,
+                             direction="short", gap_pct=2.258, gap_change=0.4)
+    assert not out["at_extreme"]          # 0.15% away, outside a 0.1% band
+
+
+def test_wider_band_catches_the_storj_distance():
+    df = _frame([0.0655, 0.0662, 0.0671, 0.06794],
+                [0.0650, 0.0655, 0.0662, 0.0671])
+    out = breakout_structure(df, high_24h=0.06804, low_24h=0.03163,
+                             direction="short", gap_pct=2.258, gap_change=0.4,
+                             extreme_band_pct=0.2)
+    assert out["at_extreme"] and out["breakout"]
+
+
+def test_band_is_symmetric_for_longs():
+    df = _frame([0.0490, 0.0483, 0.0477, 0.04707],
+                [0.0497, 0.0490, 0.0483, 0.0477])
+    near = dict(high_24h=0.0900, low_24h=0.0470, direction="long",
+                gap_pct=-2.5, gap_change=0.4)
+    assert not breakout_structure(df, **near)["at_extreme"]
+    assert breakout_structure(df, extreme_band_pct=0.2, **near)["at_extreme"]
+
+
+# ── recent_tr_pct ───────────────────────────────────────────────────────────
+
+def test_recent_tr_exceeds_atr_on_an_accelerating_move():
+    """The whole premise: ATR(14) lags current velocity when it matters."""
+    import numpy as np
+    import pandas_ta as ta
+    from bot.scanner import prepare, recent_tr_pct, ScanConfig
+    pd = pytest.importorskip("pandas")
+
+    base = np.linspace(0.0320, 0.0600, 110)
+    tail = [0.0600]
+    for _ in range(10):
+        tail.append(tail[-1] * 1.022)
+    close = np.concatenate([base, np.array(tail[1:])])
+    open_ = np.concatenate([[close[0]], close[:-1]])
+    df = pd.DataFrame({"open": open_,
+                       "high": np.maximum(open_, close) * 1.004,
+                       "low": np.minimum(open_, close) * 0.998,
+                       "close": close, "volume": np.full(len(close), 3e8)})
+    out = prepare(df, ScanConfig())
+    atr_pct = float(out["atr"].iloc[-1]) / float(out["close"].iloc[-1]) * 100
+    rtr = recent_tr_pct(out, 3)
+    assert rtr > atr_pct * 1.3
+
+
+def test_recent_tr_handles_a_frame_without_tr():
+    from bot.scanner import recent_tr_pct
+    pd = pytest.importorskip("pandas")
+    assert recent_tr_pct(pd.DataFrame({"close": [1.0]}), 3) is None
+    assert recent_tr_pct(None, 3) is None
+
+
+# ── The LSK winner: the case every filter must NOT block ────────────────────
+#
+# 2026-09-12 07:00 UTC. dist 0.37%, atr_pct 1.536, callback 1.15%,
+# roi at first observation -3.7%, closed +7.38% (+$6.40 realised).
+# Its ATR was genuinely high, so the existing ATR floor sized it correctly.
+
+def test_absolute_floor_blocks_both_losers_and_spares_the_winner():
+    cfg = AutoTradeConfig(enabled=True, callback_min_pct=1.0,
+                          callback_ratio=0.25, callback_atr_mult=0.75)
+    lsk, _, _ = callback_for(0.37, 1.536, cfg)
+    storj, _, _ = callback_for(0.15, 0.512, cfg)
+    ta, _, _ = callback_for(0.15, 0.775, cfg)
+    assert lsk == pytest.approx(1.15, abs=0.01)   # untouched — already above
+    assert storj == pytest.approx(1.00, abs=0.01)  # was 0.38
+    assert ta == pytest.approx(1.00, abs=0.01)     # was 0.58
+
+
+def test_default_absolute_floor_changes_nothing():
+    cfg = AutoTradeConfig(enabled=True)
+    cb, _, _ = callback_for(0.15, 0.512, cfg)
+    assert cb == pytest.approx(0.38, abs=0.01)
+
+
+def test_lsk_is_not_vetoed_at_the_recommended_band():
+    """
+    The winner sat 0.37% from the high; both losers sat at 0.15%. A 0.2% band
+    separates them — but see the note in DEFECTS.md: that is three trades and
+    0.2 was chosen knowing the answer.
+    """
+    df = _frame([0.2210, 0.2240, 0.2265, 0.2280],
+                [0.2200, 0.2210, 0.2240, 0.2265])
+    out = breakout_structure(df, high_24h=0.2288, low_24h=0.1900,
+                             direction="short", gap_pct=1.929, gap_change=0.4,
+                             extreme_band_pct=0.2)
+    assert not out["at_extreme"]
+    assert not out["breakout"]
+
+
+def test_callback_min_is_live_tunable():
+    assert "callback_min_pct" in AutoTrader.TUNABLE
+
+
+# ── LSK 10:36 — the loser the veto catches at the DEFAULT band ──────────────
+#
+# dist 0.09%, atr_pct 1.177, callback 0.88%, roi@0s -6.2%, closed -42.78%.
+# Same symbol as the 07:00 winner, 3.5 hours later, opposite outcome.
+
+def test_veto_catches_lsk_1036_without_widening_the_band():
+    """at_extreme fires at 0.09% inside the stock 0.1% band — no tuning."""
+    df = _frame([0.2180, 0.2192, 0.2199, 0.22010],
+                [0.2170, 0.2180, 0.2192, 0.2199])
+    out = breakout_structure(df, high_24h=0.22030, low_24h=0.1900,
+                             direction="short", gap_pct=2.119, gap_change=0.4)
+    assert out["at_extreme"]
+    assert out["breakout"]
+
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=True)
+    row = {"symbol": "LSK/USDT:USDT", "direction": "short", "rsi": 78.4,
+           "pct_below_24h_high": -0.09, "pct_above_24h_low": 15.0,
+           "strength": "strengthening", "atr_pct": 1.177, "breakout": out}
+    assert not evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=1.177).enter
+
+
+def test_callback_is_a_pure_function_of_atr_at_these_distances():
+    """
+    All four logged trades came out at exactly 0.75 x atr_pct: the ratio term
+    (distance x 0.25) never binds at these distances. So an absolute callback
+    floor is an ATR floor wearing a different hat, and AUTO_MIN_ATR_PCT is the
+    knob that already exists for that.
+    """
+    cfg = AutoTradeConfig(enabled=True, callback_ratio=0.25,
+                          callback_atr_mult=0.75)
+    for dist, atr, logged in [(0.09, 1.177, 0.88), (0.37, 1.536, 1.15),
+                              (0.15, 0.775, 0.58), (0.15, 0.512, 0.38)]:
+        cb, _, src = callback_for(dist, atr, cfg)
+        assert cb == pytest.approx(logged, abs=0.01)
+        assert cb == pytest.approx(atr * 0.75, abs=0.01)
+        assert src == "atr_floor"

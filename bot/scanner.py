@@ -65,6 +65,16 @@ class ScanConfig:
     ema_slow: int = 21
     rsi_len: int = 14
     atr_len: int = 14
+    # How many recent candles to measure CURRENT velocity over. ATR(14) blends
+    # in the quiet base that preceded a vertical move; measured on a STORJ-like
+    # acceleration it reads ~1.6x low, and ~1.8x low on a blow-off. Over a
+    # normal or quiet tape the two agree, so this only bites when it should.
+    recent_tr_candles: int = 3
+    # Half-width of the "at the extreme" band, as a % of the 24h high/low.
+    # Was hardcoded at 0.1%. Both the STORJ and TA losses sat at 0.15% from
+    # the high and so reported at_extreme=false, while AUTO_MAX_DIST_PCT was
+    # recruiting candidates all the way out to 3.0%.
+    extreme_band_pct: float = 0.1
     # Volatility band as ATR% of price. A coin below the floor barely moves —
     # the stop gets hit by noise before the move pays. Above the ceiling it
     # moves too erratically for a fixed-ROI stop to survive. 0 disables either.
@@ -105,6 +115,9 @@ class Candidate:
     # Average True Range as a % of price — how much this coin actually moves
     # per candle. Used to judge whether a fixed stop distance is realistic.
     atr_pct: float | None = None
+    # Current velocity: mean true range of the last few candles, as % of price.
+    # Distinct from atr_pct, which lags on an accelerating move.
+    recent_tr_pct: float | None = None
     # Stop distance expressed in ATRs: how many typical candle-ranges the stop
     # sits away. Below ~1 the stop is inside normal noise and likely to be hit
     # for reasons unrelated to the thesis.
@@ -157,6 +170,8 @@ class Candidate:
             "pct_below_24h_high": (None if self.pct_below_24h_high is None
                                    else round(float(self.pct_below_24h_high), 2)),
             "atr_pct": None if self.atr_pct is None else round(float(self.atr_pct), 3),
+            "recent_tr_pct": (None if self.recent_tr_pct is None
+                              else round(float(self.recent_tr_pct), 3)),
             "stop_vs_atr": (None if self.stop_vs_atr is None
                             else round(float(self.stop_vs_atr), 2)),
             "note": str(self.note),
@@ -170,13 +185,45 @@ def prepare(df: pd.DataFrame, cfg: ScanConfig) -> pd.DataFrame:
     df["ema_slow"] = ta.ema(df["close"], length=cfg.ema_slow)
     df["rsi"] = ta.rsi(df["close"], length=cfg.rsi_len)
     df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=cfg.atr_len)
+    # True range per candle, so current velocity can be read without waiting
+    # for a 14-period average to catch up.
+    prev_close = df["close"].shift(1)
+    df["tr"] = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
     return df
+
+
+def recent_tr_pct(df: pd.DataFrame, candles: int = 3) -> float | None:
+    """
+    Mean true range of the last `candles` candles, as a % of price.
+
+    This is the CURRENT velocity. ATR(14) is the recent average, which is a
+    different thing on an accelerating move and the difference is the whole
+    point: a callback floored on ATR(14) can be noise-width on a coin that is
+    covering several ATRs per candle.
+    """
+    try:
+        if df is None or "tr" not in df or len(df) < 1:
+            return None
+        px = float(df["close"].iloc[-1])
+        if px <= 0:
+            return None
+        v = df["tr"].tail(max(1, int(candles))).mean()
+        if pd.isna(v):
+            return None
+        return float(v) / px * 100
+    except Exception:
+        return None
 
 
 def breakout_structure(df, high_24h, low_24h, direction: str,
                        gap_pct: float, gap_change: float,
                        green_needed: int = 3,
-                       min_gap_pct: float = 0.5) -> dict:
+                       min_gap_pct: float = 0.5,
+                       extreme_band_pct: float = 0.1) -> dict:
     """
     Is this a BREAKOUT rather than an exhaustion?
 
@@ -201,10 +248,11 @@ def breakout_structure(df, high_24h, low_24h, direction: str,
 
         # At the extreme in the direction of the move: a NEW high for an
         # upside breakout, a new low for a downside one.
+        band = max(0.0, float(extreme_band_pct)) / 100.0
         if direction == "short" and high_24h:
-            out["at_extreme"] = price >= float(high_24h) * 0.999
+            out["at_extreme"] = price >= float(high_24h) * (1.0 - band)
         elif direction == "long" and low_24h:
-            out["at_extreme"] = price <= float(low_24h) * 1.001
+            out["at_extreme"] = price <= float(low_24h) * (1.0 + band)
 
         # Consecutive candles carrying the move. For an upside breakout that
         # means green closes; downside, red.
@@ -354,6 +402,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     narrowing, gap_change = is_converging(df, cfg)
     htf = htf_trend(df)
     close_px = float(row["close"])
+    rtr = recent_tr_pct(df, cfg.recent_tr_candles)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -382,11 +431,12 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             symbol=symbol, direction="short", rsi=rsi, ema_gap_pct=gap,
             htf_trend_pct=htf,
             breakout=breakout_structure(df, high_24h, low_24h, "short",
-                                        gap, gap_change),
+                                        gap, gap_change,
+                                        extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct,
+            atr_pct=atr_pct, recent_tr_pct=rtr,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed down — " if gap < 0 else "")
@@ -401,11 +451,12 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             symbol=symbol, direction="long", rsi=rsi, ema_gap_pct=gap,
             htf_trend_pct=htf,
             breakout=breakout_structure(df, high_24h, low_24h, "long",
-                                        gap, gap_change),
+                                        gap, gap_change,
+                                        extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct,
+            atr_pct=atr_pct, recent_tr_pct=rtr,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed up — " if gap > 0 else "")
