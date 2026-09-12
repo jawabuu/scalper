@@ -11,6 +11,8 @@
   .flag { display:inline-block; padding:1px 6px; margin-right:4px; border-radius:6px;
           font-size:10px; background:rgba(255,77,106,0.15); color:var(--red);
           border:1px solid rgba(255,77,106,0.35); }
+  table.stat td.neg { color: var(--red); }
+  table.stat td.pos { color: var(--green); }
   pre.diag { font-size:11px; line-height:1.45; background:rgba(0,0,0,0.25);
              padding:10px; border-radius:8px; margin-top:8px; }
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
@@ -2966,6 +2968,8 @@ function diagBlock(d) {
   if (!rows.length) return '';
   const counts = d.counts || {};
   const th = d.thresholds || {};
+  const total = d.total_flagged || rows.length;
+  const omitted = d.omitted || 0;
   const chip = (k, label) => counts[k]
     ? '<span class="chip">' + label + ': ' + counts[k] + '</span>' : '';
   const legend = [
@@ -2974,43 +2978,52 @@ function diagBlock(d) {
     chip('breakout_entry', 'breakout entry'),
     chip('thin_callback', 'thin callback'),
   ].join(' ');
+  const n = (v, d2) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d2);
   const body = rows.map(r => {
     const f = (r.flags || []).map(x => '<span class="flag">' + x + '</span>').join(' ');
-    const n = (v, d2) => (v === null || v === undefined) ? 'n/a' : Number(v).toFixed(d2);
+    const pnl = r.realised_pnl_usdt;
+    const cls = (pnl !== null && pnl !== undefined && pnl < 0) ? 'neg' : 'pos';
     return '<tr>'
-      + '<td>' + (r.symbol || '?') + '<br><small>' + f + '</small></td>'
-      + '<td>' + n(r.final_roi, 2) + '%</td>'
-      + '<td>' + n(r.roi_at_0s, 2) + '%</td>'
+      + '<td>' + (r.symbol || '?').replace('/USDT:USDT', '')
+      + '<br><small>' + f + '</small></td>'
+      + '<td class="' + cls + '">' + n(pnl, 2) + '</td>'
+      + '<td>' + n(r.final_roi, 1) + '%</td>'
       + '<td>' + n(r.callback_pct, 2) + '%</td>'
-      + '<td>' + n(r.atr_pct, 3) + '%</td>'
-      + '<td>' + n(r.dist_to_extreme_pct, 2) + '%</td>'
-      + '<td>' + n(r.signal_age_s, 0) + 's</td>'
       + '<td>' + n(r.drift_since_sizing_pct, 2) + '%</td>'
-      + '<td>' + n(r.change_24h_pct, 1) + '%</td>'
-      + '<td>' + n(r.body_pct, 0) + '%</td>'
-      + '<td>' + n(r.stop_overshoot_roi, 2) + '%</td>'
+      + '<td>' + n(r.change_24h_pct, 0) + '%</td>'
+      + '<td>' + n(r.stop_overshoot_roi, 1) + '%</td>'
       + '</tr>';
   }).join('');
   const esc = (d.report || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   return '<div class="card">'
-    + '<h3>Execution diagnostics <small>' + rows.length + ' flagged</small></h3>'
+    + '<h3>Execution diagnostics <small>worst ' + rows.length
+    + ' of ' + total + ' flagged</small></h3>'
     + '<p class="hint">Trades whose execution went wrong rather than whose '
-    + 'thesis did. Flagged when the realised loss went more than '
+    + 'thesis did — flagged when the loss ran more than '
     + (th.stop_overshoot_roi || 5) + '% ROI past the sized stop, when a trade '
     + 'never traded above entry and lost more than ' + (th.dead_loss_roi || 20)
-    + '%, when the entry was taken against a still-expanding move, or when the '
+    + '%, when it was entered against a still-expanding move, or when the '
     + 'entry callback was under ' + (th.thin_callback_pct || 1)
-    + '% of price. Rows overlap.</p>'
+    + '%. Ranked by money moved; the chips count ALL ' + total
+    + ', not just the rows shown. Rows overlap.</p>'
     + '<div>' + legend + '</div>'
-    + '<table class="stat"><thead><tr><th>trade</th><th>final</th>'
-    + '<th>roi@0s</th><th>callback</th><th>atr</th><th>dist</th>'
-    + '<th>age</th><th>drift</th><th>24h</th><th>body</th>'
-    + '<th>overshoot</th></tr></thead><tbody>'
-    + body + '</tbody></table>'
-    + '<button class="btn" onclick="copyDiag(this)">Copy report</button>'
-    + '<pre class="diag" style="white-space:pre-wrap;overflow-x:auto">'
+    + '<table class="stat"><thead><tr><th>trade</th><th>pnl</th>'
+    + '<th>roi</th><th>callback</th><th>drift</th><th>24h</th>'
+    + '<th>overshoot</th></tr></thead><tbody>' + body + '</tbody></table>'
+    + '<button class="btn" onclick="copyDiag(this)">Copy report'
+    + (omitted ? ' (worst ' + rows.length + ')' : '') + '</button>'
+    + '<button class="btn" onclick="toggleDiag(this)">Show detail</button>'
+    + '<pre class="diag" style="display:none;white-space:pre-wrap;overflow-x:auto">'
     + esc + '</pre>'
     + '</div>';
+}
+
+function toggleDiag(btn) {
+  const pre = btn.parentElement.querySelector('pre.diag');
+  if (!pre) return;
+  const open = pre.style.display !== 'none';
+  pre.style.display = open ? 'none' : 'block';
+  btn.textContent = open ? 'Show detail' : 'Hide detail';
 }
 
 function copyDiag(btn) {

@@ -511,3 +511,60 @@ def test_character_fields_reach_the_diagnostics_report():
     assert "drift 3.482%" in rpt
     assert "24h change 108.90%" in rpt
     assert "body 91.2%" in rpt
+
+
+# ── Diagnostics capping ─────────────────────────────────────────────────────
+
+def _many(n):
+    out = []
+    for i in range(n):
+        loss = -2.0 - i          # steadily worse, so ranking is unambiguous
+        t = _trade(symbol=f"C{i}/USDT:USDT", final_roi=loss,
+                   realised_pnl_usdt=loss * 1.6, trough_roi=loss / 2)
+        out.append(t)
+    return out
+
+
+def test_card_shows_only_the_worst_ten():
+    from bot.analysis import analyse, DIAG_TOP_N
+    d = analyse(_many(76))["execution_diagnostics"]
+    assert d["total_flagged"] == 76
+    assert len(d["rows"]) == DIAG_TOP_N == 10
+    assert d["omitted"] == 66
+
+
+def test_rows_are_ranked_by_money_not_roi():
+    from bot.analysis import analyse
+    rows = analyse(_many(76))["execution_diagnostics"]["rows"]
+    pnls = [abs(r["realised_pnl_usdt"]) for r in rows]
+    assert pnls == sorted(pnls, reverse=True)
+    assert pnls[0] == max(abs(t["realised_pnl_usdt"]) for t in _many(76))
+
+
+def test_severity_falls_back_to_roi_when_money_is_unreadable():
+    from bot.analysis import _diag_severity
+    assert _diag_severity({"realised_pnl_usdt": -12.5, "final_roi": -3.0}) == 12.5
+    assert _diag_severity({"realised_pnl_usdt": None, "final_roi": -40.0}) == 0.4
+    assert _diag_severity({}) == 0.0
+
+
+def test_chips_count_every_flagged_trade_not_just_the_shown():
+    from bot.analysis import analyse
+    d = analyse(_many(76))["execution_diagnostics"]
+    assert d["counts"]["breakout_entry"] == 76
+    assert len(d["rows"]) == 10
+
+
+def test_report_states_what_it_omitted():
+    from bot.analysis import analyse
+    rpt = analyse(_many(76))["execution_diagnostics"]["report"]
+    assert "66 further flagged trade(s) not shown" in rpt
+    assert "moved less than these" in rpt
+
+
+def test_small_sets_are_not_annotated_as_truncated():
+    from bot.analysis import analyse
+    d = analyse(_many(3))["execution_diagnostics"]
+    assert d["omitted"] == 0
+    assert "not shown" not in d["report"]
+    assert "omitted" not in d["report"]

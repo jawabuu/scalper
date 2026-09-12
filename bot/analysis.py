@@ -355,6 +355,11 @@ def account_return(trades: list[dict], baseline: float | None,
 #   breakout_entry  entered against a still-expanding move
 #   thin_callback   the entry trigger was inside noise width
 
+# How many trades the card shows and the report covers. A flagged list grows
+# with every run — 76 rows is a wall, not a diagnosis. Rank by money moved and
+# show the worst; the count of everything else is still reported.
+DIAG_TOP_N = 10
+
 STOP_OVERSHOOT_ROI = 5.0     # realised worse than the sized stop by this much
 DEAD_LOSS_ROI = 20.0         # never green, and lost at least this much
 THIN_CALLBACK_PCT = 1.0      # entry callback below this is noise-width
@@ -393,6 +398,25 @@ def _diag_flags(t: dict) -> list[str]:
         pass
 
     return flags
+
+
+def _diag_severity(row: dict) -> float:
+    """
+    How much this trade actually moved the account. Money first — a -60% ROI
+    on a tiny position matters less than -20% on a large one — falling back to
+    ROI when the money could not be read.
+    """
+    v = row.get("realised_pnl_usdt")
+    if v is not None:
+        try:
+            return abs(float(v))
+        except (TypeError, ValueError):
+            pass
+    v = row.get("final_roi")
+    try:
+        return abs(float(v)) / 100.0 if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _diag_row(t: dict) -> dict:
@@ -452,14 +476,17 @@ def _fmt(v, nd=2):
     return str(v)
 
 
-def diagnostics_report(rows: list[dict]) -> str:
+def diagnostics_report(rows: list[dict], omitted: int = 0) -> str:
     """
     A plain-text block, one paragraph per flagged trade, safe to paste
     somewhere else without carrying any account identifiers.
     """
     if not rows:
         return "No flagged trades."
-    out = [f"EXECUTION DIAGNOSTICS — {len(rows)} flagged trade(s)", ""]
+    head = f"EXECUTION DIAGNOSTICS — {len(rows)} shown"
+    if omitted:
+        head += f", {omitted} further flagged trade(s) not shown"
+    out = [head + " (worst first, by money moved)", ""]
     for r in rows:
         when = ""
         if r.get("opened_at"):
@@ -499,6 +526,9 @@ def diagnostics_report(rows: list[dict]) -> str:
         out.append(f"  money        : realised {_fmt(r['realised_pnl_usdt'],4)}  "
                    f"fees {_fmt(r['fees_usdt'],4)}")
         out.append("")
+    if omitted:
+        out.append(f"({omitted} further flagged trade(s) omitted — ranked by "
+                   f"money moved, so every one of them moved less than these)")
     return "\n".join(out)
 
 
@@ -726,8 +756,11 @@ def analyse(trades: list[dict]) -> dict:
         row = _diag_row(t)
         if row["flags"]:
             diag_rows.append(row)
-    diag_rows.sort(key=lambda r: (r.get("final_roi") if r.get("final_roi")
-                                  is not None else 0.0))
+    diag_rows.sort(key=_diag_severity, reverse=True)
+    diag_top = diag_rows[:DIAG_TOP_N]
+    diag_omitted = max(0, len(diag_rows) - len(diag_top))
+    # Counts cover EVERY flagged trade, not just the shown ones — otherwise
+    # capping the list would silently shrink the tallies.
     diag_counts: dict[str, int] = {}
     for r in diag_rows:
         for f in r["flags"]:
@@ -736,9 +769,12 @@ def analyse(trades: list[dict]) -> dict:
     return {
         "unverified_trades": len(unverified),
         "execution_diagnostics": {
-            "rows": diag_rows,
+            "rows": diag_top,
+            "total_flagged": len(diag_rows),
+            "omitted": diag_omitted,
+            "top_n": DIAG_TOP_N,
             "counts": diag_counts,
-            "report": diagnostics_report(diag_rows),
+            "report": diagnostics_report(diag_top, diag_omitted),
             "thresholds": {
                 "stop_overshoot_roi": STOP_OVERSHOOT_ROI,
                 "dead_loss_roi": DEAD_LOSS_ROI,
