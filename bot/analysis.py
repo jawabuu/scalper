@@ -461,6 +461,7 @@ def _diag_row(t: dict, thin_callback_pct: float = THIN_CALLBACK_PCT) -> dict:
         "trough_roi": t.get("trough_roi"),
         "roi_at_0s": t.get("roi_at_0s"),
         "signal_age_s": t.get("signal_age_s"),
+        "observation_lag_s": t.get("observation_lag_s"),
         "drift_since_sizing_pct": t.get("drift_since_sizing_pct"),
         "change_24h_pct": ctx.get("change_24h_pct"),
         "body_pct": ctx.get("body_pct"),
@@ -525,7 +526,8 @@ def diagnostics_report(rows: list[dict], omitted: int = 0) -> str:
         out.append(f"  trigger      : callback {_fmt(r['callback_pct'])}% "
                    f"({r.get('callback_source') or 'n/a'})  "
                    f"signal_age {_fmt(r['signal_age_s'],1)}s  "
-                   f"drift {_fmt(r['drift_since_sizing_pct'],3)}%")
+                   f"drift {_fmt(r['drift_since_sizing_pct'],3)}% (+ve = good fill)  "
+                   f"obs_lag {_fmt(r['observation_lag_s'],2)}s")
         out.append(f"  character    : 24h change {_fmt(r['change_24h_pct'])}%  "
                    f"body {_fmt(r['body_pct'],1)}%  "
                    f"upper_wick {_fmt(r['upper_wick_pct'],1)}%  "
@@ -537,7 +539,8 @@ def diagnostics_report(rows: list[dict], omitted: int = 0) -> str:
                    f"widening {_fmt(r['brk_gap_widening'])}]  "
                    f"ema_gap {_fmt(r['ema_gap_pct'],3)}%  "
                    f"htf {_fmt(r['htf_trend_pct'],3)}%")
-        out.append(f"  outcome      : roi@0s {_fmt(r['roi_at_0s'])}%  "
+        out.append(f"  outcome      : roi@first-sight {_fmt(r['roi_at_0s'])}% "
+                   f"(lag artefact, not entry quality)  "
                    f"peak {_fmt(r['peak_roi'])}%  "
                    f"trough {_fmt(r['trough_roi'])}%  "
                    f"final {_fmt(r['final_roi'])}%")

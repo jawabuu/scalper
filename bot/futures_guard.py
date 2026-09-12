@@ -35,6 +35,10 @@ class FuturesPosition:
     qty: float           # absolute size in contracts/base units
     leverage: int
     margin: float        # isolated margin backing the position
+    # Exchange updateTime for the position, in seconds. At first sight this is
+    # effectively the FILL time, which is the only honest reference for how
+    # late the guardian was. Optional: not every construction site has it.
+    updated_at: float | None = None
 
     def __post_init__(self):
         if self.side not in ("long", "short"):
@@ -145,10 +149,6 @@ class GuardConfig:
     fail_fast_s: float = 0.0
     fail_fast_max_peak_roi: float = 0.0
     fail_fast_loss_roi: float = 5.0
-    # Opened this far underwater at first observation -> cut now, no timer.
-    # 0 disables. Distinct from peak_roi, which is a running MAXIMUM: a
-    # position that opened at -13% and recovered to -5% peaks at -5%.
-    fail_fast_entry_roi: float = 0.0
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

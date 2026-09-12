@@ -653,33 +653,51 @@ def _state(entry_roi, peak=0.0):
 import time  # noqa: E402  (used by _guardian above)
 
 
-def test_entry_roi_cut_is_off_by_default():
+def test_roi_at_fill_is_identically_zero():
+    """
+    The reason the entry-ROI cut was removed. roi_pct measures against
+    pos.entry_price, which IS the fill price, so ROI at the moment of fill is
+    zero by construction — for either side, at any leverage.
+    """
+    from bot.futures_guard import roi_pct
+
+    class P:
+        entry_price = 0.01687
+        effective_leverage = 20.0
+        side = "short"
+
+    p = P()
+    assert roi_pct(p, p.entry_price) == 0.0
+    p.side = "long"
+    assert roi_pct(p, p.entry_price) == 0.0
+
+
+def test_a_nonzero_first_sight_roi_is_observation_lag():
+    """
+    KOMA read 0.00 because it was seen on the fill tick; GRIFFAIN read -13.31
+    because it was seen ~3s later. Same field, and it describes the guardian,
+    not the trade.
+    """
+    from bot.futures_guard import roi_pct
+
+    class P:
+        entry_price = 0.01495
+        effective_leverage = 20.0
+        side = "short"
+
+    seen_at_fill = roi_pct(P(), 0.01495)
+    seen_3s_later = roi_pct(P(), 0.01495 * 1.00665)
+    assert seen_at_fill == 0.0
+    assert seen_3s_later == pytest.approx(-13.3, abs=0.2)
+
+
+def test_the_entry_roi_cut_is_gone():
+    """It keyed on poll latency. No configuration may resurrect it."""
+    from bot.futures_guard import GuardConfig
+    assert not hasattr(GuardConfig(), "fail_fast_entry_roi")
     g = _guardian()
-    # -10.6% at first sight, one second old: the 60s timer still blocks it
+    # -10.6% at first sight, ten seconds old: only the 60s timer governs
     assert not g._should_fail_fast(_Pos(), _state(-10.6), -12.0)
-
-
-def test_opened_underwater_is_cut_immediately():
-    g = _guardian(fail_fast_entry_roi=6.0)
-    for entry, now in [(-6.2, -8.0), (-10.6, -12.0), (-66.6, -66.6)]:
-        assert g._should_fail_fast(_Pos(), _state(entry), now), entry
-
-
-def test_the_winner_that_opened_at_minus_3_7_is_spared():
-    """LSK 07:00 opened at -3.7% and closed +7.38%."""
-    g = _guardian(fail_fast_entry_roi=6.0)
-    assert not g._should_fail_fast(_Pos(), _state(-3.7), -4.0)
-
-
-def test_a_position_that_went_green_is_never_cut():
-    g = _guardian(fail_fast_entry_roi=6.0)
-    assert not g._should_fail_fast(_Pos(), _state(-10.0, peak=12.0), -20.0)
-
-
-def test_immediate_cut_still_requires_the_loss_floor():
-    """Opened at -8% but currently only -2%: not losing badly right now."""
-    g = _guardian(fail_fast_entry_roi=6.0)
-    assert not g._should_fail_fast(_Pos(), _state(-8.0), -2.0)
 
 
 def test_recovering_positions_are_spared_when_worsening_is_required():
@@ -700,10 +718,17 @@ def test_worsening_gate_is_inert_without_an_entry_roi():
     assert g._should_fail_fast(_Pos(), _state(None), -20.0)
 
 
-def test_entry_cut_ignores_the_clock_entirely():
-    """The timer is what kept these alive; the entry cut must not wait on it."""
-    g = _guardian(fail_fast_entry_roi=6.0, fail_fast_s=99999.0)
-    assert g._should_fail_fast(_Pos(), _state(-10.6), -12.0)
+def test_drift_is_positive_when_the_fill_favours_the_position():
+    """
+    A short filled ABOVE where it was sized sold higher — favourable. KOMA
+    filled +0.308% above its sized price. An earlier version called that
+    "against the position".
+    """
+    from bot.futures_guardian import FuturesGuardian as G
+    short_high = {"entry_context": {"sized_price": 100.0}, "entry_price": 100.308}
+    assert G._drift_pct(short_high, "short") == pytest.approx(0.308, abs=0.001)
+    long_low = {"entry_context": {"sized_price": 100.0}, "entry_price": 99.7}
+    assert G._drift_pct(long_low, "long") == pytest.approx(0.3, abs=0.001)
 
 
 # ── peak_roi is no longer clamped ───────────────────────────────────────────
@@ -745,7 +770,7 @@ def test_a_negative_peak_changes_no_guard_decision():
 
 
 def test_fail_fast_still_sees_a_never_green_trade_as_eligible():
-    g = _guardian(fail_fast_entry_roi=6.0, fail_fast_max_peak_roi=0.5)
+    g = _guardian(fail_fast_s=5.0, fail_fast_max_peak_roi=0.5)
     never_green = _state(-13.31, peak=-13.31)
     assert g._should_fail_fast(_Pos(), never_green, -20.0)
     went_green = _state(-13.31, peak=8.0)
@@ -769,3 +794,30 @@ class _FakePos:
     entry_price = 1.0
     margin = 100.0
     notional = 2000.0
+
+
+# ── Observation lag ─────────────────────────────────────────────────────────
+
+def test_position_carries_an_exchange_timestamp():
+    from bot.futures_guard import FuturesPosition
+    p = FuturesPosition(symbol="X/USDT:USDT", side="short", entry_price=1.0,
+                        qty=10.0, leverage=20, margin=0.5, updated_at=1789200000.0)
+    assert p.updated_at == 1789200000.0
+    # optional: existing construction sites pass no timestamp
+    q = FuturesPosition(symbol="X/USDT:USDT", side="short", entry_price=1.0,
+                        qty=10.0, leverage=20, margin=0.5)
+    assert q.updated_at is None
+
+
+def test_observation_lag_reaches_the_diagnostics_report():
+    from bot.analysis import analyse
+    t = _trade(observation_lag_s=3.02)
+    rpt = analyse([t])["execution_diagnostics"]["report"]
+    assert "obs_lag 3.02s" in rpt
+    assert "lag artefact, not entry quality" in rpt
+
+
+def test_report_marks_the_drift_sign_convention():
+    from bot.analysis import analyse
+    rpt = analyse([_trade(drift_since_sizing_pct=0.308)])["execution_diagnostics"]["report"]
+    assert "+ve = good fill" in rpt

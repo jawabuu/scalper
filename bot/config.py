@@ -315,10 +315,6 @@ class BotConfig:
     # not been recording. 0 keeps the exchange minimum.
     auto_callback_min_pct: float = field(default_factory=lambda: _env_float(
         "AUTO_CALLBACK_MIN_PCT", 0.0))
-    # Close immediately when a position's ROI at FIRST OBSERVATION is this far
-    # underwater, without waiting out GUARD_FAIL_FAST_S. 0 disables.
-    guard_fail_fast_entry_roi: float = field(default_factory=lambda: _env_float(
-        "GUARD_FAIL_FAST_ENTRY_ROI", 0.0))
     # Restrict the timed fail-fast to positions that are WORSE than where they
     # were first seen, so a recovering position is never cut on depth alone.
     guard_fail_fast_require_worsening: bool = field(default_factory=lambda: _env_bool(

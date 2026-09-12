@@ -424,9 +424,20 @@ class FuturesGuardian:
                         f"this — verify against the Binance UI."
                     )
 
+                # Binance reports updateTime in ms on positionRisk. On a
+                # freshly opened position that is the fill time.
+                upd = None
+                try:
+                    raw = (p.get("info") or {}).get("updateTime") or p.get("timestamp")
+                    if raw:
+                        upd = float(raw) / 1000.0
+                except (TypeError, ValueError):
+                    upd = None
+
                 pos = FuturesPosition(
                     symbol=p["symbol"], side=side, entry_price=entry,
                     qty=abs(contracts), leverage=max(lev, 1), margin=margin,
+                    updated_at=upd,
                 )
                 # Sanity-check the derived leverage against the reported one.
                 eff = pos.effective_leverage
@@ -631,7 +642,10 @@ class FuturesGuardian:
             if sized <= 0:
                 return None
             move = (entry - sized) / sized * 100.0
-            # A short is hurt by price rising, a long by price falling.
+            # Sign so that POSITIVE is favourable to the position. A short
+            # filled ABOVE where it was sized sold higher, which is better; a
+            # long filled BELOW bought cheaper. An earlier version had this
+            # backwards and reported a good fill as "against the position".
             return round(move if str(side).lower() == "short" else -move, 3)
         except (TypeError, ValueError, ZeroDivisionError):
             return None
@@ -644,13 +658,8 @@ class FuturesGuardian:
         alone would cut trades that are merely slow; the floor targets "going
         wrong" rather than "not going right yet".
 
-        Two further gates, both off by default:
+        One further gate, off by default:
 
-        fail_fast_entry_roi        opened this far underwater -> cut now, no
-                                   timer. The timer assumes a trade needs time
-                                   to prove itself; a position already well
-                                   below entry at first sight has instead been
-                                   filled badly, and waiting only widens it.
         fail_fast_require_worsening  cut only what is worse than where it
                                    started, so a recovering position is left
                                    alone regardless of depth.
@@ -670,14 +679,13 @@ class FuturesGuardian:
         # keeps the real figure.
         entry_roi = state.roi_checkpoints.get("0")
 
-        # Opened far enough underwater that waiting adds nothing. On the four
-        # trades with a logged first-observation ROI, the winner opened at
-        # -3.7% and the losers at -6.2%, -10.6% and -66.6%. A position this
-        # far down at its first sight has not "not gone right yet" — the
-        # entry itself was filled somewhere it should not have been.
-        immediate = getattr(cfg, "fail_fast_entry_roi", 0.0)
-        if immediate and entry_roi is not None and entry_roi <= -abs(immediate):
-            return True
+        # NOTE: an earlier version cut immediately when the age-0 checkpoint
+        # was far underwater. That was wrong. roi_pct measures against
+        # pos.entry_price, which IS the fill price, so ROI at the moment of
+        # fill is identically zero. A non-zero age-0 reading therefore measures
+        # how LATE the guardian looked, not how the trade opened — KOMA read
+        # 0.00 because it was seen on the fill tick, GRIFFAIN -13.31 because it
+        # was seen ~3s later. Cutting on it would cut on poll latency.
 
         # A position that is recovering is going the other way, whatever its
         # absolute ROI. RIVER reached -17.54% and closed +59.99%; cutting on
@@ -1164,6 +1172,13 @@ class FuturesGuardian:
                 "pct_below_24h_high": dist_high,
                 "opened_seen_at": self._pos_meta.get(pos.symbol, {}).get(
                     "opened_seen_at", time.time()),
+                # Exchange-side fill time, captured once. opened_seen_at minus
+                # this is the guardian's observation lag — the thing the age-0
+                # ROI checkpoint was accidentally measuring.
+                "fill_time": self._pos_meta.get(pos.symbol, {}).get(
+                    "fill_time", pos.updated_at),
+                "fill_price": self._pos_meta.get(pos.symbol, {}).get(
+                    "fill_price", pos.entry_price),
                 # Entry conditions, captured once and preserved, so closed
                 # trades can later be analysed by what they were entered on.
                 "entry_context": self._pos_meta.get(pos.symbol, {}).get(
@@ -1858,7 +1873,18 @@ class FuturesGuardian:
             "secs_to_first_positive": (
                 round(state.first_positive_at - float(meta["opened_seen_at"]), 1)
                 if state.first_positive_at and meta.get("opened_seen_at") else None),
-            "roi_at_0s": state.roi_checkpoints.get("0"),
+            # ROI at first sight. NOT a property of the entry: ROI against the
+            # fill price is zero at the fill, so any non-zero value here is the
+            # market moving during the guardian's observation lag.
+            "roi_at_first_sight": state.roi_checkpoints.get("0"),
+            "roi_at_0s": state.roi_checkpoints.get("0"),   # kept for old rows
+            # Seconds between the exchange filling the entry and the guardian
+            # first seeing the position. The honest measure of that lag.
+            "observation_lag_s": (
+                round(meta["opened_seen_at"] - float(meta["fill_time"]), 2)
+                if meta.get("opened_seen_at") and meta.get("fill_time")
+                else None),
+            "fill_price": meta.get("fill_price"),
             "roi_at_60s": state.roi_checkpoints.get("60"),
             "roi_at_180s": state.roi_checkpoints.get("180"),
             "roi_at_300s": state.roi_checkpoints.get("300"),
