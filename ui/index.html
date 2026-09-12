@@ -2512,7 +2512,9 @@ async function refreshFuturesHistory() {
         <td class="num">${t.entry_price ?? '—'}</td>
         <td class="num">${t.exit_price ?? '—'}${est}</td>
         <td class="num">${finCell}</td>
-        <td class="num pos">+${t.peak_roi}%</td>
+        <td class="num ${(t.peak_roi ?? 0) < 0 ? 'neg' : 'pos'}">${
+          t.peak_roi === null || t.peak_roi === undefined
+            ? '—' : (t.peak_roi >= 0 ? '+' : '') + t.peak_roi + '%'}</td>
         <td class="num ${(t.trough_roi ?? 0) < 0 ? 'neg' : ''}">${
           t.trough_roi === null || t.trough_roi === undefined
             ? '—' : (t.trough_roi > 0 ? '+' : '') + t.trough_roi + '%'}</td>

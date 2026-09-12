@@ -821,3 +821,43 @@ def test_report_marks_the_drift_sign_convention():
     from bot.analysis import analyse
     rpt = analyse([_trade(drift_since_sizing_pct=0.308)])["execution_diagnostics"]["report"]
     assert "+ve = good fill" in rpt
+
+
+# ── Restart gap: a position that closes before the first pass ───────────────
+
+def test_pos_meta_survives_a_restart_with_its_identity_fields(tmp_path):
+    """
+    A RIVER trade closed during a redeploy and recorded no side, entry price or
+    final ROI — only the ledger's realised figure. pos_meta persisted just
+    entry_context and opened_seen_at, and the close record needs more.
+    """
+    from bot import futures_state
+    from bot.futures_guard import GuardState
+
+    meta = {"X/USDT:USDT": {
+        "side": "short", "entry_price": 1.486, "margin": 84.26,
+        "leverage": 20.0, "current_roi": -3.2, "current_price": 1.50,
+        "opened_seen_at": 1789200000.0, "fill_time": 1789199998.0,
+        "fill_price": 1.486, "entry_context": {"rsi": 76.4}}}
+    path = str(tmp_path / "s.json")
+    assert futures_state.save(path, states={"X/USDT:USDT": GuardState()},
+                              pos_meta=meta, closed_trades=[], owner="t")
+    back = futures_state.load(path, owner="t")["pos_meta"]["X/USDT:USDT"]
+    for k in ("side", "entry_price", "margin", "leverage", "fill_time"):
+        assert back[k] == meta["X/USDT:USDT"][k], k
+
+
+def test_a_close_right_after_restart_can_still_compute_roi():
+    """margin is what final_roi is derived from — without it the row is blank."""
+    from bot import futures_state
+    from bot.futures_guard import GuardState
+    import tempfile, os
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    meta = {"X/USDT:USDT": {"side": "short", "entry_price": 1.486,
+                            "margin": 84.26, "leverage": 20.0,
+                            "opened_seen_at": 1789200000.0}}
+    futures_state.save(path, states={"X/USDT:USDT": GuardState()},
+                       pos_meta=meta, closed_trades=[], owner="t")
+    back = futures_state.load(path, owner="t")["pos_meta"]["X/USDT:USDT"]
+    realised, margin = 20.4138, back["margin"]
+    assert round(realised / margin * 100, 2) == pytest.approx(24.23, abs=0.01)

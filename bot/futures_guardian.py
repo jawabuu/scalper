@@ -1439,8 +1439,15 @@ class FuturesGuardian:
                 meta = self._pos_meta.setdefault(sym, {})
                 if m.get("entry_context"):
                     meta["entry_context"] = m["entry_context"]
-                if m.get("opened_seen_at"):
-                    meta["opened_seen_at"] = m["opened_seen_at"]
+                # Restore anything the close record needs. manage_position
+                # overwrites these within a poll, so they only matter for a
+                # position that closes before the first pass after a restart —
+                # which previously produced a row with no side, entry or ROI.
+                for k in ("opened_seen_at", "side", "entry_price", "margin",
+                          "leverage", "current_roi", "current_price",
+                          "fill_time", "fill_price"):
+                    if m.get(k) is not None:
+                        meta[k] = m[k]
             if not self._closed_trades:
                 self._closed_trades = list(data.get("closed_trades") or [])
         self._restored_safety = data.get("safety") or {}

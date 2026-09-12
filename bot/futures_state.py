@@ -94,9 +94,22 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
             }
             for sym, s in (states or {}).items()
         },
+        # A position can close during or right after a restart, before
+        # manage_position has repopulated its meta. The close record is built
+        # from these fields, so persisting only entry_context left such a trade
+        # with no side, entry, margin — and therefore no final_roi — while the
+        # ledger still supplied the money. Keep the identity fields too.
         "pos_meta": {
             sym: {"entry_context": (m or {}).get("entry_context") or {},
-                  "opened_seen_at": (m or {}).get("opened_seen_at")}
+                  "opened_seen_at": (m or {}).get("opened_seen_at"),
+                  "side": (m or {}).get("side"),
+                  "entry_price": (m or {}).get("entry_price"),
+                  "margin": (m or {}).get("margin"),
+                  "leverage": (m or {}).get("leverage"),
+                  "current_roi": (m or {}).get("current_roi"),
+                  "current_price": (m or {}).get("current_price"),
+                  "fill_time": (m or {}).get("fill_time"),
+                  "fill_price": (m or {}).get("fill_price")}
             for sym, m in (pos_meta or {}).items()
         },
         # Was capped at 200, which silently discarded history a long run had
