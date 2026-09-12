@@ -146,7 +146,8 @@ class GuardConfig:
     fail_fast_max_peak_roi: float = 0.0
     fail_fast_loss_roi: float = 5.0
     # Opened this far underwater at first observation -> cut now, no timer.
-    # 0 disables. peak_roi cannot express this: it is clamped at 0.
+    # 0 disables. Distinct from peak_roi, which is a running MAXIMUM: a
+    # position that opened at -13% and recovered to -5% peaks at -5%.
     fail_fast_entry_roi: float = 0.0
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
@@ -294,7 +295,14 @@ def adopt_state(pos: FuturesPosition, orders: list[dict], current_roi: float,
     the current ROI so an already-profitable position doesn't immediately look
     like it has fallen from a peak of zero.
     """
-    state = GuardState(peak_roi=max(current_roi, 0.0))
+    # Seed the peak with the ACTUAL ROI, negative included. Clamping it at 0
+    # made every position that opened underwater report "peak 0.00%", which is
+    # not an observation — it is the clamp, and it cannot be told apart from a
+    # trade that opened flat and never gained. Every consumer compares peak
+    # against a threshold at or above zero (arm_roi, breakeven_at_roi,
+    # fail_fast_max_peak_roi), so a negative peak stays below all of them and
+    # changes no decision.
+    state = GuardState(peak_roi=current_roi)
     existing = adoptable_stop(orders, pos)
     if existing is not None:
         stop_price = existing.get("stopPrice") or existing.get("triggerPrice")

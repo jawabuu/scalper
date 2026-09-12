@@ -656,7 +656,10 @@ def analyse(trades: list[dict]) -> dict:
         cut_value = sum((_realised(t) or 0.0) for t in cut)
 
         # Losers that never went green: where were they at the cutoff?
-        never = [t for t in losers if not t.get("peak_roi")]
+        # peak_roi is no longer clamped at 0, so a never-green trade reports a
+        # NEGATIVE peak. A truthiness test read that as "went green".
+        never = [t for t in losers
+                 if t.get("peak_roi") is None or float(t["peak_roi"]) <= 0.0]
         at_mark = [float(t[key]) for t in never if t.get(key) is not None]
         avg_at = round(sum(at_mark) / len(at_mark), 2) if at_mark else None
         avg_final = (round(sum((_roi(t) or 0) for t in never) / len(never), 2)

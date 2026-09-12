@@ -704,3 +704,68 @@ def test_entry_cut_ignores_the_clock_entirely():
     """The timer is what kept these alive; the entry cut must not wait on it."""
     g = _guardian(fail_fast_entry_roi=6.0, fail_fast_s=99999.0)
     assert g._should_fail_fast(_Pos(), _state(-10.6), -12.0)
+
+
+# ── peak_roi is no longer clamped ───────────────────────────────────────────
+
+def test_peak_seeds_from_the_real_roi_including_negative():
+    """
+    STORJ was first seen at -66.6% and reported peak 0.00%. That was the
+    clamp, not an observation, and it could not be told apart from a trade
+    that opened flat.
+    """
+    from bot.futures_guard import adopt_state, GuardConfig
+    st = adopt_state(_FakePos(), orders=[], current_roi=-66.6, cfg=GuardConfig())
+    assert st.peak_roi == pytest.approx(-66.6)
+
+
+def test_a_profitable_adoption_still_seeds_from_its_roi():
+    from bot.futures_guard import adopt_state, GuardConfig
+    st = adopt_state(_FakePos(), orders=[], current_roi=12.5, cfg=GuardConfig())
+    assert st.peak_roi == pytest.approx(12.5)
+
+
+def test_peak_still_only_ratchets_upward():
+    from bot.futures_guard import GuardState, update_peak
+    st = GuardState(peak_roi=-20.0)
+    update_peak(st, -30.0)
+    assert st.peak_roi == pytest.approx(-20.0)   # worse does not move the peak
+    assert st.trough_roi == pytest.approx(-30.0)
+    update_peak(st, -5.0)
+    assert st.peak_roi == pytest.approx(-5.0)    # better does
+
+
+def test_a_negative_peak_changes_no_guard_decision():
+    """Every consumer compares peak against a threshold at or above zero."""
+    from bot.futures_guard import GuardState, GuardConfig, is_armed
+    cfg = GuardConfig(arm_roi=5.0, callback_roi=3.0, breakeven_at_roi=3.0)
+    assert not is_armed(GuardState(peak_roi=-13.31), cfg)
+    assert not is_armed(GuardState(peak_roi=0.0), cfg)
+    assert is_armed(GuardState(peak_roi=5.0), cfg)
+
+
+def test_fail_fast_still_sees_a_never_green_trade_as_eligible():
+    g = _guardian(fail_fast_entry_roi=6.0, fail_fast_max_peak_roi=0.5)
+    never_green = _state(-13.31, peak=-13.31)
+    assert g._should_fail_fast(_Pos(), never_green, -20.0)
+    went_green = _state(-13.31, peak=8.0)
+    assert not g._should_fail_fast(_Pos(), went_green, -20.0)
+
+
+def test_never_green_losers_are_still_counted_as_never_green():
+    """A negative peak must not read as 'went green' via truthiness."""
+    from bot.analysis import analyse
+    t = _trade(peak_roi=-13.31, final_roi=-30.33, realised_pnl_usdt=-28.44,
+               secs_to_first_positive=None)
+    out = analyse([t])
+    rows = [r for r in out.get("fail_fast_impact", [])
+            if r.get("losers_never_green")]
+    assert rows, "a loser with peak -13.31 must count as never green"
+
+
+class _FakePos:
+    symbol = "X/USDT:USDT"
+    side = "short"
+    entry_price = 1.0
+    margin = 100.0
+    notional = 2000.0
