@@ -16,6 +16,7 @@ Nothing here fetches or trades. It reads closed-trade records and computes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 # Below this, a group's numbers are noise dressed as signal.
 MIN_USABLE = 30
@@ -341,6 +342,156 @@ def account_return(trades: list[dict], baseline: float | None,
     return out
 
 
+# ── Execution diagnostics ──────────────────────────────────────────────────
+# The aggregate tables answer "does this factor pay?". They cannot answer
+# "what happened to THAT trade?", which is what a post-mortem needs. This
+# section flags individual trades whose EXECUTION — not whose thesis — went
+# wrong, and renders them as a block that can be copied out verbatim.
+#
+# The four flags come from the 2026-09-12 post-mortems:
+#   stop_overshoot  the realised loss went well past the stop that was sized
+#                   (D8: two trades sized at -30% both realised ~-43%)
+#   dead_on_arrival never traded above entry and still lost heavily
+#   breakout_entry  entered against a still-expanding move
+#   thin_callback   the entry trigger was inside noise width
+
+STOP_OVERSHOOT_ROI = 5.0     # realised worse than the sized stop by this much
+DEAD_LOSS_ROI = 20.0         # never green, and lost at least this much
+THIN_CALLBACK_PCT = 1.0      # entry callback below this is noise-width
+
+
+def _diag_flags(t: dict) -> list[str]:
+    """Which execution problems, if any, this trade shows."""
+    flags: list[str] = []
+    ctx = t.get("entry_context") or {}
+    roi = _roi(t)
+    sized = ctx.get("sized_stop_roi")
+
+    if roi is not None and sized:
+        try:
+            if roi < 0 and abs(roi) > float(sized) + STOP_OVERSHOOT_ROI:
+                flags.append("stop_overshoot")
+        except (TypeError, ValueError):
+            pass
+
+    peak = t.get("peak_roi")
+    if roi is not None and peak is not None:
+        try:
+            if float(peak) <= 0.0 and roi <= -DEAD_LOSS_ROI:
+                flags.append("dead_on_arrival")
+        except (TypeError, ValueError):
+            pass
+
+    if ctx.get("breakout"):
+        flags.append("breakout_entry")
+
+    cb = ctx.get("callback_pct")
+    try:
+        if cb is not None and float(cb) < THIN_CALLBACK_PCT:
+            flags.append("thin_callback")
+    except (TypeError, ValueError):
+        pass
+
+    return flags
+
+
+def _diag_row(t: dict) -> dict:
+    """Every field a post-mortem of this trade needs, in one flat row."""
+    ctx = t.get("entry_context") or {}
+    roi = _roi(t)
+    sized = ctx.get("sized_stop_roi")
+    overshoot = None
+    if roi is not None and sized:
+        try:
+            overshoot = round(abs(roi) - float(sized), 2) if roi < 0 else None
+        except (TypeError, ValueError):
+            overshoot = None
+    return {
+        "symbol": t.get("symbol"),
+        "side": t.get("side"),
+        "opened_at": t.get("opened_at"),
+        "flags": _diag_flags(t),
+        "final_roi": roi,
+        "peak_roi": t.get("peak_roi"),
+        "trough_roi": t.get("trough_roi"),
+        "roi_at_0s": t.get("roi_at_0s"),
+        "signal_age_s": t.get("signal_age_s"),
+        "sized_stop_roi": sized,
+        "stop_overshoot_roi": overshoot,
+        "realised_pnl_usdt": _realised(t),
+        "fees_usdt": _fees(t),
+        "rsi": ctx.get("rsi"),
+        "atr_pct": ctx.get("atr_pct"),
+        "recent_tr_pct": ctx.get("recent_tr_pct"),
+        "dist_to_extreme_pct": ctx.get("dist_to_extreme_pct"),
+        "callback_pct": ctx.get("callback_pct"),
+        "callback_source": ctx.get("callback_source"),
+        "ema_gap_pct": ctx.get("ema_gap_pct"),
+        "htf_trend_pct": ctx.get("htf_trend_pct"),
+        "breakout": ctx.get("breakout"),
+        "brk_at_extreme": ctx.get("brk_at_extreme"),
+        "brk_consecutive": ctx.get("brk_consecutive"),
+        "brk_gap_wide": ctx.get("brk_gap_wide"),
+        "brk_gap_widening": ctx.get("brk_gap_widening"),
+        "exit_reason": t.get("exit_reason"),
+    }
+
+
+def _fmt(v, nd=2):
+    if v is None:
+        return "n/a"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, (int, float)):
+        return f"{v:.{nd}f}"
+    return str(v)
+
+
+def diagnostics_report(rows: list[dict]) -> str:
+    """
+    A plain-text block, one paragraph per flagged trade, safe to paste
+    somewhere else without carrying any account identifiers.
+    """
+    if not rows:
+        return "No flagged trades."
+    out = [f"EXECUTION DIAGNOSTICS — {len(rows)} flagged trade(s)", ""]
+    for r in rows:
+        when = ""
+        if r.get("opened_at"):
+            try:
+                when = datetime.fromtimestamp(
+                    float(r["opened_at"]), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (TypeError, ValueError, OSError):
+                when = ""
+        out.append(f"{r.get('symbol')} {str(r.get('side') or '').upper()} {when}")
+        out.append(f"  flags        : {', '.join(r['flags']) or 'none'}")
+        out.append(f"  entry        : rsi {_fmt(r['rsi'],1)}  "
+                   f"atr {_fmt(r['atr_pct'],3)}%  "
+                   f"recent_tr {_fmt(r['recent_tr_pct'],3)}%  "
+                   f"dist {_fmt(r['dist_to_extreme_pct'])}%")
+        out.append(f"  trigger      : callback {_fmt(r['callback_pct'])}% "
+                   f"({r.get('callback_source') or 'n/a'})  "
+                   f"signal_age {_fmt(r['signal_age_s'],1)}s")
+        out.append(f"  structure    : breakout {_fmt(r['breakout'])} "
+                   f"[extreme {_fmt(r['brk_at_extreme'])}, "
+                   f"consec {_fmt(r['brk_consecutive'],0)}, "
+                   f"wide {_fmt(r['brk_gap_wide'])}, "
+                   f"widening {_fmt(r['brk_gap_widening'])}]  "
+                   f"ema_gap {_fmt(r['ema_gap_pct'],3)}%  "
+                   f"htf {_fmt(r['htf_trend_pct'],3)}%")
+        out.append(f"  outcome      : roi@0s {_fmt(r['roi_at_0s'])}%  "
+                   f"peak {_fmt(r['peak_roi'])}%  "
+                   f"trough {_fmt(r['trough_roi'])}%  "
+                   f"final {_fmt(r['final_roi'])}%")
+        out.append(f"  stop         : sized {_fmt(r['sized_stop_roi'],1)}%  "
+                   f"overshoot {_fmt(r['stop_overshoot_roi'])}%  "
+                   f"exit_reason {r.get('exit_reason') or 'n/a'}")
+        out.append(f"  money        : realised {_fmt(r['realised_pnl_usdt'],4)}  "
+                   f"fees {_fmt(r['fees_usdt'],4)}")
+        out.append("")
+    return "\n".join(out)
+
+
 def analyse(trades: list[dict]) -> dict:
     """
     Full report. Every section carries its own sample size so a striking
@@ -556,8 +707,34 @@ def analyse(trades: list[dict]) -> dict:
             f"with the ROI implied by the money actually received. Trust the "
             f"money: a price-based exit estimate can invent a profit.")
 
+    # ── Execution diagnostics ──
+    # Built from ALL trades, including unverified ones: a trade whose P&L
+    # could not be read is itself worth looking at, and this section makes no
+    # statistical claim that a bad number could corrupt.
+    diag_rows = []
+    for t in all_trades:
+        row = _diag_row(t)
+        if row["flags"]:
+            diag_rows.append(row)
+    diag_rows.sort(key=lambda r: (r.get("final_roi") if r.get("final_roi")
+                                  is not None else 0.0))
+    diag_counts: dict[str, int] = {}
+    for r in diag_rows:
+        for f in r["flags"]:
+            diag_counts[f] = diag_counts.get(f, 0) + 1
+
     return {
         "unverified_trades": len(unverified),
+        "execution_diagnostics": {
+            "rows": diag_rows,
+            "counts": diag_counts,
+            "report": diagnostics_report(diag_rows),
+            "thresholds": {
+                "stop_overshoot_roi": STOP_OVERSHOOT_ROI,
+                "dead_loss_roi": DEAD_LOSS_ROI,
+                "thin_callback_pct": THIN_CALLBACK_PCT,
+            },
+        },
         "unverified_symbols": sorted({t.get("symbol", "?") for t in unverified}),
         "roi_mismatches": mismatched,
         "stop_impact": stop_impact,

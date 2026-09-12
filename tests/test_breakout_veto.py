@@ -379,3 +379,68 @@ def test_callback_is_a_pure_function_of_atr_at_these_distances():
         assert cb == pytest.approx(logged, abs=0.01)
         assert cb == pytest.approx(atr * 0.75, abs=0.01)
         assert src == "atr_floor"
+
+
+# ── Execution diagnostics ───────────────────────────────────────────────────
+
+def _trade(**kw):
+    t = {"symbol": "X/USDT:USDT", "side": "short", "opened_at": 1789209392.8,
+         "final_roi": -42.78, "peak_roi": 0.0, "trough_roi": -21.39,
+         "roi_at_0s": -6.2, "signal_age_s": 30.0,
+         "realised_pnl_usdt": -37.3008, "fees_usdt": 1.729,
+         "exit_reason": "stop",
+         "entry_context": {"rsi": 78.4, "atr_pct": 1.177,
+                           "dist_to_extreme_pct": 0.09, "breakout": True,
+                           "brk_at_extreme": True, "brk_consecutive": 3,
+                           "brk_gap_wide": True, "brk_gap_widening": True,
+                           "callback_pct": 0.88, "callback_source": "atr_floor",
+                           "sized_stop_roi": 30.0}}
+    ctx = kw.pop("entry_context", None)
+    t.update(kw)
+    if ctx:
+        t["entry_context"] = {**t["entry_context"], **ctx}
+    return t
+
+
+def test_lsk_loser_trips_all_four_flags():
+    from bot.analysis import analyse
+    d = analyse([_trade()])["execution_diagnostics"]
+    assert len(d["rows"]) == 1
+    assert set(d["rows"][0]["flags"]) == {
+        "stop_overshoot", "dead_on_arrival", "breakout_entry", "thin_callback"}
+    assert d["rows"][0]["stop_overshoot_roi"] == pytest.approx(12.78, abs=0.01)
+
+
+def test_clean_winner_is_not_flagged():
+    from bot.analysis import analyse
+    win = _trade(final_roi=7.38, peak_roi=8.3, trough_roi=-3.7, roi_at_0s=-3.7,
+                 signal_age_s=85.0, realised_pnl_usdt=6.4016,
+                 exit_reason="trail",
+                 entry_context={"atr_pct": 1.536, "dist_to_extreme_pct": 0.37,
+                                "breakout": False, "brk_at_extreme": False,
+                                "callback_pct": 1.15})
+    d = analyse([win])["execution_diagnostics"]
+    assert d["rows"] == []
+    assert d["report"] == "No flagged trades."
+
+
+def test_report_is_plain_text_and_names_the_numbers():
+    from bot.analysis import analyse
+    rpt = analyse([_trade()])["execution_diagnostics"]["report"]
+    assert "<" not in rpt          # copyable as-is, no markup
+    for frag in ("stop_overshoot", "callback 0.88%", "final -42.78%",
+                 "overshoot 12.78%", "signal_age 30.0s"):
+        assert frag in rpt
+
+
+def test_unverified_trades_still_appear():
+    """A trade whose P&L could not be read is exactly one worth looking at."""
+    from bot.analysis import analyse
+    t = _trade(realised_pnl_usdt=None, exit_is_estimate=True)
+    assert analyse([t])["execution_diagnostics"]["rows"]
+
+
+def test_diagnostics_survive_a_trade_with_no_context():
+    from bot.analysis import analyse
+    bare = {"symbol": "Y/USDT:USDT", "side": "long", "final_roi": -5.0}
+    analyse([bare])   # must not raise

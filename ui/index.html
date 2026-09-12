@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Scalper Dashboard</title>
 <style>
+  /* Execution diagnostics card */
+  .chip { display:inline-block; padding:2px 8px; margin:2px 4px 2px 0; border-radius:10px;
+          font-size:11px; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.15); }
+  .flag { display:inline-block; padding:1px 6px; margin-right:4px; border-radius:6px;
+          font-size:10px; background:rgba(255,77,106,0.15); color:var(--red);
+          border:1px solid rgba(255,77,106,0.35); }
+  pre.diag { font-size:11px; line-height:1.45; background:rgba(0,0,0,0.25);
+             padding:10px; border-radius:8px; margin-top:8px; }
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
 
   :root {
@@ -2940,6 +2948,7 @@ async function refreshAnalysis() {
       timeTable('By hour of entry (UTC)', a.by_hour || [],
                 'Twenty-four buckets stay insufficient for a long time. Read '
                 + 'the session table first.'),
+      diagBlock(a.execution_diagnostics || {}),
       statTable('By callback rule (distance ratio vs ATR floor)', a.by_callback_rule || []),
       statTable('Re-entries vs fresh entries', [
         Object.assign({label: 'override re-entry'}, a.reentries.override_reentries),
@@ -2947,6 +2956,70 @@ async function refreshAnalysis() {
       ]),
     ].join(''));
   } catch (e) { panel.style.display = 'none'; }
+}
+
+// Individual trades whose EXECUTION went wrong, as opposed to whose thesis
+// did. The aggregate tables cannot answer "what happened to that trade?".
+// The <pre> block is plain text so it can be copied out whole.
+function diagBlock(d) {
+  const rows = d.rows || [];
+  if (!rows.length) return '';
+  const counts = d.counts || {};
+  const th = d.thresholds || {};
+  const chip = (k, label) => counts[k]
+    ? '<span class="chip">' + label + ': ' + counts[k] + '</span>' : '';
+  const legend = [
+    chip('stop_overshoot', 'stop overshoot'),
+    chip('dead_on_arrival', 'never green'),
+    chip('breakout_entry', 'breakout entry'),
+    chip('thin_callback', 'thin callback'),
+  ].join(' ');
+  const body = rows.map(r => {
+    const f = (r.flags || []).map(x => '<span class="flag">' + x + '</span>').join(' ');
+    const n = (v, d2) => (v === null || v === undefined) ? 'n/a' : Number(v).toFixed(d2);
+    return '<tr>'
+      + '<td>' + (r.symbol || '?') + '<br><small>' + f + '</small></td>'
+      + '<td>' + n(r.final_roi, 2) + '%</td>'
+      + '<td>' + n(r.roi_at_0s, 2) + '%</td>'
+      + '<td>' + n(r.callback_pct, 2) + '%</td>'
+      + '<td>' + n(r.atr_pct, 3) + '%</td>'
+      + '<td>' + n(r.dist_to_extreme_pct, 2) + '%</td>'
+      + '<td>' + n(r.signal_age_s, 0) + 's</td>'
+      + '<td>' + n(r.stop_overshoot_roi, 2) + '%</td>'
+      + '</tr>';
+  }).join('');
+  const esc = (d.report || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return '<div class="card">'
+    + '<h3>Execution diagnostics <small>' + rows.length + ' flagged</small></h3>'
+    + '<p class="hint">Trades whose execution went wrong rather than whose '
+    + 'thesis did. Flagged when the realised loss went more than '
+    + (th.stop_overshoot_roi || 5) + '% ROI past the sized stop, when a trade '
+    + 'never traded above entry and lost more than ' + (th.dead_loss_roi || 20)
+    + '%, when the entry was taken against a still-expanding move, or when the '
+    + 'entry callback was under ' + (th.thin_callback_pct || 1)
+    + '% of price. Rows overlap.</p>'
+    + '<div>' + legend + '</div>'
+    + '<table class="stat"><thead><tr><th>trade</th><th>final</th>'
+    + '<th>roi@0s</th><th>callback</th><th>atr</th><th>dist</th>'
+    + '<th>age</th><th>overshoot</th></tr></thead><tbody>'
+    + body + '</tbody></table>'
+    + '<button class="btn" onclick="copyDiag(this)">Copy report</button>'
+    + '<pre class="diag" style="white-space:pre-wrap;overflow-x:auto">'
+    + esc + '</pre>'
+    + '</div>';
+}
+
+function copyDiag(btn) {
+  const pre = btn.parentElement.querySelector('pre.diag');
+  if (!pre) return;
+  const done = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy report'; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(pre.textContent).then(done, () => {});
+  } else {
+    const r = document.createRange(); r.selectNodeContents(pre);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    try { document.execCommand('copy'); done(); } catch (e) {}
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
