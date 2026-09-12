@@ -87,6 +87,8 @@ if __name__ == "__main__":
         fail_fast_s=cfg.guard_fail_fast_s,
         fail_fast_max_peak_roi=cfg.guard_fail_fast_max_peak_roi,
         fail_fast_loss_roi=cfg.guard_fail_fast_loss_roi,
+        fail_fast_entry_roi=cfg.guard_fail_fast_entry_roi,
+        fail_fast_require_worsening=cfg.guard_fail_fast_require_worsening,
         ).validate()
         guardian = FuturesGuardian(
             gcfg,

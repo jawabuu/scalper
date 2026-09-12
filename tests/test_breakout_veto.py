@@ -610,3 +610,97 @@ def test_small_sets_are_not_annotated_as_truncated():
     assert d["omitted"] == 0
     assert "not shown" not in d["report"]
     assert "omitted" not in d["report"]
+
+
+# ── Fail-fast on entry ROI ──────────────────────────────────────────────────
+#
+# The four trades with a logged first-observation ROI:
+#   LSK 07:00  -3.7%  -> +7.38%   (winner)
+#   LSK 10:36  -6.2%  -> -42.78%
+#   TA  08:18 -10.6%  -> -43.15%
+#   STORJ     -66.6%  -> -67.22%
+
+class _Pos:
+    symbol = "X/USDT:USDT"
+    side = "short"
+
+
+def _guardian(**cfgkw):
+    """A guardian stub carrying only what _should_fail_fast reads."""
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    base = dict(fail_fast_s=60.0, fail_fast_max_peak_roi=0.0,
+                fail_fast_loss_roi=5.0)
+    base.update(cfgkw)
+    g.cfg = GuardConfig(**base)
+    # Ten seconds old: long enough that a short timer has elapsed, short
+    # enough that the stock 60s one has not. Stamping it at call time makes
+    # sub-second timers race the test itself.
+    g._pos_meta = {"X/USDT:USDT": {"opened_seen_at": time.time() - 10.0}}
+    return g
+
+
+def _state(entry_roi, peak=0.0):
+    from bot.futures_guard import GuardState
+    s = GuardState(peak_roi=peak)
+    if entry_roi is not None:
+        s.roi_checkpoints = {"0": entry_roi}
+    return s
+
+
+import time  # noqa: E402  (used by _guardian above)
+
+
+def test_entry_roi_cut_is_off_by_default():
+    g = _guardian()
+    # -10.6% at first sight, one second old: the 60s timer still blocks it
+    assert not g._should_fail_fast(_Pos(), _state(-10.6), -12.0)
+
+
+def test_opened_underwater_is_cut_immediately():
+    g = _guardian(fail_fast_entry_roi=6.0)
+    for entry, now in [(-6.2, -8.0), (-10.6, -12.0), (-66.6, -66.6)]:
+        assert g._should_fail_fast(_Pos(), _state(entry), now), entry
+
+
+def test_the_winner_that_opened_at_minus_3_7_is_spared():
+    """LSK 07:00 opened at -3.7% and closed +7.38%."""
+    g = _guardian(fail_fast_entry_roi=6.0)
+    assert not g._should_fail_fast(_Pos(), _state(-3.7), -4.0)
+
+
+def test_a_position_that_went_green_is_never_cut():
+    g = _guardian(fail_fast_entry_roi=6.0)
+    assert not g._should_fail_fast(_Pos(), _state(-10.0, peak=12.0), -20.0)
+
+
+def test_immediate_cut_still_requires_the_loss_floor():
+    """Opened at -8% but currently only -2%: not losing badly right now."""
+    g = _guardian(fail_fast_entry_roi=6.0)
+    assert not g._should_fail_fast(_Pos(), _state(-8.0), -2.0)
+
+
+def test_recovering_positions_are_spared_when_worsening_is_required():
+    """
+    RIVER reached -17.54% and closed +59.99%. Cutting on depth alone takes it;
+    requiring it to be WORSE than where it started does not.
+    """
+    g = _guardian(fail_fast_require_worsening=True, fail_fast_s=5.0)
+    recovering = _state(-17.54)
+    assert not g._should_fail_fast(_Pos(), recovering, -9.0)   # climbing back
+    worsening = _state(-6.2)
+    assert g._should_fail_fast(_Pos(), worsening, -21.39)      # LSK 10:36
+
+
+def test_worsening_gate_is_inert_without_an_entry_roi():
+    """Trades closed before roi_at_0s existed must behave as they did."""
+    g = _guardian(fail_fast_require_worsening=True, fail_fast_s=5.0)
+    assert g._should_fail_fast(_Pos(), _state(None), -20.0)
+
+
+def test_entry_cut_ignores_the_clock_entirely():
+    """The timer is what kept these alive; the entry cut must not wait on it."""
+    g = _guardian(fail_fast_entry_roi=6.0, fail_fast_s=99999.0)
+    assert g._should_fail_fast(_Pos(), _state(-10.6), -12.0)

@@ -145,6 +145,12 @@ class GuardConfig:
     fail_fast_s: float = 0.0
     fail_fast_max_peak_roi: float = 0.0
     fail_fast_loss_roi: float = 5.0
+    # Opened this far underwater at first observation -> cut now, no timer.
+    # 0 disables. peak_roi cannot express this: it is clamped at 0.
+    fail_fast_entry_roi: float = 0.0
+    # Cut only positions WORSE than where they were first seen, so a
+    # recovering position is never cut on depth alone.
+    fail_fast_require_worsening: bool = False
 
 
     # Only move a resting stop if the new level differs by at least this much

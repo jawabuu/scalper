@@ -640,9 +640,20 @@ class FuturesGuardian:
         """
         Cut a trade that never went green and is now losing.
 
-        BOTH conditions are required. Time alone would cut trades that are
-        merely slow; the loss floor targets "going wrong" rather than "not
-        going right yet".
+        The loss floor and the never-green test are always required. Time
+        alone would cut trades that are merely slow; the floor targets "going
+        wrong" rather than "not going right yet".
+
+        Two further gates, both off by default:
+
+        fail_fast_entry_roi        opened this far underwater -> cut now, no
+                                   timer. The timer assumes a trade needs time
+                                   to prove itself; a position already well
+                                   below entry at first sight has instead been
+                                   filled badly, and waiting only widens it.
+        fail_fast_require_worsening  cut only what is worse than where it
+                                   started, so a recovering position is left
+                                   alone regardless of depth.
         """
         cfg = self.cfg
         if not getattr(cfg, "fail_fast_s", 0):
@@ -652,6 +663,30 @@ class FuturesGuardian:
         floor = getattr(cfg, "fail_fast_loss_roi", 5.0)
         if current_roi > -abs(floor):
             return False                      # losing, but not badly
+
+        # ROI at FIRST OBSERVATION. peak_roi cannot stand in for this: it is
+        # clamped at 0, so a position first seen at -10.6% records peak 0.00
+        # and looks identical to one that opened flat. The age-0 checkpoint
+        # keeps the real figure.
+        entry_roi = state.roi_checkpoints.get("0")
+
+        # Opened far enough underwater that waiting adds nothing. On the four
+        # trades with a logged first-observation ROI, the winner opened at
+        # -3.7% and the losers at -6.2%, -10.6% and -66.6%. A position this
+        # far down at its first sight has not "not gone right yet" — the
+        # entry itself was filled somewhere it should not have been.
+        immediate = getattr(cfg, "fail_fast_entry_roi", 0.0)
+        if immediate and entry_roi is not None and entry_roi <= -abs(immediate):
+            return True
+
+        # A position that is recovering is going the other way, whatever its
+        # absolute ROI. RIVER reached -17.54% and closed +59.99%; cutting on
+        # depth alone would have taken it. Only cut what is getting WORSE than
+        # where it started.
+        if getattr(cfg, "fail_fast_require_worsening", False):
+            if entry_roi is not None and current_roi > entry_roi:
+                return False
+
         opened = (self._pos_meta.get(pos.symbol, {}) or {}).get("opened_seen_at")
         if not opened:
             return False
