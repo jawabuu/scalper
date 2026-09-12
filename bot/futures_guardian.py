@@ -171,6 +171,15 @@ class FuturesGuardian:
                  demo: bool = True, dry_run: bool = True, atr_timeframe: str = "3m",
                  poll_interval: float = 5.0, socks_proxy: str | None = None):
         self.cfg = guard_cfg.validate()
+        if self.cfg.fail_fast_s:
+            log.info(
+                f"Fail-fast ARMED: cut after {self.cfg.fail_fast_s:.0f}s when "
+                f"peak <= {self.cfg.fail_fast_max_peak_roi:+.1f}% ROI and "
+                f"current <= {-abs(self.cfg.fail_fast_loss_roi):.1f}% ROI")
+        else:
+            log.warning(
+                "Fail-fast DISABLED (GUARD_FAIL_FAST_S is 0 or unset) — losing "
+                "trades will run to their stop. Set it to enable early cuts.")
         self.demo = demo
         # ATR must be measured on the timeframe actually traded.
         self.atr_timeframe = atr_timeframe or "3m"
@@ -2686,5 +2695,13 @@ class FuturesGuardian:
                 "callback_roi": self.cfg.callback_roi,
                 "trail_callback_pct": self.cfg.trail_callback_pct,
                 "use_native_trail": self.cfg.use_native_trail,
+                # Fail-fast was invisible here, so a value of 0 — which
+                # disables it outright on the first line of the predicate —
+                # looked identical to a working configuration. 119 trades ran
+                # with it silently off.
+                "fail_fast_s": self.cfg.fail_fast_s,
+                "fail_fast_max_peak_roi": self.cfg.fail_fast_max_peak_roi,
+                "fail_fast_loss_roi": self.cfg.fail_fast_loss_roi,
+                "fail_fast_enabled": bool(self.cfg.fail_fast_s),
             },
         }

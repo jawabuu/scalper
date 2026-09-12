@@ -861,3 +861,27 @@ def test_a_close_right_after_restart_can_still_compute_roi():
     back = futures_state.load(path, owner="t")["pos_meta"]["X/USDT:USDT"]
     realised, margin = 20.4138, back["margin"]
     assert round(realised / margin * 100, 2) == pytest.approx(24.23, abs=0.01)
+
+
+# ── Fail-fast must never be silently off ────────────────────────────────────
+
+def test_zero_disables_fail_fast_on_the_first_line():
+    """The behaviour that cost 119 trades: 0 is not 'default', it is OFF."""
+    g = _guardian(fail_fast_s=0.0)
+    never_green_and_deep = _state(-10.0, peak=0.0)
+    assert not g._should_fail_fast(_Pos(), never_green_and_deep, -25.0)
+
+
+def test_the_same_trade_is_cut_once_it_is_armed():
+    g = _guardian(fail_fast_s=60.0, fail_fast_loss_roi=5.0,
+                  fail_fast_max_peak_roi=0.0)
+    g._pos_meta["X/USDT:USDT"]["opened_seen_at"] = time.time() - 120
+    assert g._should_fail_fast(_Pos(), _state(-10.0, peak=0.0), -25.0)
+
+
+def test_snapshot_reports_whether_fail_fast_is_live():
+    """It was absent from the snapshot, so 0 looked like a working config."""
+    from bot.futures_guard import GuardConfig
+    for secs, expected in ((0.0, False), (60.0, True)):
+        cfg = GuardConfig(fail_fast_s=secs)
+        assert bool(cfg.fail_fast_s) is expected

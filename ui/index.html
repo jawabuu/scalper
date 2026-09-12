@@ -3203,7 +3203,10 @@ function renderGuardian(g) {
     const envTag = g.demo
       ? '<span class="guard-flag gf-dry">DEMO ACCOUNT</span>'
       : '<span class="guard-flag gf-live">LIVE ACCOUNT</span>';
-    meta.innerHTML = `${envTag} ${mode} &nbsp;(stop -${c.initial_stop_roi}% ROI · `
+    const ffTag = c.fail_fast_enabled
+      ? `<span class="chip">fail-fast ${c.fail_fast_s}s</span>`
+      : `<span class="flag">FAIL-FAST OFF</span>`;
+    meta.innerHTML = `${envTag} ${mode} ${ffTag} &nbsp;(stop -${c.initial_stop_roi}% ROI · `
       + `arm +${c.arm_roi}% · ${trail} · ${ago})`;
   }
 
