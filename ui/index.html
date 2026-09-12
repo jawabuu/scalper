@@ -2985,6 +2985,9 @@ function diagBlock(d) {
       + '<td>' + n(r.atr_pct, 3) + '%</td>'
       + '<td>' + n(r.dist_to_extreme_pct, 2) + '%</td>'
       + '<td>' + n(r.signal_age_s, 0) + 's</td>'
+      + '<td>' + n(r.drift_since_sizing_pct, 2) + '%</td>'
+      + '<td>' + n(r.change_24h_pct, 1) + '%</td>'
+      + '<td>' + n(r.body_pct, 0) + '%</td>'
       + '<td>' + n(r.stop_overshoot_roi, 2) + '%</td>'
       + '</tr>';
   }).join('');
@@ -3001,7 +3004,8 @@ function diagBlock(d) {
     + '<div>' + legend + '</div>'
     + '<table class="stat"><thead><tr><th>trade</th><th>final</th>'
     + '<th>roi@0s</th><th>callback</th><th>atr</th><th>dist</th>'
-    + '<th>age</th><th>overshoot</th></tr></thead><tbody>'
+    + '<th>age</th><th>drift</th><th>24h</th><th>body</th>'
+    + '<th>overshoot</th></tr></thead><tbody>'
     + body + '</tbody></table>'
     + '<button class="btn" onclick="copyDiag(this)">Copy report</button>'
     + '<pre class="diag" style="white-space:pre-wrap;overflow-x:auto">'

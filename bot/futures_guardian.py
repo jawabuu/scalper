@@ -614,6 +614,28 @@ class FuturesGuardian:
     # flat and fell to -13%").
     ROI_CHECKPOINTS_S = (0, 60, 180, 300)
 
+    @staticmethod
+    def _drift_pct(meta: dict, side: str) -> float | None:
+        """
+        Adverse price movement between sizing and the actual entry, as a % of
+        the sized price. Positive is always against the position, whichever
+        side it is, so the two directions can be pooled.
+        """
+        try:
+            ctx = meta.get("entry_context") or {}
+            sized = ctx.get("sized_price")
+            entry = meta.get("entry_price")
+            if not sized or not entry:
+                return None
+            sized, entry = float(sized), float(entry)
+            if sized <= 0:
+                return None
+            move = (entry - sized) / sized * 100.0
+            # A short is hurt by price rising, a long by price falling.
+            return round(move if str(side).lower() == "short" else -move, 3)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
     def _should_fail_fast(self, pos, state, current_roi: float) -> bool:
         """
         Cut a trade that never went green and is now losing.
@@ -1845,6 +1867,11 @@ class FuturesGuardian:
                 else None),
             "exit_is_estimate": not exit_from_exchange,
             "entry_context": meta.get("entry_context") or {},
+            # How far price DRIFTED between sizing and the fill, signed so
+            # positive is always against the position. Elapsed time is only a
+            # proxy for this: a calm coin can rest for many minutes and be the
+            # same trade, a vertical one is a different trade in seconds.
+            "drift_since_sizing_pct": self._drift_pct(meta, meta.get("side")),
             # Seconds between the entry being SIZED and the position first
             # being seen. A TRAILING_STOP_MARKET entry rests until price
             # retraces, so the conditions that sized the callback can be many

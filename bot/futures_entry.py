@@ -881,6 +881,10 @@ class EntryService:
                     "sized_stop_roi": plan.sized_stop_roi,
                     "sized_margin_usdt": plan.margin_usdt,
                     "sized_at": time.time(),
+                    # Price when the order was SIZED. A trailing-stop entry
+                    # rests until price retraces, so the fill can be minutes
+                    # and several percent away from this.
+                    "sized_price": plan.ref_price,
                 })
         except Exception as e:
             log.debug(f"could not record sized stop: {e}")

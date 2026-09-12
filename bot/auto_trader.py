@@ -856,6 +856,13 @@ class AutoTrader:
                         "rsi": row.get("rsi"),
                         "atr_pct": row.get("atr_pct"),
                         "recent_tr_pct": row.get("recent_tr_pct"),
+                        # A coin up 108% in 24h is not the same trade as one
+                        # up 17%. The scanner has always computed this; it was
+                        # never recorded against the trade it produced.
+                        "change_24h_pct": row.get("change_24h_pct"),
+                        "body_pct": (row.get("shape") or {}).get("body_pct"),
+                        "upper_wick_pct": (row.get("shape") or {}).get("upper_wick_pct"),
+                        "lower_wick_pct": (row.get("shape") or {}).get("lower_wick_pct"),
                         "dist_to_extreme_pct": abs(
                             row.get("pct_above_24h_low") if side == "long"
                             else row.get("pct_below_24h_high")),

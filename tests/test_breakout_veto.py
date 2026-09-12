@@ -444,3 +444,70 @@ def test_diagnostics_survive_a_trade_with_no_context():
     from bot.analysis import analyse
     bare = {"symbol": "Y/USDT:USDT", "side": "long", "final_roi": -5.0}
     analyse([bare])   # must not raise
+
+
+# ── Coin character: what ATR cannot express ─────────────────────────────────
+
+def _shaped(bodies, wicks):
+    pd = pytest.importorskip("pandas")
+    rows, px = [], 1.0
+    for b, w in zip(bodies, wicks):
+        o = px
+        c = px * (1 + b)
+        rows.append((o, max(o, c) * (1 + w), min(o, c) * (1 - w * 0.2), c))
+        px = c
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"])
+
+
+def test_body_separates_a_carried_move_from_a_rejected_one():
+    """
+    Two tapes of comparable range: one full-bodied, one mostly upper wick.
+    ATR reports a similar number for both; they are opposite situations for a
+    short, which is trying to fade rejection rather than stand in front of a
+    trend.
+    """
+    from bot.scanner import candle_shape
+    carried = candle_shape(_shaped([0.02] * 5, [0.001] * 5), 5)
+    rejected = candle_shape(_shaped([0.002] * 5, [0.02] * 5), 5)
+    assert carried["body_pct"] > 80
+    assert rejected["body_pct"] < 20
+    assert rejected["upper_wick_pct"] > carried["upper_wick_pct"] * 5
+
+
+def test_candle_shape_survives_degenerate_candles():
+    from bot.scanner import candle_shape
+    pd = pytest.importorskip("pandas")
+    flat = pd.DataFrame({"open": [1.0], "high": [1.0],
+                         "low": [1.0], "close": [1.0]})
+    assert candle_shape(flat, 5)["body_pct"] is None   # zero range, not a crash
+    assert candle_shape(None, 5)["body_pct"] is None
+
+
+# ── Drift since sizing ──────────────────────────────────────────────────────
+
+def test_drift_is_positive_against_the_position_on_both_sides():
+    from bot.futures_guardian import FuturesGuardian as G
+    short = {"entry_context": {"sized_price": 0.0620}, "entry_price": 0.0650}
+    long_ = {"entry_context": {"sized_price": 0.0650}, "entry_price": 0.0620}
+    assert G._drift_pct(short, "short") == pytest.approx(4.839, abs=0.01)
+    assert G._drift_pct(long_, "long") == pytest.approx(4.615, abs=0.01)
+    # a short filled BELOW where it was sized drifted in its favour
+    good = {"entry_context": {"sized_price": 0.0650}, "entry_price": 0.0620}
+    assert G._drift_pct(good, "short") < 0
+
+
+def test_drift_is_none_without_a_sized_price():
+    from bot.futures_guardian import FuturesGuardian as G
+    assert G._drift_pct({"entry_price": 0.065}, "short") is None
+    assert G._drift_pct({"entry_context": {"sized_price": 0}, "entry_price": 1}, "short") is None
+
+
+def test_character_fields_reach_the_diagnostics_report():
+    from bot.analysis import analyse
+    t = _trade(drift_since_sizing_pct=3.482,
+               entry_context={"change_24h_pct": 108.9, "body_pct": 91.2,
+                              "upper_wick_pct": 5.1, "lower_wick_pct": 3.7})
+    rpt = analyse([t])["execution_diagnostics"]["report"]
+    assert "drift 3.482%" in rpt
+    assert "24h change 108.90%" in rpt
+    assert "body 91.2%" in rpt

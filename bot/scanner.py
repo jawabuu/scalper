@@ -70,6 +70,8 @@ class ScanConfig:
     # acceleration it reads ~1.6x low, and ~1.8x low on a blow-off. Over a
     # normal or quiet tape the two agree, so this only bites when it should.
     recent_tr_candles: int = 3
+    # How many candles to read body/wick structure over.
+    shape_candles: int = 5
     # Half-width of the "at the extreme" band, as a % of the 24h high/low.
     # Was hardcoded at 0.1%. Both the STORJ and TA losses sat at 0.15% from
     # the high and so reported at_extreme=false, while AUTO_MAX_DIST_PCT was
@@ -118,6 +120,9 @@ class Candidate:
     # Current velocity: mean true range of the last few candles, as % of price.
     # Distinct from atr_pct, which lags on an accelerating move.
     recent_tr_pct: float | None = None
+    # How the recent candles are built: body vs wick share of the range.
+    # Distinguishes a full-bodied run from a wick-heavy one of equal ATR.
+    shape: dict = field(default_factory=dict)
     # Stop distance expressed in ATRs: how many typical candle-ranges the stop
     # sits away. Below ~1 the stop is inside normal noise and likely to be hit
     # for reasons unrelated to the thesis.
@@ -172,6 +177,7 @@ class Candidate:
             "atr_pct": None if self.atr_pct is None else round(float(self.atr_pct), 3),
             "recent_tr_pct": (None if self.recent_tr_pct is None
                               else round(float(self.recent_tr_pct), 3)),
+            "shape": dict(self.shape or {}),
             "stop_vs_atr": (None if self.stop_vs_atr is None
                             else round(float(self.stop_vs_atr), 2)),
             "note": str(self.note),
@@ -217,6 +223,47 @@ def recent_tr_pct(df: pd.DataFrame, candles: int = 3) -> float | None:
         return float(v) / px * 100
     except Exception:
         return None
+
+
+def candle_shape(df, candles: int = 5) -> dict:
+    """
+    How the recent candles are BUILT, not how big they are.
+
+    ATR collapses a candle to one number, so a full-bodied vertical run and a
+    wick-heavy chop of the same range read identically. They are opposite
+    situations for a fade: a full body is price being carried, a long wick is
+    price being rejected.
+
+    body_pct        mean |close-open| / (high-low), as %. High = directional.
+    upper_wick_pct  mean upper wick / range, as %. For a SHORT this is
+                    rejection overhead — the thing being faded.
+    lower_wick_pct  the mirror, for a LONG.
+
+    Measurement only — nothing gates on this.
+    """
+    out = {"body_pct": None, "upper_wick_pct": None, "lower_wick_pct": None}
+    try:
+        if df is None or len(df) < 1:
+            return out
+        tail = df.tail(max(1, int(candles)))
+        bodies, uppers, lowers = [], [], []
+        for _, r in tail.iterrows():
+            hi, lo = float(r["high"]), float(r["low"])
+            op, cl = float(r["open"]), float(r["close"])
+            rng = hi - lo
+            if rng <= 0:
+                continue
+            bodies.append(abs(cl - op) / rng * 100)
+            uppers.append((hi - max(op, cl)) / rng * 100)
+            lowers.append((min(op, cl) - lo) / rng * 100)
+        if not bodies:
+            return out
+        out["body_pct"] = round(sum(bodies) / len(bodies), 1)
+        out["upper_wick_pct"] = round(sum(uppers) / len(uppers), 1)
+        out["lower_wick_pct"] = round(sum(lowers) / len(lowers), 1)
+        return out
+    except Exception:
+        return out
 
 
 def breakout_structure(df, high_24h, low_24h, direction: str,
@@ -403,6 +450,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     htf = htf_trend(df)
     close_px = float(row["close"])
     rtr = recent_tr_pct(df, cfg.recent_tr_candles)
+    shp = candle_shape(df, cfg.shape_candles)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -436,7 +484,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct, recent_tr_pct=rtr,
+            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed down — " if gap < 0 else "")
@@ -456,7 +504,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct, recent_tr_pct=rtr,
+            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed up — " if gap > 0 else "")

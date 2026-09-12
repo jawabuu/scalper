@@ -416,6 +416,11 @@ def _diag_row(t: dict) -> dict:
         "trough_roi": t.get("trough_roi"),
         "roi_at_0s": t.get("roi_at_0s"),
         "signal_age_s": t.get("signal_age_s"),
+        "drift_since_sizing_pct": t.get("drift_since_sizing_pct"),
+        "change_24h_pct": ctx.get("change_24h_pct"),
+        "body_pct": ctx.get("body_pct"),
+        "upper_wick_pct": ctx.get("upper_wick_pct"),
+        "lower_wick_pct": ctx.get("lower_wick_pct"),
         "sized_stop_roi": sized,
         "stop_overshoot_roi": overshoot,
         "realised_pnl_usdt": _realised(t),
@@ -471,7 +476,12 @@ def diagnostics_report(rows: list[dict]) -> str:
                    f"dist {_fmt(r['dist_to_extreme_pct'])}%")
         out.append(f"  trigger      : callback {_fmt(r['callback_pct'])}% "
                    f"({r.get('callback_source') or 'n/a'})  "
-                   f"signal_age {_fmt(r['signal_age_s'],1)}s")
+                   f"signal_age {_fmt(r['signal_age_s'],1)}s  "
+                   f"drift {_fmt(r['drift_since_sizing_pct'],3)}%")
+        out.append(f"  character    : 24h change {_fmt(r['change_24h_pct'])}%  "
+                   f"body {_fmt(r['body_pct'],1)}%  "
+                   f"upper_wick {_fmt(r['upper_wick_pct'],1)}%  "
+                   f"lower_wick {_fmt(r['lower_wick_pct'],1)}%")
         out.append(f"  structure    : breakout {_fmt(r['breakout'])} "
                    f"[extreme {_fmt(r['brk_at_extreme'])}, "
                    f"consec {_fmt(r['brk_consecutive'],0)}, "
