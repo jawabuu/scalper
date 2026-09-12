@@ -402,13 +402,55 @@ def _trade(**kw):
     return t
 
 
-def test_lsk_loser_trips_all_four_flags():
+def test_lsk_loser_trips_the_three_live_flags():
+    """
+    thin_callback is off by default — it fired on 76 of 78 real trades and its
+    catches were net positive, so it described the strategy rather than a fault.
+    """
     from bot.analysis import analyse
     d = analyse([_trade()])["execution_diagnostics"]
     assert len(d["rows"]) == 1
     assert set(d["rows"][0]["flags"]) == {
-        "stop_overshoot", "dead_on_arrival", "breakout_entry", "thin_callback"}
+        "stop_overshoot", "dead_on_arrival", "breakout_entry"}
     assert d["rows"][0]["stop_overshoot_roi"] == pytest.approx(12.78, abs=0.01)
+
+
+def test_thin_callback_can_be_switched_back_on():
+    from bot.analysis import _diag_flags
+    t = _trade()
+    assert "thin_callback" not in _diag_flags(t)
+    assert "thin_callback" in _diag_flags(t, thin_callback_pct=1.0)
+
+
+def test_a_flag_that_fires_on_everything_is_called_out():
+    from bot.analysis import _flag_verdict
+    assert "describes the strategy" in _flag_verdict(76, 78, -500.0)
+    assert "net POSITIVE" in _flag_verdict(5, 78, +336.07)
+    assert _flag_verdict(3, 78, -182.87) == "specific and net negative"
+    assert _flag_verdict(0, 78, 0.0) == "never fires"
+
+
+def test_per_flag_split_separates_a_useful_flag_from_a_useless_one():
+    """
+    Mirrors the real sample: stop_overshoot caught 3 losers and no winners;
+    thin_callback caught 7 winners and 3 losers for a net gain.
+    """
+    from bot.analysis import analyse
+    losers = [_trade(symbol=f"L{i}/USDT:USDT", realised_pnl_usdt=-40.0)
+              for i in range(3)]
+    winners = [_trade(symbol=f"W{i}/USDT:USDT", final_roi=50.0, peak_roi=55.0,
+                      realised_pnl_usdt=+60.0, exit_reason="trail",
+                      entry_context={"sized_stop_roi": 30.0})
+               for i in range(7)]
+    split = {r["flag"]: r for r in
+             analyse(losers + winners)["execution_diagnostics"]["by_flag"]}
+    over = split["stop_overshoot"]
+    assert over["winners"] == 0 and over["losers"] == 3
+    assert over["net_pnl"] < 0
+    assert over["verdict"] == "specific and net negative"
+    brk = split["breakout_entry"]
+    assert brk["winners"] == 7
+    assert "describes the strategy" in brk["verdict"] or "net POSITIVE" in brk["verdict"]
 
 
 def test_clean_winner_is_not_flagged():

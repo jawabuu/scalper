@@ -362,10 +362,16 @@ DIAG_TOP_N = 10
 
 STOP_OVERSHOOT_ROI = 5.0     # realised worse than the sized stop by this much
 DEAD_LOSS_ROI = 20.0         # never green, and lost at least this much
-THIN_CALLBACK_PCT = 1.0      # entry callback below this is noise-width
+# A callback threshold of 1.0 fired on 76 of 78 trades, including the biggest
+# WINNER of the sample (STORJ +218.08 on a 0.38% callback — the same 0.38% as
+# a -103.90 loser). A flag that describes the normal trade carries no
+# information. 0 disables it; raise it only if the split table shows the flag
+# actually separating winners from losers.
+THIN_CALLBACK_PCT = 0.0      # 0 = off
 
 
-def _diag_flags(t: dict) -> list[str]:
+def _diag_flags(t: dict, thin_callback_pct: float = THIN_CALLBACK_PCT
+                ) -> list[str]:
     """Which execution problems, if any, this trade shows."""
     flags: list[str] = []
     ctx = t.get("entry_context") or {}
@@ -391,13 +397,28 @@ def _diag_flags(t: dict) -> list[str]:
         flags.append("breakout_entry")
 
     cb = ctx.get("callback_pct")
-    try:
-        if cb is not None and float(cb) < THIN_CALLBACK_PCT:
-            flags.append("thin_callback")
-    except (TypeError, ValueError):
-        pass
+    if thin_callback_pct > 0:
+        try:
+            if cb is not None and float(cb) < thin_callback_pct:
+                flags.append("thin_callback")
+        except (TypeError, ValueError):
+            pass
 
     return flags
+
+
+def _flag_verdict(hits: int, total: int, net_pnl: float) -> str:
+    """
+    Whether a flag is telling you anything. Two ways to be useless: firing on
+    nearly everything, or catching trades that made money.
+    """
+    if not hits:
+        return "never fires"
+    if total and hits / total > 0.6:
+        return "fires on most trades — describes the strategy, not a fault"
+    if net_pnl > 0:
+        return "its catches are net POSITIVE — not a fault"
+    return "specific and net negative"
 
 
 def _diag_severity(row: dict) -> float:
@@ -419,7 +440,7 @@ def _diag_severity(row: dict) -> float:
         return 0.0
 
 
-def _diag_row(t: dict) -> dict:
+def _diag_row(t: dict, thin_callback_pct: float = THIN_CALLBACK_PCT) -> dict:
     """Every field a post-mortem of this trade needs, in one flat row."""
     ctx = t.get("entry_context") or {}
     roi = _roi(t)
@@ -434,7 +455,7 @@ def _diag_row(t: dict) -> dict:
         "symbol": t.get("symbol"),
         "side": t.get("side"),
         "opened_at": t.get("opened_at"),
-        "flags": _diag_flags(t),
+        "flags": _diag_flags(t, thin_callback_pct),
         "final_roi": roi,
         "peak_roi": t.get("peak_roi"),
         "trough_roi": t.get("trough_roi"),
@@ -766,6 +787,30 @@ def analyse(trades: list[dict]) -> dict:
         for f in r["flags"]:
             diag_counts[f] = diag_counts.get(f, 0) + 1
 
+    # Per-flag winners/losers split. A flag only earns its place if what it
+    # catches loses money: thin_callback fired on 76 of 78 trades and its
+    # catches were net POSITIVE, which makes it a description of the strategy
+    # rather than a diagnosis. This table makes that visible without having to
+    # read the rows.
+    diag_split: list[dict] = []
+    for flag in sorted(diag_counts):
+        hits = [r for r in diag_rows if flag in r["flags"]]
+        pnls = [r.get("realised_pnl_usdt") for r in hits]
+        pnls = [float(v) for v in pnls if v is not None]
+        wins = [v for v in pnls if v > 0]
+        losses = [v for v in pnls if v < 0]
+        diag_split.append({
+            "flag": flag,
+            "hits": len(hits),
+            "winners": len(wins),
+            "losers": len(losses),
+            "net_pnl": round(sum(pnls), 2) if pnls else None,
+            "share_of_trades": (round(len(hits) / len(all_trades) * 100, 1)
+                                if all_trades else None),
+            "verdict": _flag_verdict(len(hits), len(all_trades),
+                                     sum(pnls) if pnls else 0.0),
+        })
+
     return {
         "unverified_trades": len(unverified),
         "execution_diagnostics": {
@@ -774,6 +819,7 @@ def analyse(trades: list[dict]) -> dict:
             "omitted": diag_omitted,
             "top_n": DIAG_TOP_N,
             "counts": diag_counts,
+            "by_flag": diag_split,
             "report": diagnostics_report(diag_top, diag_omitted),
             "thresholds": {
                 "stop_overshoot_roi": STOP_OVERSHOOT_ROI,

@@ -1946,9 +1946,17 @@ function timeAgo(iso) {
   return `${Math.floor(s/3600)}h ago`;
 }
 
+// Rewriting innerHTML destroys scroll position, text selection and any
+// expanded detail inside the section. The poll runs every 10s but most
+// sections are unchanged between polls — analysis only moves when a trade
+// closes. Compare first and skip the write when nothing differs, so reading
+// a long section is not interrupted by a refresh that changed nothing.
 function setEl(id, html) {
   const el = document.getElementById(id);
-  if (el) el.innerHTML = html;
+  if (!el) return;
+  if (el._lastHtml === html) return;
+  el._lastHtml = html;
+  el.innerHTML = html;
 }
 
 function setKillUI(isKilled) {
@@ -2786,6 +2794,20 @@ function statTable(title, rows) {
     <tbody>${body}</tbody></table></div>`;
 }
 
+let _lastAnalysisAt = 0;
+let _lastClosedCount = null;
+
+async function maybeRefreshAnalysis(trades) {
+  const n = Array.isArray(trades) ? trades.length
+          : (trades && trades.length) || null;
+  const changed = (n !== null && n !== _lastClosedCount);
+  const stale = (Date.now() - _lastAnalysisAt) > 60000;
+  if (!changed && !stale && _lastAnalysisAt) return;
+  _lastClosedCount = n;
+  _lastAnalysisAt = Date.now();
+  await refreshAnalysis();
+}
+
 async function refreshAnalysis() {
   const panel = document.getElementById('analysis-panel');
   if (!panel) return;
@@ -3007,6 +3029,7 @@ function diagBlock(d) {
     + '%. Ranked by money moved; the chips count ALL ' + total
     + ', not just the rows shown. Rows overlap.</p>'
     + '<div>' + legend + '</div>'
+    + flagSplit(d.by_flag || [])
     + '<table class="stat"><thead><tr><th>trade</th><th>pnl</th>'
     + '<th>roi</th><th>callback</th><th>drift</th><th>24h</th>'
     + '<th>overshoot</th></tr></thead><tbody>' + body + '</tbody></table>'
@@ -3016,6 +3039,28 @@ function diagBlock(d) {
     + '<pre class="diag" style="display:none;white-space:pre-wrap;overflow-x:auto">'
     + esc + '</pre>'
     + '</div>';
+}
+
+// Whether each flag is worth having. A flag that fires on most trades, or
+// whose catches made money, is describing the strategy rather than a fault.
+function flagSplit(rows) {
+  if (!rows.length) return '';
+  const body = rows.map(r => {
+    const bad = r.verdict === 'specific and net negative';
+    return '<tr>'
+      + '<td>' + r.flag + '</td>'
+      + '<td>' + r.hits + (r.share_of_trades !== null && r.share_of_trades !== undefined
+          ? ' <small>(' + r.share_of_trades + '%)</small>' : '') + '</td>'
+      + '<td class="pos">' + r.winners + '</td>'
+      + '<td class="neg">' + r.losers + '</td>'
+      + '<td class="' + ((r.net_pnl || 0) < 0 ? 'neg' : 'pos') + '">'
+      + (r.net_pnl === null || r.net_pnl === undefined ? '—' : r.net_pnl) + '</td>'
+      + '<td><small' + (bad ? '' : ' class="neg"') + '>' + r.verdict + '</small></td>'
+      + '</tr>';
+  }).join('');
+  return '<table class="stat"><thead><tr><th>flag</th><th>hits</th>'
+    + '<th>won</th><th>lost</th><th>net</th><th>verdict</th></tr></thead>'
+    + '<tbody>' + body + '</tbody></table>';
 }
 
 function toggleDiag(btn) {
@@ -3342,7 +3387,10 @@ async function refresh() {
     // Rendering the table first left every row reading "eligible".
     await refreshAuto();
     await refreshScan();
-    await refreshAnalysis();
+    // Analysis only changes when a trade CLOSES, so polling it on the 10s
+    // cadence rewrites a long section for nothing. Once a minute is ample,
+    // and a closed-trade count that has moved forces it immediately.
+    await maybeRefreshAnalysis(trades);
     renderFuturesStats(_lastGuardian, _lastFuturesHist);
     if (status.strategy === 'pullback' && summary && summary.by_regime) {
       renderRegimeStats(summary.by_regime);
