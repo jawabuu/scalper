@@ -354,6 +354,9 @@ class BotConfig:
         "GUARD_FAIL_FAST_MAX_PEAK_ROI", 0.0))
     guard_fail_fast_loss_roi: float = field(default_factory=lambda: _env_float(
         "GUARD_FAIL_FAST_LOSS_ROI", 5.0))
+    # Price-% callback for the rescue trail used when a fixed stop is refused.
+    guard_rescue_trail_callback_pct: float = field(default_factory=lambda: _env_float(
+        "GUARD_RESCUE_TRAIL_CALLBACK_PCT", 2.0))
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(

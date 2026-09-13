@@ -87,6 +87,7 @@ if __name__ == "__main__":
         fail_fast_s=cfg.guard_fail_fast_s,
         fail_fast_max_peak_roi=cfg.guard_fail_fast_max_peak_roi,
         fail_fast_loss_roi=cfg.guard_fail_fast_loss_roi,
+        rescue_trail_callback_pct=cfg.guard_rescue_trail_callback_pct,
         fail_fast_require_worsening=cfg.guard_fail_fast_require_worsening,
         ).validate()
         guardian = FuturesGuardian(

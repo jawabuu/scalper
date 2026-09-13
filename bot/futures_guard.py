@@ -149,6 +149,11 @@ class GuardConfig:
     fail_fast_s: float = 0.0
     fail_fast_max_peak_roi: float = 0.0
     fail_fast_loss_roi: float = 5.0
+    # Callback for the RESCUE trail placed when a fixed stop is refused, as a
+    # PRICE percentage. The armed-phase trail is sized to give back little of a
+    # gain (3% ROI = 0.15% of price at 20x); a rescue needs room to sit outside
+    # noise while still capping the loss, so it gets its own figure.
+    rescue_trail_callback_pct: float = 2.0
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

@@ -885,3 +885,50 @@ def test_snapshot_reports_whether_fail_fast_is_live():
     for secs, expected in ((0.0, False), (60.0, True)):
         cfg = GuardConfig(fail_fast_s=secs)
         assert bool(cfg.fail_fast_s) is expected
+
+
+# ── Rescue trail ────────────────────────────────────────────────────────────
+
+def test_rescue_trail_has_its_own_wider_callback():
+    """
+    The armed-phase trail gives back little of a gain: 3% ROI = 0.15% of price
+    at 20x. A rescue must sit outside noise while capping the loss.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig()
+    assert cfg.rescue_trail_callback_pct == 2.0
+    assert cfg.rescue_trail_callback_pct > cfg.trail_callback_pct
+
+
+def test_rescue_trail_ignores_the_profit_lock_test():
+    """
+    _place_native_trail refuses when trail_locks_in() <= 0 — it asks whether a
+    GAIN would be preserved. On a losing position that is the wrong question,
+    and refusing left LSK 23:05 with no stop at all down to -61.31%.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._place_native_trail)
+    rescue_block = src[src.index("if rescue:"):src.index("cb = trail_callback_price_pct")]
+    assert "locked" not in rescue_block
+    # The params actually sent: callbackRate only. No activationPrice means
+    # Binance activates it at the current mark rather than waiting for a
+    # profit level that a losing position will never reach.
+    params = [l for l in rescue_block.splitlines() if "params={" in l]
+    assert params and "callbackRate" in params[0]
+    assert "activationPrice" not in params[0]
+
+
+def test_rescue_is_requested_when_a_fixed_stop_is_refused():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    assert "_place_native_trail(pos, rescue=True)" in src
+
+
+def test_the_refusal_reason_is_logged():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    assert "stop REFUSED by the exchange" in src
+    assert "exchange said: {msg}" in src

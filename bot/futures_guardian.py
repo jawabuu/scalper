@@ -976,7 +976,8 @@ class FuturesGuardian:
         self._split_stop_ids[pos.symbol] = ids
         return ids[0]
 
-    def _place_native_trail(self, pos: FuturesPosition) -> str | None:
+    def _place_native_trail(self, pos: FuturesPosition,
+                            rescue: bool = False) -> str | None:
         """
         Place Binance's own TRAILING_STOP_MARKET for the armed phase.
 
@@ -989,6 +990,36 @@ class FuturesGuardian:
         than at startup.
         """
         lev = pos.effective_leverage
+        if rescue:
+            # RESCUE trail: the fixed stop was refused and this is the only
+            # protection the position will get. Its job is to CAP THE LOSS, not
+            # to lock in profit, so it uses its own wider callback and skips
+            # the lock-in test entirely — that test asks whether the trail
+            # would preserve a gain, which is the wrong question when the
+            # position is already losing. Without an activationPrice Binance
+            # activates it immediately at the current mark and trails from
+            # there, so it fires on a `rescue_callback_pct` adverse move.
+            cb = max(0.1, float(self.cfg.rescue_trail_callback_pct))
+            qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
+            side = stop_side(pos)
+            if self.dry_run:
+                log.info(f"[DRY RUN] would place RESCUE {side} "
+                         f"TRAILING_STOP_MARKET reduceOnly {qty_str} "
+                         f"{pos.symbol} callbackRate={cb}%")
+                return f"dry-rescue-{int(time.time()*1000)}"
+            order = self.exchange.create_order(
+                symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
+                amount=float(qty_str), price=None,
+                params={"callbackRate": cb, "reduceOnly": True},
+            )
+            oid = str(order.get("id") or order.get("orderId") or "")
+            log.warning(
+                f"{pos.symbol}: RESCUE trailing stop placed — activates now, "
+                f"closes on a {cb}% adverse move ({cb * lev:.0f}% ROI at "
+                f"{lev:.0f}x). This caps the loss; it does not lock in profit. "
+                f"id={oid}")
+            return oid
+
         cb = trail_callback_price_pct(lev, self.cfg)
         locked = trail_locks_in(lev, self.cfg)
         if locked <= 0:
@@ -1324,9 +1355,19 @@ class FuturesGuardian:
                     # error: the position is unprotected until the operator acts.
                     # Deliberately not auto-closing — that is the operator's call.
                     cur = roi_pct(pos, price)
-                    # The fixed stop cannot be placed because the position has
-                    # already moved past it — which means it is IN PROFIT and
-                    # its gains are exactly what needs protecting. Fall back to
+                    # Log what the exchange actually said, with the numbers
+                    # needed to explain it. Without these a rejection at -2.0%
+                    # ROI on a position whose stop was 28 points away could not
+                    # be diagnosed at all.
+                    log.error(
+                        f"{pos.symbol}: stop REFUSED by the exchange — "
+                        f"stop_price={stop_price} mark={price} "
+                        f"side={pos.side} entry={pos.entry_price} "
+                        f"roi={cur:+.1f}% intended_stop={-abs(stop_roi_used):+.1f}% ROI "
+                        f"| exchange said: {msg}")
+                    # NOTE: the comment that used to sit here assumed a refused
+                    # stop meant the position was IN PROFIT. LSK 23:07 was
+                    # refused at -2.0% ROI, so that is false. Fall back to
                     # a trailing stop rather than leaving it naked.
                     # Which side of the stop are we on? Past it in the WINNING
                     # direction means gains to protect — trail. Past it in the
@@ -1363,7 +1404,10 @@ class FuturesGuardian:
                     trail_id = None
                     if self.cfg.use_native_trail and not state.native_trail_id:
                         try:
-                            trail_id = self._place_native_trail(pos)
+                            # rescue=True: this is the only protection this
+                            # position will get, so it must cap the loss rather
+                            # than try to preserve a gain that does not exist.
+                            trail_id = self._place_native_trail(pos, rescue=True)
                         except Exception as te:
                             log.error(f"{pos.symbol}: trailing fallback failed: {te}")
                     if trail_id:
@@ -1373,7 +1417,8 @@ class FuturesGuardian:
                         state.unprotected_reason = None
                         log.warning(
                             f"{pos.symbol}: fixed stop rejected at {cur:+.1f}% ROI "
-                            f"— protected with a trailing stop instead."
+                            f"— protected with a RESCUE trailing stop instead "
+                            f"(caps further loss; not a profit lock)."
                         )
                         self._record(pos.symbol, "trail_fallback",
                                      f"fixed stop rejected at {cur:+.1f}% ROI; "
