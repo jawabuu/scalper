@@ -72,6 +72,10 @@ class ScanConfig:
     recent_tr_candles: int = 3
     # How many candles back to look for the taper comparison.
     taper_window: int = 6
+    # Window for the U/V turn test, and how many candles the low must be
+    # behind us before it counts as crossed rather than still forming.
+    turn_lookback: int = 10
+    turn_min_bars_since: int = 2
     # How many candles to read body/wick structure over.
     shape_candles: int = 5
     # Half-width of the "at the extreme" band, as a % of the 24h high/low.
@@ -122,6 +126,9 @@ class Candidate:
     # always computed this; the long branch recorded the raw delta and threw
     # the verdict away, so "recovering" in its own comment was never tested.
     gap_narrowing: bool = False
+    # Right side of a U or V: the fast EMA's low is behind us and it is rising
+    # off it. Distinct from gap_narrowing, which is only a two-point shrink.
+    turn: dict = field(default_factory=dict)
     atr_pct: float | None = None
     # Current velocity: mean true range of the last few candles, as % of price.
     # Distinct from atr_pct, which lags on an accelerating move.
@@ -172,6 +179,7 @@ class Candidate:
             "breakout": dict(self.breakout or {}),
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "gap_narrowing": bool(self.gap_narrowing),
+            "turn": dict(self.turn or {}),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
             # 24h range context. These were dropped when as_row() was rewritten
@@ -457,6 +465,53 @@ def gap_series(df: pd.DataFrame) -> pd.Series:
     return (df["ema_fast"] - df["ema_slow"]) / df["ema_slow"] * 100
 
 
+def turned_up(df: pd.DataFrame, cfg: ScanConfig) -> dict:
+    """
+    Is this the RIGHT side of a U or a V — has the bottom been crossed?
+
+    is_converging() asks only whether the gap is smaller than it was N candles
+    ago. That is a two-point comparison: a collapsing market can post a smaller
+    absolute gap after one pause and read as "narrowing" while EMA9 sits far
+    below EMA21 and is still falling. USELESS at 18:06 was exactly that, and it
+    lost 36% in ten seconds.
+
+    What actually distinguishes a turn is that the LOW IS BEHIND US:
+
+      * the fast EMA's minimum within the window is at least
+        `turn_min_bars_since` candles back — a bottom still forming is not a
+        bottom crossed
+      * the fast EMA now sits above that minimum — it is rising off it, not
+        flat along it
+
+    This needs no magnitude threshold. "How close is close enough" would be a
+    number invented from a couple of charts; "the low is behind us and we are
+    above it" is a structural fact about the series.
+
+    Returns bars_since_low and rise_pct alongside the verdict so the strictness
+    can be judged from recorded data rather than argued about.
+    """
+    out = {"turned_up": False, "bars_since_low": None, "rise_pct": None}
+    try:
+        lb = max(3, int(cfg.turn_lookback))
+        if df is None or "ema_fast" not in df or len(df) < lb:
+            return out
+        fast = df["ema_fast"].tail(lb).reset_index(drop=True)
+        if fast.isna().any():
+            return out
+        i_min = int(fast.idxmin())
+        bars_since = len(fast) - 1 - i_min
+        low = float(fast.iloc[i_min])
+        now = float(fast.iloc[-1])
+        out["bars_since_low"] = bars_since
+        out["rise_pct"] = round((now - low) / low * 100, 3) if low else None
+        if bars_since < int(cfg.turn_min_bars_since):
+            return out                      # the bottom is still forming
+        out["turned_up"] = bool(now > low)  # rising off it
+        return out
+    except Exception:
+        return out
+
+
 def is_converging(df: pd.DataFrame, cfg: ScanConfig) -> tuple[bool, float]:
     """
     Is the EMA gap NARROWING toward a cross?
@@ -531,6 +586,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     shp = candle_shape(df, cfg.shape_candles)
     tap_short = candle_taper(df, "short", cfg.taper_window)
     tap_long = candle_taper(df, "long", cfg.taper_window)
+    turn = turned_up(df, cfg)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -562,7 +618,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing,
-            change_24h_pct=change_24h_pct,
+            turn=turn, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -583,7 +639,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing,
-            change_24h_pct=change_24h_pct,
+            turn=turn, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,

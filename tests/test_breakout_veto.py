@@ -34,7 +34,8 @@ def _long(**kw):
     mirror of the STORJ/TA case."""
     row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 40.0,
            "pct_above_24h_low": 0.1, "pct_below_24h_high": -60.0,
-           "strength": "strengthening", "gap_narrowing": True}
+           "strength": "strengthening", "gap_narrowing": True,
+           "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2}}
     row.update(kw)
     return row
 
@@ -1129,7 +1130,8 @@ def _long_cand(**kw):
     row = {"symbol": "4/USDT:USDT", "direction": "long", "rsi": 48.0,
            "pct_above_24h_low": 1.13, "pct_below_24h_high": -19.26,
            "strength": "strengthening", "atr_pct": 0.6,
-           "gap_narrowing": True, "gap_narrowing_pct": -0.4}
+           "gap_narrowing": True, "gap_narrowing_pct": -0.4,
+           "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2}}
     row.update(kw)
     return row
 
@@ -1411,3 +1413,88 @@ def test_at_the_operators_settings_the_floor_clears_fees():
     g._ensure_profit_floor(_FloorPos(), st, 0.1354)
     assert st.floor_roi == 2.0
     assert st.floor_roi > 1.9      # net positive after the round trip
+
+
+# ── The U/V turn: the low must be BEHIND us ────────────────────────────────
+#
+# USELESS 18:06 was bought one second before a 36% drop. gap_narrowing passed
+# it because that test compares the gap now against N candles ago — two
+# points. A market still collapsing can post a smaller absolute gap after one
+# pause and read as "narrowing" while the fast EMA keeps making new lows.
+
+def _turn_frame(vals):
+    pd = pytest.importorskip("pandas")
+    return pd.DataFrame({"ema_fast": vals,
+                         "ema_slow": [v * 1.01 for v in vals]})
+
+
+def test_the_right_side_of_a_V_is_a_turn():
+    from bot.scanner import turned_up, ScanConfig
+    t = turned_up(_turn_frame([1.10,1.07,1.04,1.00,1.02,1.04,1.06,1.08,1.10,1.12]),
+                  ScanConfig())
+    assert t["turned_up"] is True
+    assert t["bars_since_low"] >= 2
+    assert t["rise_pct"] > 0
+
+
+def test_a_flat_bottomed_U_counts_once_it_lifts():
+    from bot.scanner import turned_up, ScanConfig
+    t = turned_up(_turn_frame([1.10,1.05,1.01,1.00,1.00,1.00,1.01,1.03,1.05,1.07]),
+                  ScanConfig())
+    assert t["turned_up"] is True
+
+
+def test_a_market_still_falling_is_not_a_turn():
+    """USELESS 18:06. The low IS the latest bar."""
+    from bot.scanner import turned_up, ScanConfig
+    t = turned_up(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.99,0.98]),
+                  ScanConfig())
+    assert t["turned_up"] is False
+    assert t["bars_since_low"] == 0
+
+
+def test_a_pause_that_resumes_falling_is_not_a_turn():
+    """The case a two-point gap comparison cannot see."""
+    from bot.scanner import turned_up, ScanConfig
+    t = turned_up(_turn_frame([1.10,1.06,1.02,1.00,1.01,1.00,0.98,0.96,0.94,0.92]),
+                  ScanConfig())
+    assert t["turned_up"] is False
+
+
+def test_a_bottom_still_forming_does_not_count():
+    """min_bars_since: a low made on the last bar is not a low crossed."""
+    from bot.scanner import turned_up, ScanConfig
+    t = turned_up(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.995,0.99]),
+                  ScanConfig())
+    assert t["turned_up"] is False
+
+
+def test_the_long_gate_refuses_without_a_turn():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    row = _long_cand()
+    row["turn"] = {"turned_up": False, "bars_since_low": 0, "rise_pct": 0.0}
+    d = evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6)
+    assert not d.enter
+    assert "no turn yet" in d.reason
+
+
+def test_shorts_are_not_subject_to_the_turn():
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=False)
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    row["turn"] = {"turned_up": False, "bars_since_low": 0, "rise_pct": 0.0}
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+def test_the_turn_requirement_can_be_switched_off():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52,
+                          long_require_turn=False)
+    row = _long_cand()
+    row["turn"] = {"turned_up": False, "bars_since_low": 0, "rise_pct": 0.0}
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_a_missing_turn_block_refuses():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    row = _long_cand()
+    row.pop("turn", None)
+    assert not evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter

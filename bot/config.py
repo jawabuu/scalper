@@ -319,6 +319,14 @@ class BotConfig:
     # were first seen, so a recovering position is never cut on depth alone.
     guard_fail_fast_require_worsening: bool = field(default_factory=lambda: _env_bool(
         "GUARD_FAIL_FAST_REQUIRE_WORSENING", False))
+    # Longs only: require the RIGHT side of a U/V — the fast EMA's low behind
+    # us and rising off it. Default TRUE.
+    auto_long_require_turn: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_LONG_REQUIRE_TURN", True))
+    auto_turn_lookback: int = field(default_factory=lambda: _env_int(
+        "AUTO_TURN_LOOKBACK", 10))
+    auto_turn_min_bars_since: int = field(default_factory=lambda: _env_int(
+        "AUTO_TURN_MIN_BARS_SINCE", 2))
     # Longs only: require the EMA gap to be narrowing. Default TRUE — the
     # condition the scanner's own comment already claimed to apply.
     auto_long_require_convergence: bool = field(default_factory=lambda: _env_bool(

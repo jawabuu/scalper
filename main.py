@@ -171,6 +171,8 @@ if __name__ == "__main__":
             min_atr_pct=cfg.scan_min_atr_pct,
             max_atr_pct=cfg.scan_max_atr_pct,
             recent_tr_candles=cfg.auto_recent_tr_candles,
+            turn_lookback=cfg.auto_turn_lookback,
+            turn_min_bars_since=cfg.auto_turn_min_bars_since,
             extreme_band_pct=cfg.scan_extreme_band_pct,
             # Express the guardian's stop in ATRs: at L leverage a -R% ROI stop
             # is an R/L % price move.
@@ -207,6 +209,7 @@ if __name__ == "__main__":
                     max_dist_to_extreme_pct=cfg.auto_max_dist_pct,
                     veto_breakout=cfg.auto_veto_breakout,
                     long_require_convergence=cfg.auto_long_require_convergence,
+                    long_require_turn=cfg.auto_long_require_turn,
                     callback_use_velocity=cfg.auto_callback_use_velocity,
                     **({"callback_min_pct": cfg.auto_callback_min_pct}
                        if cfg.auto_callback_min_pct > 0 else {}),
