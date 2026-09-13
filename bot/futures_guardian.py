@@ -1159,9 +1159,19 @@ class FuturesGuardian:
                  f"| guardian holds [{held}] | exchange has {len(prot)} "
                  f"protective order(s), {len(trails)} trailing")
 
+        if not live:
+            # The listing returned NOTHING AT ALL — not "your orders are gone"
+            # but "I cannot see any orders on this symbol". The account-wide
+            # probe has been observed returning empty while orders demonstrably
+            # rested. Claiming UNPROTECTED here cries wolf on every cycle.
+            log.info(f"PROTECTION-BLIND {pos.symbol}: the order listing "
+                     f"returned nothing at all, so the audit cannot confirm "
+                     f"anything. guardian holds [{held}].")
+            return
         if not prot:
-            log.warning(f"PROTECTION-UNPROTECTED {pos.symbol}: NOTHING "
-                        f"protective is resting. guardian holds [{held}].")
+            log.warning(f"PROTECTION-UNPROTECTED {pos.symbol}: the listing "
+                        f"returned {len(live)} order(s) but NONE is protective. "
+                        f"guardian holds [{held}].")
         for name, oid in tracked.items():
             if oid and oid not in live_ids:
                 log.warning(f"PROTECTION-MISSING {pos.symbol}: tracked {name} "
@@ -1250,21 +1260,32 @@ class FuturesGuardian:
             log.error(f"{pos.symbol}: could not place the profit floor: "
                       f"{_safe_err(e)}")
 
-    def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None):
-        """Cancel protective stops for this symbol other than the current one."""
+    def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None,
+                                 state=None):
+        """
+        Cancel protective stops for this symbol other than the current one.
+
+        `state` MUST be the live object manage_position is working on. It used
+        to read self._states[symbol], but manage_position mutates a LOCAL state
+        and only writes it back later — so a trail or floor placed earlier in
+        the same cycle was invisible here and got cancelled as superseded.
+
+        SOLV 19:26:49 lost its adaptive trail to exactly that, one second after
+        it was placed.
+        """
         ids = list(self._all_stop_ids.get(pos.symbol) or [])
-        # The profit floor is deliberately NOT superseded. It is the guarantee
-        # that a position which has been well ahead does not close at a loss,
-        # and arming the trail cancelling it is precisely the bug this fixes.
-        floor_id = (self._states.get(pos.symbol).floor_stop_id
-                    if self._states.get(pos.symbol) else None)
+        st_ = state if state is not None else self._states.get(pos.symbol)
+        # Never superseded: the profit floor is the guarantee that a position
+        # which has been well ahead does not close at a loss, and the adaptive
+        # trail is the protection that does not depend on the guardian's poll.
+        protected = {i for i in (
+            getattr(st_, "floor_stop_id", None),
+            getattr(st_, "adaptive_trail_id", None),
+        ) if i} if st_ else set()
         for oid in ids:
             if keep and oid == keep:
                 continue
-            if floor_id and oid == floor_id:
-                continue
-            st_ = self._states.get(pos.symbol)
-            if st_ and st_.adaptive_trail_id and oid == st_.adaptive_trail_id:
+            if oid in protected:
                 continue
             if self._cancel_stop(pos, oid):
                 self._all_stop_ids[pos.symbol] = [
@@ -1492,7 +1513,8 @@ class FuturesGuardian:
             # the position closed, still able to fire at a level the trade has
             # long left behind. Retry the sweep each cycle; it is a no-op once
             # nothing is superseded.
-            self._cancel_superseded_stops(pos, keep=state.native_trail_id)
+            self._cancel_superseded_stops(pos, keep=state.native_trail_id,
+                                          state=state)
             with self._lock:
                 self._states[pos.symbol] = state
             return
@@ -1715,7 +1737,7 @@ class FuturesGuardian:
             # Sweep any earlier stops whose cancel did not take. Harmless
             # individually, but they accumulate and can fire against a LATER
             # position on the same symbol.
-            self._cancel_superseded_stops(pos, keep=new_id)
+            self._cancel_superseded_stops(pos, keep=new_id, state=state)
             log.info(f"{pos.symbol}: {reason} | ROI now {roi_pct(pos, price):+.1f}% "
                      f"| stop @ {stop_price}")
             self._record(pos.symbol, "stop_set",

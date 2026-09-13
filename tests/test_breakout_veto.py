@@ -1880,11 +1880,49 @@ def _po(oid, typ="STOP_MARKET"):
     return {"id": oid, "type": typ, "reduce_only": True}
 
 
-def test_audit_flags_a_position_with_nothing_resting(caplog):
+def test_an_empty_listing_is_reported_as_BLIND_not_unprotected(caplog):
+    """
+    SOLV 19:26: the listing returned nothing at all and the audit shouted
+    UNPROTECTED twice while two orders were resting. A listing that sees
+    nothing cannot prove anything.
+    """
     g, st = _audit_guardian([], stop_order_id="fix")
+    with caplog.at_level("INFO"):
+        g._audit_protection(_TrailPos(), st)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "PROTECTION-BLIND" in msgs
+    assert "PROTECTION-UNPROTECTED" not in msgs
+    assert "PROTECTION-MISSING" not in msgs
+
+
+def test_a_listing_with_orders_but_none_protective_IS_unprotected(caplog):
+    g, st = _audit_guardian(
+        [{"id": "entry", "type": "TRAILING_STOP_MARKET", "reduce_only": False}],
+        stop_order_id="fix")
     with caplog.at_level("WARNING"):
         g._audit_protection(_TrailPos(), st)
     assert any("PROTECTION-UNPROTECTED" in r.message for r in caplog.records)
+
+
+def test_a_trail_placed_this_cycle_is_not_superseded(caplog):
+    """
+    The exemption used to read self._states[symbol], but manage_position
+    mutates a LOCAL state and writes it back later — so an order placed
+    earlier in the same cycle was invisible and got cancelled. SOLV lost its
+    adaptive trail one second after it was placed.
+    """
+    from bot.futures_guard import GuardState
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g._states = {}                      # nothing written back yet
+    g._all_stop_ids = {"X/USDT:USDT": ["trail-live", "old-stop"]}
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    live = GuardState()
+    live.adaptive_trail_id = "trail-live"
+    g._cancel_superseded_stops(_TrailPos(), keep=None, state=live)
+    assert "trail-live" not in cancelled
+    assert "old-stop" in cancelled
 
 
 def test_audit_flags_a_tracked_id_the_exchange_does_not_have(caplog):
