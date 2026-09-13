@@ -1534,3 +1534,280 @@ def test_the_same_series_reads_oppositely_for_the_two_sides():
     falling = _turn_frame([1.10,1.07,1.04,1.00,0.97,0.94,0.91,0.88,0.85,0.82])
     assert turned(falling, ScanConfig(), "long")["turned_up"] is False
     assert turned(falling, ScanConfig(), "short")["turned_up"] is True
+
+
+# ── Adaptive trail: the stop distance, managed by the exchange ─────────────
+
+def _trail_guardian(**cfgkw):
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    base = dict(adaptive_trail_enabled=True, rescue_trail_callback_pct=0.1)
+    base.update(cfgkw)
+    g.cfg = GuardConfig(**base)
+    g._all_stop_ids, g._states, g.placed = {}, {}, []
+    g._record = lambda *a, **k: None
+    g.dry_run = False
+
+    def _native(pos, rescue=False):
+        g.placed.append(g.cfg.rescue_trail_callback_pct)
+        return f"trail-{len(g.placed)}"
+    g._place_native_trail = _native
+    return g
+
+
+class _TrailPos:
+    symbol = "X/USDT:USDT"
+    side = "short"
+    entry_price = 0.1382
+    qty = 12642.0
+    leverage = 20
+    effective_leverage = 20.0
+    margin = 87.36
+
+
+def test_callback_is_the_stop_expressed_as_price():
+    """30% ROI at 20x is 1.50% of price; the same stop at 10x is 3.00%."""
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    g._ensure_adaptive_trail(_TrailPos(), st, 30.0)
+    assert g.placed == [1.5]
+
+    class P10(_TrailPos):
+        effective_leverage = 10.0
+    g2 = _trail_guardian()
+    g2._ensure_adaptive_trail(P10(), GuardState(), 30.0)
+    assert g2.placed == [3.0]
+
+
+def test_it_tracks_each_trade_s_own_stop():
+    """sized_stop_roi varies 16-30 across real trades; the trail follows it."""
+    from bot.futures_guard import GuardState
+    for stop_roi, expect in ((17.5, 0.88), (22.0, 1.1), (26.3, 1.31)):
+        g = _trail_guardian()
+        g._ensure_adaptive_trail(_TrailPos(), GuardState(), stop_roi)
+        assert g.placed == [expect], (stop_roi, g.placed)
+
+
+def test_off_by_default():
+    from bot.futures_guard import GuardConfig, GuardState
+    g = _trail_guardian(adaptive_trail_enabled=False)
+    g._ensure_adaptive_trail(_TrailPos(), GuardState(), 30.0)
+    assert g.placed == []
+    assert GuardConfig().adaptive_trail_enabled is False
+
+
+def test_never_placed_twice():
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    for _ in range(20):
+        g._ensure_adaptive_trail(_TrailPos(), st, 30.0)
+    assert len(g.placed) == 1
+
+
+def test_a_restart_does_not_place_a_second(tmp_path):
+    from bot import futures_state
+    from bot.futures_guard import GuardState
+    st = GuardState()
+    st.adaptive_trail_id = "trail-1"
+    path = str(tmp_path / "s.json")
+    futures_state.save(path, states={"X/USDT:USDT": st}, pos_meta={},
+                       closed_trades=[], owner="t")
+    back = futures_state.restore_states(
+        futures_state.load(path, owner="t"))["X/USDT:USDT"]
+    assert back.adaptive_trail_id == "trail-1"
+    g = _trail_guardian()
+    g._ensure_adaptive_trail(_TrailPos(), back, 30.0)
+    assert g.placed == []
+
+
+def test_out_of_band_callbacks_leave_the_fixed_stop_alone():
+    """Binance accepts 0.1-10%. Outside that, do nothing rather than guess."""
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    g._ensure_adaptive_trail(_TrailPos(), GuardState(), 1.0)   # 0.05% — too tight
+    assert g.placed == []
+    g2 = _trail_guardian()
+    g2._ensure_adaptive_trail(_TrailPos(), GuardState(), 400.0)  # 20% — too wide
+    assert g2.placed == []
+
+
+def test_it_is_not_superseded_when_other_stops_are_cancelled():
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    st.adaptive_trail_id = "trail-1"
+    g._states["X/USDT:USDT"] = st
+    g._all_stop_ids["X/USDT:USDT"] = ["trail-1", "old-stop"]
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_superseded_stops(_TrailPos(), keep=None)
+    assert "trail-1" not in cancelled
+    assert "old-stop" in cancelled
+
+
+def test_arming_cancels_the_adaptive_trail_rather_than_stacking():
+    """
+    The armed trail is ~0.15% of price; the adaptive one is the stop distance,
+    ~1.5%. Two reduce-only trails would rest together and only the tight one
+    could ever fire. Exactly the stacking to avoid.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    i = src.index("if trail_id:")
+    block = src[i:i + 1400]
+    assert "state.adaptive_trail_id" in block
+    assert "superseded by the" in block
+    assert "state.adaptive_trail_id = None" in block
+
+
+def test_the_adaptive_trail_is_not_placed_once_a_trail_is_armed():
+    """The other direction: no adaptive trail on top of an armed one."""
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    st.native_trail_id = "armed-1"
+    g._ensure_adaptive_trail(_TrailPos(), st, 30.0)
+    assert g.placed == []
+
+
+def test_selection_and_entry_never_reach_it():
+    import inspect
+    from bot import auto_trader, futures_entry
+    for mod in (auto_trader, futures_entry):
+        assert "_ensure_adaptive_trail" not in inspect.getsource(mod)
+
+
+def test_a_refused_stop_does_not_add_a_rescue_on_top_of_the_adaptive_trail():
+    """
+    The rescue path guarded only on native_trail_id. With the adaptive trail
+    resting, a refused fixed stop would have placed a 0.1% rescue on top of a
+    ~1.5% adaptive trail — two trails, a duplicate.
+
+    It is also no longer an emergency: the adaptive trail went on at adoption,
+    so there is no unprotected window to rescue from.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    i = src.index("fixed stop refused")
+    assert "state.adaptive_trail_id" in src[max(0, i - 800):i]
+    assert "no second trail placed" in src
+
+
+def test_fail_fast_reads_no_orders_at_all():
+    """It must keep working whatever is resting on the exchange."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._should_fail_fast)
+    for token in ("adaptive_trail_id", "floor_stop_id", "stop_order_id",
+                  "native_trail_id"):
+        assert token not in src, token
+
+
+def test_the_fixed_stop_is_still_placed_alongside():
+    """
+    The adaptive trail is insurance-backed, not a replacement: _ensure_adaptive
+    _trail must not short-circuit the stop logic below it.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    i = src.index("_ensure_adaptive_trail")
+    after = src[i:]
+    assert "return" not in after.split("\n")[0]
+    assert "_place_stop" in after or "stop_price" in after
+
+
+# ── Cleanup and reaping, end to end ────────────────────────────────────────
+
+def _sweep_guardian(orders, live):
+    """The real reap_orphan_stops with its exchange calls stubbed out."""
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+
+    class _Pos:
+        def __init__(self, sym): self.symbol = sym
+
+    import threading
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g._states, g.cancelled = {}, []
+    g._lock = threading.RLock()
+    g._pending_cancels, g._cancel_attempts = {}, {}
+    g._cancelled_ids = set()
+    g._all_stop_ids = {}
+    g._record = lambda *a, **k: None
+    g._cancel_any = lambda oid, sym: (g.cancelled.append(oid), True)[1]
+    g._clear_pending_cancel = lambda *a: None
+    g._queue_pending_cancel = lambda *a: None
+    g.fetch_positions = lambda: [_Pos(s) for s in live]
+    g._all_open_orders_raw = lambda: list(orders)
+    g._normalise_order = lambda o: dict(o)
+    g._orphan_scan_symbols = lambda live_set: []
+    g.exchange = type("X", (), {"fetch_open_orders": staticmethod(lambda s: [])})()
+    return g
+
+
+def _ord(oid, sym="X/USDT:USDT", typ="STOP_MARKET", ts=1, ro=True):
+    return {"id": oid, "symbol": sym, "type": typ, "reduce_only": ro, "ts": ts}
+
+
+def test_the_sweep_does_not_cancel_the_deliberate_protective_set():
+    """
+    It used to trim a live position to ONE stop. With three intentional orders
+    that would have cancelled the PROFIT FLOOR — the one that must survive.
+    """
+    from bot.futures_guard import GuardState
+    orders = [_ord("fix", ts=1), _ord("trail", typ="TRAILING_STOP_MARKET", ts=2),
+              _ord("floor", ts=3)]
+    g = _sweep_guardian(orders, {"X/USDT:USDT"})
+    st = GuardState()
+    st.stop_order_id, st.adaptive_trail_id, st.floor_stop_id = "fix", "trail", "floor"
+    g._states["X/USDT:USDT"] = st
+    g.reap_orphan_stops()
+    assert g.cancelled == []
+
+
+def test_an_untracked_extra_on_a_live_position_is_still_swept():
+    """A superseded ratchet whose cancel never took must still go."""
+    from bot.futures_guard import GuardState
+    orders = [_ord("floor", ts=3), _ord("ghost-a", ts=1), _ord("ghost-b", ts=2)]
+    g = _sweep_guardian(orders, {"X/USDT:USDT"})
+    st = GuardState()
+    st.floor_stop_id = "floor"
+    g._states["X/USDT:USDT"] = st
+    g.reap_orphan_stops()
+    assert "floor" not in g.cancelled
+    assert "ghost-a" in g.cancelled          # older of the two untracked
+
+
+def test_orphans_on_a_dead_symbol_are_swept_including_trails():
+    orders = [_ord("s1"), _ord("t1", typ="TRAILING_STOP_MARKET")]
+    g = _sweep_guardian(orders, set())
+    g.reap_orphan_stops()
+    assert set(g.cancelled) == {"s1", "t1"}
+
+
+def test_entry_orders_are_never_touched():
+    g = _sweep_guardian(
+        [_ord("entry", typ="TRAILING_STOP_MARKET", ro=False)], set())
+    g.reap_orphan_stops()
+    assert g.cancelled == []
+
+
+def test_a_trailing_stop_counts_as_protective():
+    """is_protective_stop matches on 'STOP' in the type — TRAILING_STOP_MARKET
+    contains it, so trails are adopted and reaped like any other stop."""
+    from bot.futures_guard import is_protective_stop
+
+    class P:
+        side = "short"
+    for typ in ("STOP_MARKET", "TRAILING_STOP_MARKET"):
+        assert is_protective_stop(
+            {"reduceOnly": True, "side": "buy", "type": typ}, P())
+    assert not is_protective_stop(
+        {"reduceOnly": False, "side": "buy", "type": "TRAILING_STOP_MARKET"}, P())

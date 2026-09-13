@@ -1056,6 +1056,49 @@ class FuturesGuardian:
         )
         return oid
 
+    def _ensure_adaptive_trail(self, pos: FuturesPosition, state, stop_roi: float):
+        """
+        A native trail at THIS position's stop distance, placed at adoption.
+
+        callbackRate = stop_roi / leverage, i.e. the stop expressed as a price
+        percentage. Across 158 recorded trades that lands between 0.69% and
+        2.53% — inside Binance's 0.1-10% band with no clamping.
+
+        Placed ONCE, guarded the same way as the profit floor: it returns if an
+        id is already held, the id is persisted so a restart cannot place a
+        second, and the level does not ratchet on this side.
+        """
+        if not getattr(self.cfg, "adaptive_trail_enabled", False):
+            return
+        if state.adaptive_trail_id or state.native_trail_id:
+            return
+        lev = pos.effective_leverage or 1.0
+        cb = round(abs(stop_roi) / lev, 2)
+        if cb < 0.1 or cb > 10:
+            log.warning(f"{pos.symbol}: adaptive trail {cb}% outside the "
+                        f"0.1-10% band — leaving the fixed stop alone")
+            return
+        try:
+            saved = self.cfg.rescue_trail_callback_pct
+            try:
+                self.cfg.rescue_trail_callback_pct = cb
+                oid = self._place_native_trail(pos, rescue=True)
+            finally:
+                self.cfg.rescue_trail_callback_pct = saved
+            if not oid:
+                return
+            state.adaptive_trail_id = oid
+            self._all_stop_ids.setdefault(pos.symbol, []).append(oid)
+            log.warning(
+                f"{pos.symbol}: ADAPTIVE TRAIL placed, callback {cb}% of price "
+                f"= {abs(stop_roi):.1f}% ROI at {lev:.0f}x. Exchange-managed, "
+                f"tick-by-tick — it does not depend on the guardian's poll.")
+            self._record(pos.symbol, "adaptive_trail",
+                         f"trail {cb}% price / {abs(stop_roi):.1f}% ROI")
+        except Exception as e:
+            log.error(f"{pos.symbol}: adaptive trail failed, fixed stop "
+                      f"remains: {_safe_err(e)}")
+
     def _cancel_profit_floor(self, symbol: str, state):
         """
         Drop the floor when the position closes.
@@ -1135,6 +1178,9 @@ class FuturesGuardian:
             if keep and oid == keep:
                 continue
             if floor_id and oid == floor_id:
+                continue
+            st_ = self._states.get(pos.symbol)
+            if st_ and st_.adaptive_trail_id and oid == st_.adaptive_trail_id:
                 continue
             if self._cancel_stop(pos, oid):
                 self._all_stop_ids[pos.symbol] = [
@@ -1352,6 +1398,7 @@ class FuturesGuardian:
         # only watches. This is what removes the polling gap.
         # Before anything else: once the position has been far enough ahead it
         # gets a hard floor that nothing below cancels.
+        self._ensure_adaptive_trail(pos, state, _stop_roi_used)
         self._ensure_profit_floor(pos, state, price)
 
         if state.native_trail_id:
@@ -1382,6 +1429,20 @@ class FuturesGuardian:
                 self._record(pos.symbol, "trail_failed", str(e))
 
             if trail_id:
+                # The armed trail SUPERSEDES the adaptive one — it is tighter
+                # (GUARD_TRAIL_CALLBACK_ROI, typically 0.15% of price, against
+                # the adaptive trail's stop-distance ~1.5%), so the wide one
+                # can never fire first and would only rest as a duplicate.
+                # Cancel it here rather than leaving it to the orphan sweep.
+                if state.adaptive_trail_id:
+                    if self._cancel_stop(pos, state.adaptive_trail_id):
+                        self._all_stop_ids[pos.symbol] = [
+                            i for i in self._all_stop_ids.get(pos.symbol, [])
+                            if i != state.adaptive_trail_id]
+                        log.info(
+                            f"{pos.symbol}: adaptive trail superseded by the "
+                            f"armed trail — cancelled, one trail resting.")
+                    state.adaptive_trail_id = None
                 # Place-then-cancel, same as everywhere else: the trail is
                 # resting before the fixed stop is removed.
                 if prev_order_id:
@@ -1489,6 +1550,20 @@ class FuturesGuardian:
                         return
 
                     trail_id = None
+                    if state.adaptive_trail_id:
+                        # The adaptive trail is already resting at this
+                        # position's own stop distance, placed at adoption and
+                        # managed by the exchange. A refused fixed stop is then
+                        # not an emergency — there is no unprotected window to
+                        # rescue from, and a second trail would be a duplicate.
+                        log.info(
+                            f"{pos.symbol}: fixed stop refused, but the "
+                            f"adaptive trail is already resting — no rescue "
+                            f"needed, no second trail placed.")
+                        state.unprotected_reason = None
+                        with self._lock:
+                            self._states[pos.symbol] = state
+                        return
                     if self.cfg.use_native_trail and not state.native_trail_id:
                         try:
                             # rescue=True: this is the only protection this
@@ -1782,6 +1857,14 @@ class FuturesGuardian:
                 self._record_closed_trade(sym, st, meta)
                 # Drop the floor now rather than leaving it to the 120s sweep.
                 self._cancel_profit_floor(sym, st)
+                if getattr(st, "adaptive_trail_id", None):
+                    try:
+                        self._cancel_stop(
+                            type("P", (), {"symbol": sym})(),
+                            st.adaptive_trail_id)
+                    except Exception:
+                        pass
+                    st.adaptive_trail_id = None
                 log.info(f"{sym}: position gone — clearing guard state")
                 self._record(sym, "closed", "position no longer open")
                 del self._states[sym]
@@ -2566,18 +2649,30 @@ class FuturesGuardian:
             else:
                 out["orphan_stops"].append(row)
 
-        # A position needs exactly ONE protective stop. Extras are superseded
-        # ratchets whose cancel never took; they can still fire at a stale
-        # level. Keep the most recent, list the rest as surplus.
+        # A position rests up to three protective orders ON PURPOSE — fixed
+        # stop, adaptive trail, profit floor — so "extras" are only surplus if
+        # the guardian is NOT holding an id for them. Anything it tracks is
+        # deliberate; the rest are superseded ratchets whose cancel never took.
         out["duplicate_stops"] = []
         by_sym: dict = {}
         for r in out["protecting"]:
             by_sym.setdefault(r["symbol"], []).append(r)
         keep = []
         for sym, rows in by_sym.items():
-            rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)
-            keep.append(rows[0])
-            out["duplicate_stops"].extend(rows[1:])
+            st = self._states.get(sym)
+            deliberate = {i for i in (
+                getattr(st, "stop_order_id", None),
+                getattr(st, "native_trail_id", None),
+                getattr(st, "adaptive_trail_id", None),
+                getattr(st, "floor_stop_id", None),
+            ) if i} if st else set()
+            tracked = [r for r in rows if r.get("id") in deliberate]
+            rest = [r for r in rows if r.get("id") not in deliberate]
+            rest.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+            keep.extend(tracked)
+            if rest:
+                keep.append(rest[0])
+                out["duplicate_stops"].extend(rest[1:])
         out["protecting"] = keep
         return out
 
@@ -2670,8 +2765,27 @@ class FuturesGuardian:
                 self._clear_pending_cancel(sym, oid)
             else:
                 self._queue_pending_cancel(sym, oid)
-        # Now trim any live position down to a single protective stop.
+        # Now trim any live position down to its INTENTIONAL protective set.
+        #
+        # This used to keep exactly one stop and cancel the rest, on the
+        # assumption that extras were superseded ratchets whose cancel never
+        # took. That assumption no longer holds: a position now rests up to
+        # three orders ON PURPOSE — the fixed stop, the adaptive trail, and the
+        # profit floor — each with a distinct job and its own id in state.
+        #
+        # Keeping only the newest would have cancelled the PROFIT FLOOR, the
+        # one order that must survive while the position is open, and the
+        # adaptive trail placed at adoption. Anything the guardian is holding
+        # an id for is deliberate and is never surplus.
         for sym, rows in surplus.items():
+            st = self._states.get(sym)
+            deliberate = {i for i in (
+                getattr(st, "stop_order_id", None),
+                getattr(st, "native_trail_id", None),
+                getattr(st, "adaptive_trail_id", None),
+                getattr(st, "floor_stop_id", None),
+            ) if i} if st else set()
+            rows = [r for r in rows if r.get("id") not in deliberate]
             if len(rows) < 2:
                 continue
             rows.sort(key=lambda r: r.get("ts") or 0, reverse=True)

@@ -93,6 +93,7 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
                 "native_trail_id": s.native_trail_id,
                 # Must survive a restart, or the guardian places a SECOND
                 # floor on the same position — the stacking to avoid.
+                "adaptive_trail_id": getattr(s, "adaptive_trail_id", None),
                 "floor_stop_id": getattr(s, "floor_stop_id", None),
                 "floor_roi": getattr(s, "floor_roi", None),
             }
@@ -249,6 +250,7 @@ def restore_states(data: dict):
             st.stop_order_id = raw.get("stop_order_id")
             st.native_trail_id = raw.get("native_trail_id")
             # Must survive a restart or the floor is re-placed and stacks.
+            st.adaptive_trail_id = raw.get("adaptive_trail_id")
             st.floor_stop_id = raw.get("floor_stop_id")
             st.floor_roi = raw.get("floor_roi")
             out[sym] = st

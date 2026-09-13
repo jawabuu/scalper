@@ -94,6 +94,10 @@ class GuardState:
     #
     # PERSISTED. If a restart lost this id the guardian would place a second
     # floor, which is exactly the stacking that must not happen.
+    # Native trail placed at adoption at this position's own stop distance.
+    # Persisted for the same reason as the floor: a restart must not place a
+    # second one.
+    adaptive_trail_id: str | None = None
     floor_stop_id: str | None = None
     floor_roi: float | None = None
     # Set when the exchange refuses the protective stop because the position is
@@ -193,6 +197,22 @@ class GuardConfig:
     # A position that has been ahead by breakeven_at_roi gets a hard
     # STOP_MARKET at breakeven_stop_roi that nothing cancels while it is open.
     profit_floor_enabled: bool = True
+    # Place a native trailing stop at the position's OWN stop distance
+    # (sized_stop_roi / leverage, as a price %) as soon as it is adopted,
+    # alongside the fixed stop.
+    #
+    # It is never WORSE than the fixed stop: if price never moves in the
+    # position's favour the trail's reference stays at entry and it triggers
+    # at exactly the fixed-stop level; if price does move favourably the
+    # reference follows and the trigger comes with it. Same worst case, free
+    # ratchet.
+    #
+    # The point is WHO manages it. Binance tracks a trail tick-by-tick. The
+    # guardian repositions a fixed stop from a 2.5s poll reading a mark price
+    # that has been observed 0.57% stale during fast moves — and during the
+    # moves that matter, fetch_positions has returned empty for ten seconds at
+    # a stretch. The trail does not depend on any of that.
+    adaptive_trail_enabled: bool = False
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

@@ -90,6 +90,7 @@ if __name__ == "__main__":
         rescue_trail_callback_pct=cfg.guard_rescue_trail_callback_pct,
         stop_working_type=cfg.guard_stop_working_type,
         profit_floor_enabled=cfg.guard_profit_floor_enabled,
+        adaptive_trail_enabled=cfg.guard_adaptive_trail_enabled,
         fail_fast_require_worsening=cfg.guard_fail_fast_require_worsening,
         ).validate()
         guardian = FuturesGuardian(
