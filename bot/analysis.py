@@ -465,6 +465,10 @@ def _diag_row(t: dict, thin_callback_pct: float = THIN_CALLBACK_PCT) -> dict:
         "drift_since_sizing_pct": t.get("drift_since_sizing_pct"),
         "change_24h_pct": ctx.get("change_24h_pct"),
         "body_pct": ctx.get("body_pct"),
+        "taper_ratio": ctx.get("taper_ratio"),
+        "tapering": ctx.get("tapering"),
+        "taper_vol_ratio": ctx.get("taper_vol_ratio"),
+        "taper_close_pos": ctx.get("taper_close_pos"),
         "upper_wick_pct": ctx.get("upper_wick_pct"),
         "lower_wick_pct": ctx.get("lower_wick_pct"),
         "sized_stop_roi": sized,
@@ -528,6 +532,10 @@ def diagnostics_report(rows: list[dict], omitted: int = 0) -> str:
                    f"signal_age {_fmt(r['signal_age_s'],1)}s  "
                    f"drift {_fmt(r['drift_since_sizing_pct'],3)}% (+ve = good fill)  "
                    f"obs_lag {_fmt(r['observation_lag_s'],2)}s")
+        out.append(f"  taper        : ratio {_fmt(r['taper_ratio'],3)} "
+                   f"(under 1 = pushes shrinking)  tapering {_fmt(r['tapering'])}  "
+                   f"vol_ratio {_fmt(r['taper_vol_ratio'],3)}  "
+                   f"close_pos {_fmt(r['taper_close_pos'],3)}")
         out.append(f"  character    : 24h change {_fmt(r['change_24h_pct'])}%  "
                    f"body {_fmt(r['body_pct'],1)}%  "
                    f"upper_wick {_fmt(r['upper_wick_pct'],1)}%  "

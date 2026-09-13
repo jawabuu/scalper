@@ -939,3 +939,134 @@ def test_the_refusal_reason_is_logged():
     src = inspect.getsource(FuturesGuardian.manage_position)
     assert "stop REFUSED by the exchange" in src
     assert "exchange said: {msg}" in src
+
+
+# ── Candle taper: the operator's visual rule for timing a turn ──────────────
+
+def _run(bodies, green=True):
+    pd = pytest.importorskip("pandas")
+    rows, px = [], 1.0
+    for b in bodies:
+        o = px
+        c = px * (1 + b) if green else px * (1 - b)
+        hi = max(o, c) * 1.001
+        lo = min(o, c) * 0.999
+        rows.append((o, hi, lo, c, 1e6))
+        px = c
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"])
+
+
+def test_shrinking_green_pushes_read_as_tapering_for_a_short():
+    from bot.scanner import candle_taper
+    t = candle_taper(_run([0.040, 0.030, 0.012, 0.008]), "short")
+    assert t["tapering"] is True
+    assert t["taper_ratio"] < 1
+
+
+def test_growing_green_pushes_read_as_expanding():
+    """The shape STORJ, TA and GRIFFAIN all had."""
+    from bot.scanner import candle_taper
+    t = candle_taper(_run([0.008, 0.012, 0.030, 0.040]), "short")
+    assert t["tapering"] is False
+    assert t["taper_ratio"] > 1
+
+
+def test_the_long_side_reads_shrinking_RED_candles():
+    from bot.scanner import candle_taper
+    t = candle_taper(_run([0.040, 0.030, 0.012, 0.008], green=False), "long")
+    assert t["tapering"] is True
+
+
+def test_countertrend_candles_are_ignored():
+    """A red candle inside a rally says nothing about whether pushes weaken."""
+    from bot.scanner import candle_taper
+    green = candle_taper(_run([0.04, 0.03, 0.012, 0.008]), "short")
+    assert green["trend_candles"] == 4
+    # the same series read for a LONG finds no red candles at all
+    assert candle_taper(_run([0.04, 0.03, 0.012, 0.008]), "long")["trend_candles"] == 0
+
+
+def test_too_few_pushes_reports_nothing_rather_than_guessing():
+    from bot.scanner import candle_taper
+    t = candle_taper(_run([0.02, 0.02]), "short")
+    assert t["taper_ratio"] is None
+    assert t["tapering"] is None
+
+
+def test_taper_survives_degenerate_input():
+    from bot.scanner import candle_taper
+    pd = pytest.importorskip("pandas")
+    assert candle_taper(None, "short")["taper_ratio"] is None
+    assert candle_taper(pd.DataFrame(), "short")["taper_ratio"] is None
+
+
+def test_taper_reaches_the_diagnostics_report():
+    from bot.analysis import analyse
+    t = _trade(entry_context={"taper_ratio": 0.302, "tapering": True,
+                              "taper_vol_ratio": 0.61, "taper_close_pos": 0.22})
+    rpt = analyse([t])["execution_diagnostics"]["report"]
+    assert "ratio 0.302" in rpt
+    assert "under 1 = pushes shrinking" in rpt
+
+
+# ── Strength streaks count scans, not polls ─────────────────────────────────
+
+def _rows(strength="strengthening"):
+    return [{"symbol": "X/USDT:USDT", "direction": "short", "strength": strength}]
+
+
+def test_rereading_the_same_scan_does_not_advance_the_streak():
+    """
+    run_once fires every 30s; the scanner refreshes every 120s. Four reads of
+    one scan used to count as four confirmations.
+    """
+    from bot.auto_trader import StrengthTracker
+    t = StrengthTracker()
+    for _ in range(4):
+        t.update(_rows(), scan_ts=1000.0)
+    assert t.streak("X/USDT:USDT", "short") == 1
+
+
+def test_a_fresh_scan_does_advance_it():
+    from bot.auto_trader import StrengthTracker
+    t = StrengthTracker()
+    t.update(_rows(), scan_ts=1000.0)
+    t.update(_rows(), scan_ts=1120.0)
+    assert t.streak("X/USDT:USDT", "short") == 2
+
+
+def test_two_sweeps_now_needs_two_real_scans():
+    """At SCANNER_INTERVAL=120 that is ~240s of persistence, not 30s."""
+    from bot.auto_trader import StrengthTracker, AutoTradeConfig
+    cfg = AutoTradeConfig(required_strength_sweeps=2)
+    t = StrengthTracker()
+    t.update(_rows(), scan_ts=1000.0)
+    for _ in range(3):                      # 30s polls within the same scan
+        t.update(_rows(), scan_ts=1000.0)
+    assert t.streak("X/USDT:USDT", "short") < cfg.required_strength_sweeps
+    t.update(_rows(), scan_ts=1120.0)
+    assert t.streak("X/USDT:USDT", "short") >= cfg.required_strength_sweeps
+
+
+def test_weakening_still_resets_on_a_fresh_scan():
+    from bot.auto_trader import StrengthTracker
+    t = StrengthTracker()
+    t.update(_rows(), scan_ts=1000.0)
+    t.update(_rows(), scan_ts=1120.0)
+    t.update(_rows("weakening"), scan_ts=1240.0)
+    assert t.streak("X/USDT:USDT", "short") == 0
+
+
+def test_a_caller_without_a_timestamp_keeps_the_old_behaviour():
+    from bot.auto_trader import StrengthTracker
+    t = StrengthTracker()
+    t.update(_rows())
+    t.update(_rows())
+    assert t.streak("X/USDT:USDT", "short") == 2
+
+
+def test_run_once_passes_the_scan_timestamp():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.run_once)
+    assert 'scan_ts=snap.get("last_scan_ts")' in src

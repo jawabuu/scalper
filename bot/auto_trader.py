@@ -271,16 +271,37 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
 
 class StrengthTracker:
     """
-    Counts consecutive scans on which a candidate strengthened.
+    Counts consecutive SCANS on which a candidate strengthened.
 
     A single strengthening scan is noise; the operator's rule is that a setup
-    must build over successive sweeps before it is acted on.
+    must build over successive sweeps before it is acted on. "Scan" means a
+    fresh scanner pass, not a fresh read of the last one — see update().
     """
 
     def __init__(self):
         self._streaks: dict[str, int] = {}
+        # The scan these streaks were last advanced on, so a repeated read of
+        # an unchanged snapshot cannot inflate them.
+        self._last_scan_ts: float | None = None
 
-    def update(self, rows: list[dict]) -> dict[str, int]:
+    def update(self, rows: list[dict],
+               scan_ts: float | None = None) -> dict[str, int]:
+        """
+        Count one scan. `scan_ts` is the scanner's `last_scan_ts`.
+
+        run_once() fires every AUTO_TRADE_INTERVAL (30s) but the scanner only
+        refreshes every SCANNER_INTERVAL (120s), so without this guard the same
+        candidate list was counted four times and a "2 scan" requirement was
+        satisfied 30 seconds after a single scan — by the SAME data, which is
+        no confirmation at all. Re-reading an unchanged snapshot must not count.
+
+        A caller that passes no timestamp keeps the old per-call behaviour.
+        """
+        if scan_ts is not None:
+            if self._last_scan_ts is not None and scan_ts == self._last_scan_ts:
+                return dict(self._streaks)      # same scan, already counted
+            self._last_scan_ts = scan_ts
+
         seen = set()
         for row in rows:
             key = f"{row.get('symbol')}:{row.get('direction')}"
@@ -765,7 +786,9 @@ class AutoTrader:
 
         snap = self.scanner.snapshot()
         rows = snap.get("candidates") or []
-        self.tracker.update(rows)
+        # Pass the scan timestamp so a repeated read of the same snapshot does
+        # not advance the streaks.
+        self.tracker.update(rows, scan_ts=snap.get("last_scan_ts"))
 
         try:
             balance = self.entry.wallet_balance()
@@ -860,6 +883,11 @@ class AutoTrader:
                         # up 17%. The scanner has always computed this; it was
                         # never recorded against the trade it produced.
                         "change_24h_pct": row.get("change_24h_pct"),
+                        "taper_ratio": (row.get("taper") or {}).get("taper_ratio"),
+                        "tapering": (row.get("taper") or {}).get("tapering"),
+                        "taper_vol_ratio": (row.get("taper") or {}).get("vol_ratio"),
+                        "taper_close_pos": (row.get("taper") or {}).get("close_pos"),
+                        "taper_trend_candles": (row.get("taper") or {}).get("trend_candles"),
                         "body_pct": (row.get("shape") or {}).get("body_pct"),
                         "upper_wick_pct": (row.get("shape") or {}).get("upper_wick_pct"),
                         "lower_wick_pct": (row.get("shape") or {}).get("lower_wick_pct"),

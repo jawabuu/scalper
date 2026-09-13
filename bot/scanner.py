@@ -70,6 +70,8 @@ class ScanConfig:
     # acceleration it reads ~1.6x low, and ~1.8x low on a blow-off. Over a
     # normal or quiet tape the two agree, so this only bites when it should.
     recent_tr_candles: int = 3
+    # How many candles back to look for the taper comparison.
+    taper_window: int = 6
     # How many candles to read body/wick structure over.
     shape_candles: int = 5
     # Half-width of the "at the extreme" band, as a % of the 24h high/low.
@@ -123,6 +125,9 @@ class Candidate:
     # How the recent candles are built: body vs wick share of the range.
     # Distinguishes a full-bodied run from a wick-heavy one of equal ATR.
     shape: dict = field(default_factory=dict)
+    # Whether the pushes WITH the move are shrinking — the operator's visual
+    # cue for timing a turn.
+    taper: dict = field(default_factory=dict)
     # Stop distance expressed in ATRs: how many typical candle-ranges the stop
     # sits away. Below ~1 the stop is inside normal noise and likely to be hit
     # for reasons unrelated to the thesis.
@@ -178,6 +183,7 @@ class Candidate:
             "recent_tr_pct": (None if self.recent_tr_pct is None
                               else round(float(self.recent_tr_pct), 3)),
             "shape": dict(self.shape or {}),
+            "taper": dict(self.taper or {}),
             "stop_vs_atr": (None if self.stop_vs_atr is None
                             else round(float(self.stop_vs_atr), 2)),
             "note": str(self.note),
@@ -261,6 +267,73 @@ def candle_shape(df, candles: int = 5) -> dict:
         out["body_pct"] = round(sum(bodies) / len(bodies), 1)
         out["upper_wick_pct"] = round(sum(uppers) / len(uppers), 1)
         out["lower_wick_pct"] = round(sum(lowers) / len(lowers), 1)
+        return out
+    except Exception:
+        return out
+
+
+def candle_taper(df, direction: str, window: int = 6) -> dict:
+    """
+    Is the move RUNNING OUT rather than still running?
+
+    The operator's visual rule: timing a short, the GREEN candles get smaller;
+    timing a long, the RED candles get smaller. The move keeps going but each
+    push covers less ground than the last.
+
+    This looks only at candles moving WITH the trend being faded — green for a
+    short, red for a long — because a countertrend candle in the middle of a run
+    says nothing about whether the pushes are weakening. It compares the mean
+    body of the most recent two against the two before them.
+
+    taper_ratio  < 1 means the pushes are shrinking (exhaustion, the fade is
+                 timely); > 1 means they are growing (still expanding, which is
+                 the shape STORJ, TA and GRIFFAIN all had).
+    vol_ratio    the same comparison on volume. A new extreme made on less
+                 volume than the push before it is the classic version of this.
+    close_pos    where the trend candles CLOSE within their own range, 0-1.
+                 For a short, green candles closing nearer their low means
+                 buyers are failing to hold the push.
+
+    Measurement only — nothing gates on this.
+    """
+    out = {"taper_ratio": None, "tapering": None, "trend_candles": 0,
+           "vol_ratio": None, "close_pos": None}
+    try:
+        if df is None or len(df) < 4:
+            return out
+        want_green = direction == "short"
+        rows = []
+        for _, r in df.tail(max(4, int(window))).iterrows():
+            op, cl = float(r["open"]), float(r["close"])
+            is_green = cl > op
+            if is_green != want_green:
+                continue
+            hi, lo = float(r["high"]), float(r["low"])
+            rng = hi - lo
+            rows.append({
+                "body": abs(cl - op),
+                "vol": float(r.get("volume") or 0.0),
+                # For a short: how near the LOW did this green candle close?
+                # 0 = closed at its low (push rejected), 1 = closed at its high.
+                "close_pos": ((cl - lo) / rng if rng > 0 else 0.5) if want_green
+                             else ((hi - cl) / rng if rng > 0 else 0.5),
+            })
+        out["trend_candles"] = len(rows)
+        if len(rows) < 4:
+            return out           # not enough pushes to compare
+
+        recent, earlier = rows[-2:], rows[-4:-2]
+        eb = sum(r["body"] for r in earlier) / 2
+        rb = sum(r["body"] for r in recent) / 2
+        if eb > 0:
+            out["taper_ratio"] = round(rb / eb, 3)
+            out["tapering"] = bool(rb < eb)
+        ev = sum(r["vol"] for r in earlier) / 2
+        rv = sum(r["vol"] for r in recent) / 2
+        if ev > 0:
+            out["vol_ratio"] = round(rv / ev, 3)
+        out["close_pos"] = round(
+            sum(r["close_pos"] for r in recent) / len(recent), 3)
         return out
     except Exception:
         return out
@@ -451,6 +524,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     close_px = float(row["close"])
     rtr = recent_tr_pct(df, cfg.recent_tr_candles)
     shp = candle_shape(df, cfg.shape_candles)
+    tap_short = candle_taper(df, "short", cfg.taper_window)
+    tap_long = candle_taper(df, "long", cfg.taper_window)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -484,7 +559,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp,
+            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed down — " if gap < 0 else "")
@@ -504,7 +579,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
-            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp,
+            atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,
             stop_vs_atr=(None if not atr_pct else
                          (cfg.stop_pct_for_ratio / atr_pct) if cfg.stop_pct_for_ratio else None),
             note=(("just crossed up — " if gap > 0 else "")
