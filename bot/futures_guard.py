@@ -150,10 +150,22 @@ class GuardConfig:
     fail_fast_max_peak_roi: float = 0.0
     fail_fast_loss_roi: float = 5.0
     # Callback for the RESCUE trail placed when a fixed stop is refused, as a
-    # PRICE percentage. The armed-phase trail is sized to give back little of a
-    # gain (3% ROI = 0.15% of price at 20x); a rescue needs room to sit outside
-    # noise while still capping the loss, so it gets its own figure.
-    rescue_trail_callback_pct: float = 2.0
+    # PRICE percentage. 0.1 is Binance's minimum callbackRate.
+    #
+    # TIGHT ON PURPOSE. A refused stop means the exchange will not let this
+    # position be protected the normal way, so the goal is to leave — not to
+    # ride it. At 0.1% the trail follows price while it moves in the position's
+    # favour and closes on the first 0.1% bounce off the extreme, which at 20x
+    # is ~2% of ROI given back.
+    #
+    # Checked against all four refusals of 2026-09-12/13. Three were IN PROFIT
+    # when refused, which is the case for keeping it tight rather than wide:
+    #   LSK  armed -2.0% -> would exit ~-4%   instead of -61.31%   (+57 pts)
+    #   ZRX  armed +3.4% -> would exit ~+1.4% instead of  -8.52%   (+10 pts)
+    #   AVA  armed +3.3% -> would exit ~+1.3% instead of  +0.00%   (+1 pt)
+    #   ILV  armed +4.0% -> would exit ~+2.0% instead of  +5.06%   (-3 pts)
+    # One winner is clipped; the one disaster is cut short.
+    rescue_trail_callback_pct: float = 0.1
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

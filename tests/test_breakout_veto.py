@@ -889,15 +889,22 @@ def test_snapshot_reports_whether_fail_fast_is_live():
 
 # ── Rescue trail ────────────────────────────────────────────────────────────
 
-def test_rescue_trail_has_its_own_wider_callback():
+def test_rescue_trail_is_tight_by_default():
     """
-    The armed-phase trail gives back little of a gain: 3% ROI = 0.15% of price
-    at 20x. A rescue must sit outside noise while capping the loss.
+    A refused stop means the position cannot be protected normally, so the
+    rescue exists to LEAVE. 0.1 is the exchange minimum callbackRate.
     """
     from bot.futures_guard import GuardConfig
     cfg = GuardConfig()
-    assert cfg.rescue_trail_callback_pct == 2.0
-    assert cfg.rescue_trail_callback_pct > cfg.trail_callback_pct
+    assert cfg.rescue_trail_callback_pct == 0.1
+
+
+def test_rescue_callback_never_goes_below_the_exchange_minimum():
+    """Binance rejects callbackRate under 0.1, which would leave NO stop."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._place_native_trail)
+    assert "max(0.1," in src
 
 
 def test_rescue_trail_ignores_the_profit_lock_test():
