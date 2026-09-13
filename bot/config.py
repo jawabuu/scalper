@@ -367,9 +367,9 @@ class BotConfig:
     guard_fail_fast_loss_roi: float = field(default_factory=lambda: _env_float(
         "GUARD_FAIL_FAST_LOSS_ROI", 5.0))
     # Native trail at the position's own stop distance, placed at adoption.
-    # Default FALSE: it changes the primary protective mechanism.
+    # Default TRUE from v3.15.0.
     guard_adaptive_trail_enabled: bool = field(default_factory=lambda: _env_bool(
-        "GUARD_ADAPTIVE_TRAIL_ENABLED", False))
+        "GUARD_ADAPTIVE_TRAIL_ENABLED", True))
     # Hard floor at breakeven once a position has been ahead. Default TRUE:
     # a peak above GUARD_BREAKEVEN_AT_ROI must not become a loss.
     guard_profit_floor_enabled: bool = field(default_factory=lambda: _env_bool(

@@ -7,6 +7,7 @@ cancelling a non-reduce-only (entry) order.
 """
 import pytest
 
+from dataclasses import replace
 from bot.futures_guard import GuardConfig, price_for_roi, FuturesPosition
 from bot.futures_guardian import FuturesGuardian
 
@@ -81,9 +82,21 @@ class FakeExchange:
                 "info": {"totalWalletBalance": "100.0"}}
 
 
-def _guardian(fake, dry_run=False, cfg=None):
+def _guardian(fake, dry_run=False, cfg=None, adaptive=False):
+    """
+    These tests exercise the FIXED-STOP mechanics: placement, ratcheting,
+    replacement, arming, the refusal fallback. The adaptive trail (v3.15.0,
+    default ON in production) places an order BEFORE any of that and changes
+    which id each step receives, so it is disabled here unless a test asks for
+    it. Adaptive-trail behaviour has its own tests in test_breakout_veto.py —
+    placement, supersession by arming, the skipped rescue, sweep exemption and
+    the failure path.
+    """
     g = FuturesGuardian.__new__(FuturesGuardian)     # bypass ccxt construction
-    g.cfg = (cfg or GuardConfig()).validate()
+    cfg = cfg or GuardConfig()
+    if not adaptive:
+        cfg = replace(cfg, adaptive_trail_enabled=False)
+    g.cfg = cfg.validate()
     g.demo = True
     g.dry_run = dry_run
     g.poll_interval = 1.0

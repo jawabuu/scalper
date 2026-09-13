@@ -272,6 +272,9 @@ class FuturesGuardian:
         self._api_failures: int = 0
         self._blind_since: float | None = None
         self._pending_cancels: dict[str, list] = {}
+        # Last protection audit per symbol, so a healthy position
+        # logs at most every PROTECTION_AUDIT_INTERVAL_S.
+        self._audit_last: dict[str, float] = {}
         self._cancel_attempts: dict[str, int] = {}
         self._last_trade_fees: float | None = None
         # Ids confirmed cancelled or confirmed absent from both books. Nothing
@@ -1102,6 +1105,84 @@ class FuturesGuardian:
             log.error(f"{pos.symbol}: adaptive trail failed, fixed stop "
                       f"remains: {_safe_err(e)}")
 
+    PROTECTION_AUDIT_INTERVAL_S = 30.0
+
+    def _audit_protection(self, pos: FuturesPosition, state):
+        """
+        Reconcile what the guardian THINKS is protecting this position against
+        what the exchange actually has resting, and say so in one greppable
+        line per symbol.
+
+            docker logs $C | grep PROTECTION
+
+        Anomalies are logged at WARNING with a leading tag so each class can be
+        counted on its own:
+
+            PROTECTION-UNPROTECTED   nothing protective resting at all
+            PROTECTION-MISSING       a tracked id the exchange does not report
+            PROTECTION-UNTRACKED     a protective order the guardian did not place
+            PROTECTION-DUPLICATE     more than one trailing stop on one position
+            PROTECTION-OVERLAP       adaptive trail and armed trail together
+
+        Throttled per symbol: a healthy position logs at most every 30s.
+        """
+        now = time.time()
+        last = self._audit_last.get(pos.symbol, 0.0)
+        if now - last < self.PROTECTION_AUDIT_INTERVAL_S:
+            return
+        self._audit_last[pos.symbol] = now
+
+        tracked = {
+            "fixed": state.stop_order_id,
+            "adaptive": getattr(state, "adaptive_trail_id", None),
+            "armed": state.native_trail_id,
+            "floor": getattr(state, "floor_stop_id", None),
+        }
+        tracked_ids = {v for v in tracked.values() if v}
+
+        try:
+            live = [self._normalise_order(o)
+                    for o in (self.fetch_open_orders(pos.symbol) or [])]
+        except Exception as e:
+            log.warning(f"PROTECTION {pos.symbol}: could not list orders "
+                        f"({_safe_err(e)}) — audit skipped this cycle")
+            return
+
+        prot = [o for o in live
+                if o.get("reduce_only") and "STOP" in (o.get("type") or "").upper()]
+        live_ids = {o["id"] for o in prot if o.get("id")}
+        trails = [o for o in prot
+                  if "TRAILING" in (o.get("type") or "").upper()]
+
+        held = ", ".join(f"{k}={v}" for k, v in tracked.items() if v) or "NONE"
+        log.info(f"PROTECTION {pos.symbol}: roi={roi_pct(pos, self.mark_price(pos) or pos.entry_price):+.1f}% "
+                 f"| guardian holds [{held}] | exchange has {len(prot)} "
+                 f"protective order(s), {len(trails)} trailing")
+
+        if not prot:
+            log.warning(f"PROTECTION-UNPROTECTED {pos.symbol}: NOTHING "
+                        f"protective is resting. guardian holds [{held}].")
+        for name, oid in tracked.items():
+            if oid and oid not in live_ids:
+                log.warning(f"PROTECTION-MISSING {pos.symbol}: tracked {name} "
+                            f"{oid} is not in the exchange's open orders — it "
+                            f"filled, was cancelled, or the listing is blind.")
+        for o in prot:
+            if o.get("id") and o["id"] not in tracked_ids:
+                log.warning(f"PROTECTION-UNTRACKED {pos.symbol}: protective "
+                            f"order {o['id']} ({o.get('type')}) is resting but "
+                            f"the guardian did not place it.")
+        if len(trails) > 1:
+            log.warning(f"PROTECTION-DUPLICATE {pos.symbol}: {len(trails)} "
+                        f"trailing stops resting: "
+                        f"{[t.get('id') for t in trails]}. Exactly one is "
+                        f"intended.")
+        if tracked["adaptive"] and tracked["armed"]:
+            log.warning(f"PROTECTION-OVERLAP {pos.symbol}: adaptive trail "
+                        f"{tracked['adaptive']} and armed trail "
+                        f"{tracked['armed']} are both held — arming should "
+                        f"have superseded the adaptive one.")
+
     def _cancel_profit_floor(self, symbol: str, state):
         """
         Drop the floor when the position closes.
@@ -1403,6 +1484,7 @@ class FuturesGuardian:
         # gets a hard floor that nothing below cancels.
         self._ensure_adaptive_trail(pos, state, _stop_roi_used)
         self._ensure_profit_floor(pos, state, price)
+        self._audit_protection(pos, state)
 
         if state.native_trail_id:
             # Binance owns the trail, so no repositioning — but a fixed stop

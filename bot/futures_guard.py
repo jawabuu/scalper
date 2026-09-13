@@ -212,7 +212,7 @@ class GuardConfig:
     # that has been observed 0.57% stale during fast moves — and during the
     # moves that matter, fetch_positions has returned empty for ten seconds at
     # a stretch. The trail does not depend on any of that.
-    adaptive_trail_enabled: bool = False
+    adaptive_trail_enabled: bool = True
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

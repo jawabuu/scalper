@@ -1590,12 +1590,16 @@ def test_it_tracks_each_trade_s_own_stop():
         assert g.placed == [expect], (stop_roi, g.placed)
 
 
-def test_off_by_default():
+def test_on_by_default_and_switchable_off():
+    """
+    Default ON from v3.15.0. The legacy guardian tests pin it OFF explicitly
+    because they exercise the fixed-stop mechanics, which it runs ahead of.
+    """
     from bot.futures_guard import GuardConfig, GuardState
+    assert GuardConfig().adaptive_trail_enabled is True
     g = _trail_guardian(adaptive_trail_enabled=False)
     g._ensure_adaptive_trail(_TrailPos(), GuardState(), 30.0)
     assert g.placed == []
-    assert GuardConfig().adaptive_trail_enabled is False
 
 
 def test_never_placed_twice():
@@ -1851,3 +1855,77 @@ def test_a_none_response_is_treated_as_failure_not_success():
     g._ensure_adaptive_trail(_TrailPos(), st, 30.0)
     assert st.adaptive_trail_id is None
     assert g._all_stop_ids.get("X/USDT:USDT") in (None, [])
+
+
+# ── Protection audit ────────────────────────────────────────────────────────
+
+def _audit_guardian(live_orders, **state_ids):
+    import threading, time as _t
+    from bot.futures_guard import GuardConfig, GuardState
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g._lock = threading.RLock()
+    g._audit_last = {}
+    g._normalise_order = lambda o: dict(o)
+    g.fetch_open_orders = lambda sym: list(live_orders)
+    g.mark_price = lambda pos: pos.entry_price
+    st = GuardState()
+    for k, v in state_ids.items():
+        setattr(st, k, v)
+    return g, st
+
+
+def _po(oid, typ="STOP_MARKET"):
+    return {"id": oid, "type": typ, "reduce_only": True}
+
+
+def test_audit_flags_a_position_with_nothing_resting(caplog):
+    g, st = _audit_guardian([], stop_order_id="fix")
+    with caplog.at_level("WARNING"):
+        g._audit_protection(_TrailPos(), st)
+    assert any("PROTECTION-UNPROTECTED" in r.message for r in caplog.records)
+
+
+def test_audit_flags_a_tracked_id_the_exchange_does_not_have(caplog):
+    g, st = _audit_guardian([_po("other")], floor_stop_id="floor")
+    with caplog.at_level("WARNING"):
+        g._audit_protection(_TrailPos(), st)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "PROTECTION-MISSING" in msgs and "floor" in msgs
+
+
+def test_audit_flags_an_order_the_guardian_did_not_place(caplog):
+    g, st = _audit_guardian([_po("ghost")], stop_order_id=None)
+    with caplog.at_level("WARNING"):
+        g._audit_protection(_TrailPos(), st)
+    assert any("PROTECTION-UNTRACKED" in r.message for r in caplog.records)
+
+
+def test_audit_flags_two_trailing_stops(caplog):
+    g, st = _audit_guardian(
+        [_po("t1", "TRAILING_STOP_MARKET"), _po("t2", "TRAILING_STOP_MARKET")],
+        adaptive_trail_id="t1", native_trail_id="t2")
+    with caplog.at_level("WARNING"):
+        g._audit_protection(_TrailPos(), st)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "PROTECTION-DUPLICATE" in msgs
+    assert "PROTECTION-OVERLAP" in msgs
+
+
+def test_a_healthy_position_logs_no_warning(caplog):
+    g, st = _audit_guardian(
+        [_po("trail", "TRAILING_STOP_MARKET"), _po("floor")],
+        adaptive_trail_id="trail", floor_stop_id="floor")
+    with caplog.at_level("WARNING"):
+        g._audit_protection(_TrailPos(), st)
+    assert not [r for r in caplog.records if "PROTECTION-" in r.message]
+
+
+def test_the_audit_is_throttled_per_symbol():
+    g, st = _audit_guardian([_po("floor")], floor_stop_id="floor")
+    calls = []
+    g.fetch_open_orders = lambda sym: (calls.append(sym), [_po("floor")])[1]
+    for _ in range(10):
+        g._audit_protection(_TrailPos(), st)
+    assert len(calls) == 1
