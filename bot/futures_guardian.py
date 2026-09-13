@@ -1246,6 +1246,9 @@ class FuturesGuardian:
         self._note_progress(pos, state, current_roi)
 
         if self._should_fail_fast(pos, state, current_roi):
+            # Mark it before closing: _record_closed_trade reads meta, and the
+            # position may be gone by the next cycle.
+            self._pos_meta.setdefault(pos.symbol, {})["exit_reason"] = "fail_fast"
             log.warning(
                 f"FAIL-FAST {pos.symbol}: no positive peak after "
                 f"{self.cfg.fail_fast_s:.0f}s and ROI {current_roi:+.1f}% — "
@@ -1381,6 +1384,8 @@ class FuturesGuardian:
                             f"been breached."
                         )
                         if self.cfg.close_if_past_stop:
+                            self._pos_meta.setdefault(
+                                pos.symbol, {})["exit_reason"] = "past_stop"
                             res = self.close_position(pos.symbol)
                             self._record(
                                 pos.symbol, "closed_past_stop",
@@ -2004,8 +2009,15 @@ class FuturesGuardian:
                 if meta.get("opened_seen_at")
                 and (meta.get("entry_context") or {}).get("sized_at")
                 else None),
-            "exit_reason": ("trail" if state.native_trail_id
-                            else ("stop" if state.stop_roi is not None else "unknown")),
+            # An EXPLICIT reason wins. The fallback below infers from state,
+            # which cannot see a market close the guardian made itself: a
+            # fail-fast leaves both native_trail_id and stop_roi set, so every
+            # fail-fast exit was bucketed as "stop" or "trail" and its effect
+            # was unmeasurable in the exit-reason table.
+            "exit_reason": (meta.get("exit_reason")
+                            or ("trail" if state.native_trail_id
+                                else ("stop" if state.stop_roi is not None
+                                      else "unknown"))),
             "opened_at": meta.get("opened_seen_at"),
             "closed_at": time.time(),
         }

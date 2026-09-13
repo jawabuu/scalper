@@ -1070,3 +1070,34 @@ def test_run_once_passes_the_scan_timestamp():
     from bot.auto_trader import AutoTrader
     src = inspect.getsource(AutoTrader.run_once)
     assert 'scan_ts=snap.get("last_scan_ts")' in src
+
+
+# ── Exit reason must name what actually closed the trade ────────────────────
+
+def test_an_explicit_exit_reason_wins_over_the_inference():
+    """
+    A fail-fast market close leaves native_trail_id and stop_roi set, so the
+    inference bucketed it as trail/stop. 54 + 103 = 157 in the real data: not
+    one fail-fast exit was visible despite three firing in the logs.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert 'meta.get("exit_reason")' in src
+    idx = src.index('"exit_reason":')
+    assert src.index('meta.get("exit_reason")') < src.index('"trail" if', idx)
+
+
+def test_fail_fast_stamps_its_reason_before_closing():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    i = src.index("_should_fail_fast")
+    assert '"exit_reason"] = "fail_fast"' in src[i:i + 500]
+
+
+def test_past_stop_closes_are_labelled():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    assert '"exit_reason"] = "past_stop"' in src
