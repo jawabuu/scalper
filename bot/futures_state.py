@@ -91,6 +91,10 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
                 "stop_roi": s.stop_roi,
                 "stop_order_id": s.stop_order_id,
                 "native_trail_id": s.native_trail_id,
+                # Must survive a restart, or the guardian places a SECOND
+                # floor on the same position — the stacking to avoid.
+                "floor_stop_id": getattr(s, "floor_stop_id", None),
+                "floor_roi": getattr(s, "floor_roi", None),
             }
             for sym, s in (states or {}).items()
         },
@@ -244,6 +248,9 @@ def restore_states(data: dict):
             st.stop_roi = raw.get("stop_roi")
             st.stop_order_id = raw.get("stop_order_id")
             st.native_trail_id = raw.get("native_trail_id")
+            # Must survive a restart or the floor is re-placed and stacks.
+            st.floor_stop_id = raw.get("floor_stop_id")
+            st.floor_roi = raw.get("floor_roi")
             out[sym] = st
         except Exception as e:
             log.debug(f"could not restore state for {sym}: {e}")

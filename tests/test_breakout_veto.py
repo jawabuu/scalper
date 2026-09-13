@@ -1247,3 +1247,167 @@ def test_trades_without_the_field_are_simply_absent():
     t = _wt("MARK_PRICE", -10, -9)
     t.pop("stop_working_type")
     assert analyse([t])["by_working_type"] == []
+
+
+# ── Profit floor: a peak above breakeven must not become a loss ─────────────
+#
+# PUNDIX peaked +7.36% and closed -10.30%. BR +9.63% -> -10.07%. HIVE +10.98%
+# -> -1.83%. In each case arming the native trail cancelled the fixed stop, so
+# above arm_roi the only protection was a 0.15%-of-price trail.
+
+class _FloorPos:
+    symbol = "X/USDT:USDT"
+    side = "short"
+    entry_price = 0.1354
+    qty = 640.0
+    leverage = 20
+    effective_leverage = 20.0
+    margin = 87.2
+
+
+def _floor_guardian(**cfgkw):
+    from bot.futures_guard import GuardConfig, GuardState
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    base = dict(breakeven_at_roi=3.0, breakeven_stop_roi=2.0, arm_roi=5.0)
+    base.update(cfgkw)
+    g.cfg = GuardConfig(**base)
+    g._all_stop_ids = {}
+    g._states = {}
+    g._records = []
+    g._record = lambda *a, **k: None
+    g.placed = []
+
+    def _place(pos, price):
+        g.placed.append(price)
+        return f"floor-{len(g.placed)}"
+    g._place_stop = _place
+    return g
+
+
+def test_no_floor_before_the_peak_clears_breakeven():
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=2.9)
+    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert st.floor_stop_id is None
+    assert g.placed == []
+
+
+def test_a_floor_is_placed_once_the_peak_clears_breakeven():
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=7.36)          # PUNDIX
+    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert st.floor_stop_id == "floor-1"
+    assert st.floor_roi == 2.0
+    assert len(g.placed) == 1
+
+
+def test_it_is_never_placed_twice_however_many_cycles_run():
+    """The core anti-stacking guarantee."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=12.0)
+    for _ in range(50):
+        g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert len(g.placed) == 1
+    assert st.floor_stop_id == "floor-1"
+
+
+def test_a_restart_does_not_place_a_second_floor():
+    """
+    floor_stop_id is persisted. If it were not, the guardian would come back
+    with no record and place another — stacking on the same position.
+    """
+    import tempfile, os
+    from bot import futures_state
+    from bot.futures_guard import GuardState
+    st = GuardState(peak_roi=12.0)
+    st.floor_stop_id, st.floor_roi = "floor-1", 2.0
+    path = os.path.join(tempfile.mkdtemp(), "s.json")
+    futures_state.save(path, states={"X/USDT:USDT": st}, pos_meta={},
+                       closed_trades=[], owner="t")
+    back = futures_state.restore_states(
+        futures_state.load(path, owner="t"))["X/USDT:USDT"]
+    assert back.floor_stop_id == "floor-1"
+
+    g = _floor_guardian()
+    g._ensure_profit_floor(_FloorPos(), back, 0.1354)
+    assert g.placed == []               # nothing re-placed
+
+
+def test_arming_the_trail_does_not_cancel_the_floor():
+    """This is the bug: _cancel_superseded_stops took the fixed stop away."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=7.36)
+    st.floor_stop_id = "floor-1"
+    st.native_trail_id = "trail-9"
+    g._states["X/USDT:USDT"] = st
+    g._all_stop_ids["X/USDT:USDT"] = ["floor-1", "old-stop-2", "trail-9"]
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_superseded_stops(_FloorPos(), keep="trail-9")
+    assert "floor-1" not in cancelled     # the floor survives
+    assert "trail-9" not in cancelled     # so does the trail
+    assert "old-stop-2" in cancelled      # the superseded one goes
+
+
+def test_the_floor_is_cancelled_when_the_position_closes():
+    """It must not outlive the trade and fire against a later position."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=7.36)
+    st.floor_stop_id = "floor-1"
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_profit_floor("X/USDT:USDT", st)
+    assert cancelled == ["floor-1"]
+    assert st.floor_stop_id is None
+
+
+def test_a_failed_cancel_still_clears_the_id():
+    """The 120s orphan sweep is the backstop; state must not hold a dead id."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=7.36)
+    st.floor_stop_id = "floor-1"
+
+    def _boom(pos, oid):
+        raise RuntimeError("exchange said no")
+    g._cancel_stop = _boom
+    g._cancel_profit_floor("X/USDT:USDT", st)
+    assert st.floor_stop_id is None
+
+
+def test_the_floor_can_be_switched_off():
+    from bot.futures_guard import GuardState
+    g = _floor_guardian(profit_floor_enabled=False)
+    st = GuardState(peak_roi=12.0)
+    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert st.floor_stop_id is None and g.placed == []
+
+
+def test_the_floor_is_inert_when_breakeven_is_not_configured():
+    """
+    GuardConfig defaults breakeven_at_roi to 0, so a deployment that never set
+    it gets no floor rather than one at 0% ROI — which after ~1.9% of fees
+    would guarantee a small LOSS, the opposite of the intent.
+    """
+    from bot.futures_guard import GuardConfig, GuardState
+    assert GuardConfig().breakeven_at_roi == 0.0
+    g = _floor_guardian(breakeven_at_roi=0.0, breakeven_stop_roi=0.0)
+    st = GuardState(peak_roi=20.0)
+    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert st.floor_stop_id is None and g.placed == []
+
+
+def test_at_the_operators_settings_the_floor_clears_fees():
+    """GUARD_BREAKEVEN_AT_ROI=3 / STOP_ROI=2 against a ~1.9% round trip."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian(breakeven_at_roi=3.0, breakeven_stop_roi=2.0)
+    st = GuardState(peak_roi=3.1)
+    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    assert st.floor_roi == 2.0
+    assert st.floor_roi > 1.9      # net positive after the round trip

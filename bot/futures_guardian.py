@@ -1056,11 +1056,85 @@ class FuturesGuardian:
         )
         return oid
 
+    def _cancel_profit_floor(self, symbol: str, state):
+        """
+        Drop the floor when the position closes.
+
+        reap_orphan_stops() would take it within 120s anyway — a reduce-only
+        stop on a symbol with no position. Cancelling it here closes that
+        window so nothing rests against a later position on the same symbol.
+        """
+        oid = getattr(state, "floor_stop_id", None)
+        if not oid:
+            return
+        try:
+            pos = type("P", (), {"symbol": symbol})()
+            self._cancel_stop(pos, oid)
+        except Exception as e:
+            log.debug(f"{symbol}: floor cancel deferred to the sweep: "
+                      f"{_safe_err(e)}")
+        finally:
+            state.floor_stop_id = None
+            state.floor_roi = None
+
+    def _ensure_profit_floor(self, pos: FuturesPosition, state, price: float):
+        """
+        Place a hard STOP_MARKET at breakeven once the position has been far
+        enough ahead, and never move or cancel it while the position lives.
+
+        A peak above breakeven_at_roi must not become a loss. Arming the native
+        trail used to cancel the fixed stop, so above arm_roi the only
+        protection was a 0.15%-of-price trail — narrower than one candle on
+        these coins. PUNDIX peaked +7.36% and closed -10.30%; BR +9.63% ->
+        -10.07%; HIVE +10.98% -> -1.83%.
+
+        Placed ONCE and never repositioned. Three things prevent stacking:
+          * it returns immediately if state.floor_stop_id is already set
+          * floor_stop_id is PERSISTED, so a restart does not re-place it
+          * the level is fixed, so there is no ratchet to re-issue it
+        It is exempt from _cancel_superseded_stops (which runs while the
+        position is OPEN) but NOT from reap_orphan_stops (which runs when the
+        symbol has NO position), so it cannot outlive the trade.
+        """
+        if not getattr(self.cfg, "profit_floor_enabled", True):
+            return
+        if state.floor_stop_id:
+            return                      # already placed — never a second one
+        at = getattr(self.cfg, "breakeven_at_roi", 0.0)
+        level = getattr(self.cfg, "breakeven_stop_roi", 0.0)
+        if not at or state.peak_roi < at:
+            return
+        try:
+            floor_price = price_for_roi(pos, level)
+            oid = self._place_stop(pos, floor_price)
+            if not oid:
+                return
+            state.floor_stop_id = oid
+            state.floor_roi = level
+            self._all_stop_ids.setdefault(pos.symbol, []).append(oid)
+            log.warning(
+                f"{pos.symbol}: PROFIT FLOOR placed at +{level:.1f}% ROI "
+                f"@ {floor_price} (peak reached +{state.peak_roi:.1f}%). "
+                f"This order is not cancelled while the position is open.")
+            self._record(pos.symbol, "profit_floor",
+                         f"floor at +{level:.1f}% ROI after peak "
+                         f"+{state.peak_roi:.1f}%")
+        except Exception as e:
+            log.error(f"{pos.symbol}: could not place the profit floor: "
+                      f"{_safe_err(e)}")
+
     def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None):
         """Cancel protective stops for this symbol other than the current one."""
         ids = list(self._all_stop_ids.get(pos.symbol) or [])
+        # The profit floor is deliberately NOT superseded. It is the guarantee
+        # that a position which has been well ahead does not close at a loss,
+        # and arming the trail cancelling it is precisely the bug this fixes.
+        floor_id = (self._states.get(pos.symbol).floor_stop_id
+                    if self._states.get(pos.symbol) else None)
         for oid in ids:
             if keep and oid == keep:
+                continue
+            if floor_id and oid == floor_id:
                 continue
             if self._cancel_stop(pos, oid):
                 self._all_stop_ids[pos.symbol] = [
@@ -1276,6 +1350,10 @@ class FuturesGuardian:
         # Once a native trailing stop is resting the exchange tracks the peak
         # continuously, so the guardian must NOT keep repositioning stops — it
         # only watches. This is what removes the polling gap.
+        # Before anything else: once the position has been far enough ahead it
+        # gets a hard floor that nothing below cancels.
+        self._ensure_profit_floor(pos, state, price)
+
         if state.native_trail_id:
             # Binance owns the trail, so no repositioning — but a fixed stop
             # whose cancel FAILED at arming would otherwise sit untouched until
@@ -1702,6 +1780,8 @@ class FuturesGuardian:
                 self._missing_counts.pop(sym, None)
             for sym, st, meta in gone:
                 self._record_closed_trade(sym, st, meta)
+                # Drop the floor now rather than leaving it to the 120s sweep.
+                self._cancel_profit_floor(sym, st)
                 log.info(f"{sym}: position gone — clearing guard state")
                 self._record(sym, "closed", "position no longer open")
                 del self._states[sym]

@@ -85,6 +85,17 @@ class GuardState:
     # set the exchange manages the trail tick-by-tick and the guardian stops
     # repositioning anything.
     native_trail_id: str | None = None
+    # Order id of the PROFIT FLOOR: a plain STOP_MARKET at breakeven_stop_roi,
+    # placed once peak_roi clears breakeven_at_roi and never cancelled while
+    # the position lives. It exists because arming the native trail used to
+    # cancel the fixed stop, leaving a 0.15%-of-price trail as the only
+    # protection above +5% ROI — narrower than one candle on these coins.
+    # PUNDIX peaked +7.36% and closed -10.30% that way; BR +9.63% -> -10.07%.
+    #
+    # PERSISTED. If a restart lost this id the guardian would place a second
+    # floor, which is exactly the stacking that must not happen.
+    floor_stop_id: str | None = None
+    floor_roi: float | None = None
     # Set when the exchange refuses the protective stop because the position is
     # already past that level (Binance -2021). The position is UNPROTECTED and
     # the operator must decide what to do — the guardian will not close a
@@ -179,6 +190,9 @@ class GuardConfig:
     # slightly later and may fill worse. This protects against fake moves and
     # mildly penalises real ones.
     stop_working_type: str = "MARK_PRICE"
+    # A position that has been ahead by breakeven_at_roi gets a hard
+    # STOP_MARKET at breakeven_stop_roi that nothing cancels while it is open.
+    profit_floor_enabled: bool = True
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False
