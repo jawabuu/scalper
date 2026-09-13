@@ -1057,12 +1057,27 @@ def test_weakening_still_resets_on_a_fresh_scan():
     assert t.streak("X/USDT:USDT", "short") == 0
 
 
-def test_a_caller_without_a_timestamp_keeps_the_old_behaviour():
+def test_scan_ts_is_required_so_the_bug_cannot_return_silently():
+    """
+    It was optional, which left a future call site able to omit it and restore
+    per-poll counting without any signal.
+    """
+    import inspect
+    from bot.auto_trader import StrengthTracker
+    sig = inspect.signature(StrengthTracker.update)
+    assert sig.parameters["scan_ts"].default is inspect.Parameter.empty
+    with pytest.raises(TypeError):
+        StrengthTracker().update(_rows())
+
+
+def test_an_explicit_none_still_counts_but_warns(caplog):
     from bot.auto_trader import StrengthTracker
     t = StrengthTracker()
-    t.update(_rows())
-    t.update(_rows())
+    with caplog.at_level("WARNING"):
+        t.update(_rows(), None)
+        t.update(_rows(), None)
     assert t.streak("X/USDT:USDT", "short") == 2
+    assert any("no scan timestamp" in r.message for r in caplog.records)
 
 
 def test_run_once_passes_the_scan_timestamp():

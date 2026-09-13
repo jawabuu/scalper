@@ -284,8 +284,7 @@ class StrengthTracker:
         # an unchanged snapshot cannot inflate them.
         self._last_scan_ts: float | None = None
 
-    def update(self, rows: list[dict],
-               scan_ts: float | None = None) -> dict[str, int]:
+    def update(self, rows: list[dict], scan_ts: float | None) -> dict[str, int]:
         """
         Count one scan. `scan_ts` is the scanner's `last_scan_ts`.
 
@@ -295,8 +294,16 @@ class StrengthTracker:
         satisfied 30 seconds after a single scan — by the SAME data, which is
         no confirmation at all. Re-reading an unchanged snapshot must not count.
 
-        A caller that passes no timestamp keeps the old per-call behaviour.
+        `scan_ts` is REQUIRED, deliberately. It was optional at first, which
+        left a future call site able to omit it and silently restore the bug
+        this method exists to prevent. Passing None still counts the call — a
+        caller with genuinely no timestamp has nothing to dedupe on — but it
+        now has to be written out, and it is logged.
         """
+        if scan_ts is None:
+            _log.warning(
+                "StrengthTracker.update called with no scan timestamp — "
+                "streaks will advance per CALL, not per scan.")
         if scan_ts is not None:
             if self._last_scan_ts is not None and scan_ts == self._last_scan_ts:
                 return dict(self._streaks)      # same scan, already counted

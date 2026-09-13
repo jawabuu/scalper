@@ -102,31 +102,35 @@ def test_callback_respects_exchange_maximum(cfg):
 
 # ── Streak tracking ──────────────────────────────────────────────────────────
 
+# Each update() below stands for a DISTINCT scan, so each carries its own
+# timestamp. Reusing one would (correctly) be treated as a re-read and count
+# once — see test_rereading_the_same_scan_does_not_advance_the_streak.
+
 def test_streak_builds_over_consecutive_scans():
     t = StrengthTracker()
     for expected in (1, 2, 3):
-        t.update([_short(strength="strengthening")])
+        t.update([_short(strength="strengthening")], scan_ts=1000.0 + expected * 120)
         assert t.streak("X/USDT:USDT", "short") == expected
 
 
 def test_streak_resets_when_weakening():
     t = StrengthTracker()
-    t.update([_short(strength="strengthening")])
-    t.update([_short(strength="weakening")])
+    t.update([_short(strength="strengthening")], scan_ts=1000.0)
+    t.update([_short(strength="weakening")], scan_ts=1120.0)
     assert t.streak("X/USDT:USDT", "short") == 0
 
 
 def test_streak_cleared_when_candidate_drops_out():
     t = StrengthTracker()
-    t.update([_short(strength="strengthening")])
-    t.update([])                      # no longer a candidate
+    t.update([_short(strength="strengthening")], scan_ts=1000.0)
+    t.update([], scan_ts=1120.0)      # no longer a candidate
     assert t.streak("X/USDT:USDT", "short") == 0
 
 
 def test_confirmed_counts_towards_the_streak():
     t = StrengthTracker()
-    t.update([_short(strength="CONFIRMED")])
-    t.update([_short(strength="CONFIRMED")])
+    t.update([_short(strength="CONFIRMED")], scan_ts=1000.0)
+    t.update([_short(strength="CONFIRMED")], scan_ts=1120.0)
     assert t.streak("X/USDT:USDT", "short") == 2
 
 
