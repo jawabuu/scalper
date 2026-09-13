@@ -204,6 +204,7 @@ if __name__ == "__main__":
                     enabled=cfg.auto_trade_enabled,
                     max_dist_to_extreme_pct=cfg.auto_max_dist_pct,
                     veto_breakout=cfg.auto_veto_breakout,
+                    long_require_convergence=cfg.auto_long_require_convergence,
                     callback_use_velocity=cfg.auto_callback_use_velocity,
                     **({"callback_min_pct": cfg.auto_callback_min_pct}
                        if cfg.auto_callback_min_pct > 0 else {}),

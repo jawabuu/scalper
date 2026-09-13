@@ -34,7 +34,7 @@ def _long(**kw):
     mirror of the STORJ/TA case."""
     row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 40.0,
            "pct_above_24h_low": 0.1, "pct_below_24h_high": -60.0,
-           "strength": "strengthening"}
+           "strength": "strengthening", "gap_narrowing": True}
     row.update(kw)
     return row
 
@@ -1116,3 +1116,74 @@ def test_past_stop_closes_are_labelled():
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian.manage_position)
     assert '"exit_reason"] = "past_stop"' in src
+
+
+# ── Longs must show the EMA gap turning, not merely being below ────────────
+#
+# The "4" trade, 2026-09-13 12:49: coin down 14.01% on 24h, EMA9 0.01974 under
+# EMA21 0.01978 and the gap NOT narrowing. The scanner listed it because the
+# long branch only tested `gap < ema_tolerance_pct`, which any downtrend meets.
+# It entered at 0.01978 and was fail-fast cut at -5.1%.
+
+def _long_cand(**kw):
+    row = {"symbol": "4/USDT:USDT", "direction": "long", "rsi": 48.0,
+           "pct_above_24h_low": 1.13, "pct_below_24h_high": -19.26,
+           "strength": "strengthening", "atr_pct": 0.6,
+           "gap_narrowing": True, "gap_narrowing_pct": -0.4}
+    row.update(kw)
+    return row
+
+
+def test_the_gate_is_on_by_default():
+    """
+    Not a new hypothesis: the scanner's own comment claims "recovering" and
+    never tested it. Default ON restores the documented intent.
+    """
+    assert AutoTradeConfig().long_require_convergence is True
+
+
+def test_a_long_with_a_widening_gap_is_refused():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    d = evaluate_candidate(_long_cand(gap_narrowing=False, gap_narrowing_pct=0.3),
+                           streak=2, cfg=cfg, atr_pct=0.6)
+    assert not d.enter
+    assert "not narrowing" in d.reason
+
+
+def test_a_long_with_a_narrowing_gap_is_allowed():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    assert evaluate_candidate(_long_cand(), streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_a_missing_flag_is_treated_as_not_narrowing():
+    """Older rows carry no verdict; refusing is the safe reading for a long."""
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    row = _long_cand()
+    row.pop("gap_narrowing")
+    assert not evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_shorts_are_untouched_by_the_gate():
+    """
+    Fading an RSI extreme works off the stretch itself. 150 shorts at +$2.47
+    expectancy were taken without this condition and must stay unaffected.
+    """
+    cfg = AutoTradeConfig(enabled=True, veto_breakout=False)
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    row["gap_narrowing"] = False
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+def test_the_gate_can_be_turned_off():
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52,
+                          long_require_convergence=False)
+    assert evaluate_candidate(_long_cand(gap_narrowing=False), streak=2,
+                              cfg=cfg, atr_pct=0.6).enter
+
+
+def test_the_scanner_publishes_the_verdict_it_already_computed():
+    import inspect
+    from bot import scanner
+    src = inspect.getsource(scanner.evaluate_symbol)
+    assert src.count("gap_narrowing=narrowing") == 2   # both branches
+    assert '"gap_narrowing": bool' in inspect.getsource(scanner.Candidate.as_row)

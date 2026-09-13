@@ -44,6 +44,18 @@ class AutoTradeConfig:
     # Floor the entry callback on CURRENT velocity rather than ATR(14) when
     # velocity is the larger of the two. Off by default: it changes the price
     # at which entries trigger.
+    # LONGS ONLY: require the EMA gap to be NARROWING toward a cross before
+    # buying. The scanner's long branch is commented "recovering, with EMA9
+    # below EMA21 OR just above it", but it only tested `gap <
+    # ema_tolerance_pct` — satisfied by any downtrend however deep. A coin
+    # down 14% with EMA9 under EMA21 and the gap still widening is not
+    # recovering; it is falling.
+    #
+    # Default ON. Not a new hypothesis — it is the condition the code already
+    # claimed to apply. Shorts are untouched: fading an RSI extreme works off
+    # the stretch itself and does not need the EMAs to have turned. A long has
+    # no equivalent, because "oversold" bounds nothing.
+    long_require_convergence: bool = True
     callback_use_velocity: bool = False
     # Refuse candidates the scanner flagged as an EXPANDING move rather than an
     # exhausted one (price at the 24h extreme, consecutive candles carrying it,
@@ -232,6 +244,15 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     # callback_for() then gives them the loosest trigger, because the callback
     # is proportional to distance from the extreme and collapses to its ATR
     # floor at zero distance.
+    if side == "long" and cfg.long_require_convergence:
+        if not row.get("gap_narrowing"):
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"EMA gap not narrowing "
+                        f"({row.get('gap_narrowing_pct')}%) — EMA9 is not "
+                        f"turning toward EMA21, so this is a downtrend rather "
+                        f"than a recovery"))
+
     if cfg.veto_breakout:
         brk = row.get("breakout") or {}
         if brk.get("breakout"):
@@ -597,6 +618,7 @@ class AutoTrader:
             "recent": list(reversed(self._log[-15:])),
             "config": {
                 "callback_min_pct": self.cfg.callback_min_pct,
+                "long_require_convergence": self.cfg.long_require_convergence,
                 "callback_use_velocity": self.cfg.callback_use_velocity,
                 "veto_breakout": self.cfg.veto_breakout,
                 "max_dist_to_extreme_pct": self.cfg.max_dist_to_extreme_pct,
@@ -636,6 +658,7 @@ class AutoTrader:
         # Entry quality, not a safety limit — tunable so the A/B can be run
         # from the dashboard without a redeploy.
         "callback_min_pct": (float, 0.1, 5.0),
+        "long_require_convergence": (bool, None, (True, False)),
         "callback_use_velocity": (bool, None, (True, False)),
         "veto_breakout": (bool, None, (True, False)),
         "max_dist_to_extreme_pct": (float, 0.1, 50.0),
@@ -886,6 +909,7 @@ class AutoTrader:
                         "rsi": row.get("rsi"),
                         "atr_pct": row.get("atr_pct"),
                         "recent_tr_pct": row.get("recent_tr_pct"),
+                        "gap_narrowing": row.get("gap_narrowing"),
                         # A coin up 108% in 24h is not the same trade as one
                         # up 17%. The scanner has always computed this; it was
                         # never recorded against the trade it produced.

@@ -23,9 +23,13 @@ def _short(**kw):
 
 
 def _long(**kw):
+    # gap_narrowing True by default: long_require_convergence is ON, and these
+    # fixtures exist to exercise the OTHER rules. A long with the EMA gap still
+    # widening is refused before anything else is reached — see
+    # test_a_long_with_a_widening_gap_is_refused.
     row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 55.0,
            "pct_above_24h_low": 2.0, "pct_below_24h_high": -30.0,
-           "strength": "strengthening"}
+           "strength": "strengthening", "gap_narrowing": True}
     row.update(kw)
     return row
 
@@ -475,6 +479,7 @@ def _band_cfg(lo=45.0, hi=50.0):
 
 def _long_row(rsi):
     return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": rsi,
+            "gap_narrowing": True,
             "atr_pct": 0.5, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
 
@@ -533,6 +538,7 @@ def _dir_cfg(mode):
 
 def _dir_row(side, rsi):
     return {"symbol": "X/USDT:USDT", "direction": side, "rsi": rsi,
+            "gap_narrowing": True,
             "atr_pct": 0.5, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0,
             "range_pos_24h": 0.1 if side == "long" else 0.9}
@@ -760,6 +766,7 @@ def test_rule_refusals_are_recorded_with_a_reason():
                           max_dist_to_extreme_pct=3.0,
                           required_strength_sweeps=2)
     far = {"symbol": "ATOM/USDT:USDT", "direction": "long", "rsi": 47.7,
+           "gap_narrowing": True,   # isolate the distance rule under test
            "atr_pct": 0.307, "pct_above_24h_low": 12.06,
            "pct_below_24h_high": -0.83, "range_pos_24h": 0.93}
     d = evaluate_candidate(far, streak=2, cfg=cfg, atr_pct=0.307)
@@ -874,6 +881,7 @@ def _atr_cfg(floor):
 
 def _atr_row(atr):
     return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": 48,
+            "gap_narrowing": True,
             "atr_pct": atr, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
 

@@ -118,6 +118,10 @@ class Candidate:
     pct_below_24h_high: float | None = None
     # Average True Range as a % of price — how much this coin actually moves
     # per candle. Used to judge whether a fixed stop distance is realistic.
+    # Whether the EMA gap is NARROWING toward a cross. is_converging() has
+    # always computed this; the long branch recorded the raw delta and threw
+    # the verdict away, so "recovering" in its own comment was never tested.
+    gap_narrowing: bool = False
     atr_pct: float | None = None
     # Current velocity: mean true range of the last few candles, as % of price.
     # Distinct from atr_pct, which lags on an accelerating move.
@@ -167,6 +171,7 @@ class Candidate:
             "htf_trend_pct": self.htf_trend_pct,
             "breakout": dict(self.breakout or {}),
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
+            "gap_narrowing": bool(self.gap_narrowing),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
             # 24h range context. These were dropped when as_row() was rewritten
@@ -556,7 +561,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             breakout=breakout_structure(df, high_24h, low_24h, "short",
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
-            gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
+            gap_change_pct=gap_change, gap_narrowing=narrowing,
+            change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -576,7 +582,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             breakout=breakout_structure(df, high_24h, low_24h, "long",
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
-            gap_change_pct=gap_change, change_24h_pct=change_24h_pct,
+            gap_change_pct=gap_change, gap_narrowing=narrowing,
+            change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,
