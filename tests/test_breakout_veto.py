@@ -1429,8 +1429,8 @@ def _turn_frame(vals):
 
 
 def test_the_right_side_of_a_V_is_a_turn():
-    from bot.scanner import turned_up, ScanConfig
-    t = turned_up(_turn_frame([1.10,1.07,1.04,1.00,1.02,1.04,1.06,1.08,1.10,1.12]),
+    from bot.scanner import turned, ScanConfig
+    t = turned(_turn_frame([1.10,1.07,1.04,1.00,1.02,1.04,1.06,1.08,1.10,1.12]),
                   ScanConfig())
     assert t["turned_up"] is True
     assert t["bars_since_low"] >= 2
@@ -1438,16 +1438,16 @@ def test_the_right_side_of_a_V_is_a_turn():
 
 
 def test_a_flat_bottomed_U_counts_once_it_lifts():
-    from bot.scanner import turned_up, ScanConfig
-    t = turned_up(_turn_frame([1.10,1.05,1.01,1.00,1.00,1.00,1.01,1.03,1.05,1.07]),
+    from bot.scanner import turned, ScanConfig
+    t = turned(_turn_frame([1.10,1.05,1.01,1.00,1.00,1.00,1.01,1.03,1.05,1.07]),
                   ScanConfig())
     assert t["turned_up"] is True
 
 
 def test_a_market_still_falling_is_not_a_turn():
     """USELESS 18:06. The low IS the latest bar."""
-    from bot.scanner import turned_up, ScanConfig
-    t = turned_up(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.99,0.98]),
+    from bot.scanner import turned, ScanConfig
+    t = turned(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.99,0.98]),
                   ScanConfig())
     assert t["turned_up"] is False
     assert t["bars_since_low"] == 0
@@ -1455,16 +1455,16 @@ def test_a_market_still_falling_is_not_a_turn():
 
 def test_a_pause_that_resumes_falling_is_not_a_turn():
     """The case a two-point gap comparison cannot see."""
-    from bot.scanner import turned_up, ScanConfig
-    t = turned_up(_turn_frame([1.10,1.06,1.02,1.00,1.01,1.00,0.98,0.96,0.94,0.92]),
+    from bot.scanner import turned, ScanConfig
+    t = turned(_turn_frame([1.10,1.06,1.02,1.00,1.01,1.00,0.98,0.96,0.94,0.92]),
                   ScanConfig())
     assert t["turned_up"] is False
 
 
 def test_a_bottom_still_forming_does_not_count():
     """min_bars_since: a low made on the last bar is not a low crossed."""
-    from bot.scanner import turned_up, ScanConfig
-    t = turned_up(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.995,0.99]),
+    from bot.scanner import turned, ScanConfig
+    t = turned(_turn_frame([1.10,1.08,1.06,1.04,1.03,1.02,1.01,1.00,0.995,0.99]),
                   ScanConfig())
     assert t["turned_up"] is False
 
@@ -1498,3 +1498,39 @@ def test_a_missing_turn_block_refuses():
     row = _long_cand()
     row.pop("turn", None)
     assert not evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_each_direction_gets_its_own_turn():
+    """
+    turned() was computed ONCE and attached to both branches, so every short
+    recorded whether the fast EMA turned UP — meaningless for a fade, and the
+    opposite of what the field name implies. Nothing gated on it, so no trade
+    behaved wrongly, but the recorded data was misleading.
+    """
+    import inspect
+    from bot import scanner
+    src = inspect.getsource(scanner.evaluate_symbol)
+    assert 'turned(df, cfg, "short")' in src
+    assert 'turned(df, cfg, "long")' in src
+    assert "turn=turn_short," in src and "turn=turn_long," in src
+
+
+def test_a_short_reads_the_HIGH_behind_it():
+    """The mirror: top crossed, falling away from it."""
+    from bot.scanner import turned, ScanConfig
+    rising_then_rolling = _turn_frame(
+        [0.90,0.93,0.96,1.00,0.98,0.96,0.94,0.92,0.90,0.88])
+    t = turned(rising_then_rolling, ScanConfig(), "short")
+    assert t["turned_up"] is True          # "turned" in the short's favour
+    assert t["bars_since_low"] >= 2        # bars since the HIGH
+
+    still_rising = _turn_frame(
+        [0.90,0.92,0.94,0.96,0.97,0.98,0.99,1.00,1.01,1.02])
+    assert turned(still_rising, ScanConfig(), "short")["turned_up"] is False
+
+
+def test_the_same_series_reads_oppositely_for_the_two_sides():
+    from bot.scanner import turned, ScanConfig
+    falling = _turn_frame([1.10,1.07,1.04,1.00,0.97,0.94,0.91,0.88,0.85,0.82])
+    assert turned(falling, ScanConfig(), "long")["turned_up"] is False
+    assert turned(falling, ScanConfig(), "short")["turned_up"] is True

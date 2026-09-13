@@ -465,7 +465,7 @@ def gap_series(df: pd.DataFrame) -> pd.Series:
     return (df["ema_fast"] - df["ema_slow"]) / df["ema_slow"] * 100
 
 
-def turned_up(df: pd.DataFrame, cfg: ScanConfig) -> dict:
+def turned(df: pd.DataFrame, cfg: ScanConfig, direction: str = "long") -> dict:
     """
     Is this the RIGHT side of a U or a V — has the bottom been crossed?
 
@@ -498,15 +498,25 @@ def turned_up(df: pd.DataFrame, cfg: ScanConfig) -> dict:
         fast = df["ema_fast"].tail(lb).reset_index(drop=True)
         if fast.isna().any():
             return out
-        i_min = int(fast.idxmin())
-        bars_since = len(fast) - 1 - i_min
-        low = float(fast.iloc[i_min])
+        # A LONG wants the right side of a U: the LOW behind it, rising off it.
+        # A SHORT wants the mirror — the HIGH behind it, falling away. Computing
+        # one verdict for both directions would record, on every short, whether
+        # the EMA turned UP: meaningless for a fade, and the opposite of what
+        # the field name implies.
+        if direction == "short":
+            i_ext = int(fast.idxmax())
+        else:
+            i_ext = int(fast.idxmin())
+        bars_since = len(fast) - 1 - i_ext
+        ext = float(fast.iloc[i_ext])
         now = float(fast.iloc[-1])
-        out["bars_since_low"] = bars_since
-        out["rise_pct"] = round((now - low) / low * 100, 3) if low else None
+        out["bars_since_low"] = bars_since     # bars since the extreme
+        out["rise_pct"] = (round((now - ext) / ext * 100, 3)
+                           if ext else None)   # signed move off it
         if bars_since < int(cfg.turn_min_bars_since):
-            return out                      # the bottom is still forming
-        out["turned_up"] = bool(now > low)  # rising off it
+            return out                         # the extreme is still forming
+        out["turned_up"] = bool(now < ext) if direction == "short" \
+            else bool(now > ext)
         return out
     except Exception:
         return out
@@ -586,7 +596,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     shp = candle_shape(df, cfg.shape_candles)
     tap_short = candle_taper(df, "short", cfg.taper_window)
     tap_long = candle_taper(df, "long", cfg.taper_window)
-    turn = turned_up(df, cfg)
+    turn_short = turned(df, cfg, "short")
+    turn_long = turned(df, cfg, "long")
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -618,7 +629,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing,
-            turn=turn, change_24h_pct=change_24h_pct,
+            turn=turn_short, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -639,7 +650,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing,
-            turn=turn, change_24h_pct=change_24h_pct,
+            turn=turn_long, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,
