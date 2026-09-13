@@ -2975,6 +2975,7 @@ async function refreshAnalysis() {
                 'Twenty-four buckets stay insufficient for a long time. Read '
                 + 'the session table first.'),
       diagBlock(a.execution_diagnostics || {}),
+      wtTable(a.by_working_type || []),
       statTable('By callback rule (distance ratio vs ATR floor)', a.by_callback_rule || []),
       statTable('Re-entries vs fresh entries', [
         Object.assign({label: 'override re-entry'}, a.reentries.override_reentries),
@@ -2987,6 +2988,35 @@ async function refreshAnalysis() {
 // Individual trades whose EXECUTION went wrong, as opposed to whose thesis
 // did. The aggregate tables cannot answer "what happened to that trade?".
 // The <pre> block is plain text so it can be copied out whole.
+// MARK_PRICE vs CONTRACT_PRICE. Losses and gains are shown SEPARATELY: the
+// claim is that mark price avoids exits on fake moves, which should appear as
+// a smaller average LOSS. If average GAINS shrink too, it is also triggering
+// late on real moves — that is the cost side, and it has to be visible.
+function wtTable(rows) {
+  if (!rows.length) return '';
+  const n = (v, d) => (v === null || v === undefined) ? '—' : Number(v).toFixed(d);
+  const body = rows.map(r => '<tr>'
+    + '<td>' + r.label + '</td>'
+    + '<td>' + r.n + '</td>'
+    + '<td class="pos">' + r.n_wins + ' / ' + n(r.avg_win_usdt, 2) + '</td>'
+    + '<td class="neg">' + r.n_losses + ' / ' + n(r.avg_loss_usdt, 2) + '</td>'
+    + '<td>' + n(r.avg_win_roi, 1) + '%</td>'
+    + '<td>' + n(r.avg_loss_roi, 1) + '%</td>'
+    + '<td>' + n(r.avg_overshoot_roi, 1) + '%</td>'
+    + '<td>' + n(r.expectancy, 3) + '</td>'
+    + '</tr>').join('');
+  return '<div class="card"><h3>By stop trigger price</h3>'
+    + '<p class="hint">CONTRACT_PRICE is the last trade on this book — a wick '
+    + 'closes the position. MARK_PRICE is a smoothed cross-venue index. '
+    + 'Average loss should fall if it works; if average gain falls too, it is '
+    + 'triggering late on real moves as well. Overshoot is how far past its '
+    + 'sized stop a loser ran.</p>'
+    + '<table class="stat"><thead><tr><th>trigger</th><th>n</th>'
+    + '<th>wins / avg $</th><th>losses / avg $</th><th>win ROI</th>'
+    + '<th>loss ROI</th><th>overshoot</th><th>expectancy</th></tr></thead>'
+    + '<tbody>' + body + '</tbody></table></div>';
+}
+
 function diagBlock(d) {
   const rows = d.rows || [];
   if (!rows.length) return '';

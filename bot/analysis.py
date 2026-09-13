@@ -604,6 +604,49 @@ def analyse(trades: list[dict]) -> dict:
         st["label"] = src
         callback_rule.append(st)
 
+    # ── Which price triggered the stops ──
+    # Binance's default, CONTRACT_PRICE, is the last trade on THIS book, so a
+    # single wick closes the position. MARK_PRICE is a smoothed cross-venue
+    # index. The change was made on evidence from one trade (BR gave back 19.7
+    # ROI points to a candle whose range was exactly the give-back), so it has
+    # to be checkable rather than assumed.
+    #
+    # Losses and gains are reported SEPARATELY: the claim is specifically that
+    # mark price avoids exits on fake moves, which should show as a smaller
+    # average LOSS. If it also shrinks average gains, it is triggering late on
+    # real moves too, and that is the cost side of the trade-off.
+    by_wt: dict[str, list[dict]] = {}
+    for t in trades:
+        wt = t.get("stop_working_type")
+        if wt:
+            by_wt.setdefault(str(wt), []).append(t)
+    working_type = []
+    for wt, group in sorted(by_wt.items()):
+        st = group_stats(group)
+        st["label"] = wt
+        wins = [t for t in group if (_realised(t) or 0) > 0]
+        losses = [t for t in group if (_realised(t) or 0) < 0]
+        st["n_wins"] = len(wins)
+        st["n_losses"] = len(losses)
+        st["avg_win_usdt"] = (round(sum(_realised(t) for t in wins)/len(wins), 2)
+                              if wins else None)
+        st["avg_loss_usdt"] = (round(sum(_realised(t) for t in losses)/len(losses), 2)
+                               if losses else None)
+        st["avg_win_roi"] = (round(sum((_roi(t) or 0) for t in wins)/len(wins), 2)
+                             if wins else None)
+        st["avg_loss_roi"] = (round(sum((_roi(t) or 0) for t in losses)/len(losses), 2)
+                              if losses else None)
+        # The direct measure: how far past its sized stop a loser ran.
+        ov = []
+        for t in losses:
+            sized = (t.get("entry_context") or {}).get("sized_stop_roi")
+            r = _roi(t)
+            if sized and r is not None and r < 0:
+                ov.append(abs(r) - float(sized))
+        st["avg_overshoot_roi"] = round(sum(ov)/len(ov), 2) if ov else None
+        st["n_overshoot_measured"] = len(ov)
+        working_type.append(st)
+
     # Does a direction work better at certain times? Sessions first, because
     # four buckets can reach a usable sample where twenty-four cannot.
     by_session = [
@@ -860,6 +903,7 @@ def analyse(trades: list[dict]) -> dict:
         "by_session": by_session,
         "by_hour": [b for b in by_hour if b.get("n")],
         "by_callback_rule": callback_rule,
+        "by_working_type": working_type,
         "reentries": {"override_reentries": group_stats(reentries),
                       "fresh_entries": group_stats(fresh)},
         "notes": notes,

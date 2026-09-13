@@ -1187,3 +1187,63 @@ def test_the_scanner_publishes_the_verdict_it_already_computed():
     src = inspect.getsource(scanner.evaluate_symbol)
     assert src.count("gap_narrowing=narrowing") == 2   # both branches
     assert '"gap_narrowing": bool' in inspect.getsource(scanner.Candidate.as_row)
+
+
+# ── Stop trigger price ──────────────────────────────────────────────────────
+#
+# BR 2026-09-13 14:15 peaked +9.63% ROI on a 3% trail and exited -10.07%. The
+# 19.7-point give-back equals 0.99% of price; the candle's range was 0.99%.
+# The stop was taken by one wick, because CONTRACT_PRICE is the last trade on
+# this book.
+
+def test_mark_price_is_the_default():
+    from bot.futures_guard import GuardConfig
+    assert GuardConfig().stop_working_type == "MARK_PRICE"
+
+
+def test_every_protective_order_carries_the_working_type():
+    """Fixed stops AND trails, the rescue trail included — four sites."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert src.count('"workingType": self.cfg.stop_working_type') == 4
+
+
+def test_the_trade_records_which_price_was_in_force():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert '"stop_working_type": self.cfg.stop_working_type' in src
+
+
+def _wt(wt, roi, pnl, sized=30.0):
+    return {"symbol": "X/USDT:USDT", "side": "short", "final_roi": roi,
+            "realised_pnl_usdt": pnl, "fees_usdt": 1.7, "margin_usdt": 88.0,
+            "stop_working_type": wt, "exit_is_estimate": False,
+            "entry_context": {"sized_stop_roi": sized}}
+
+
+def test_losses_and_gains_are_reported_separately():
+    """
+    A single expectancy figure could hide the trade-off: mark price should
+    shrink the average LOSS, and if it shrinks the average GAIN too it is
+    triggering late on real moves. Both have to be visible.
+    """
+    from bot.analysis import analyse
+    rows = analyse([_wt("CONTRACT_PRICE", -40, -35), _wt("CONTRACT_PRICE", -38, -33),
+                    _wt("CONTRACT_PRICE", 20, 17),
+                    _wt("MARK_PRICE", -28, -24), _wt("MARK_PRICE", -31, -27),
+                    _wt("MARK_PRICE", 22, 19)])["by_working_type"]
+    by = {r["label"]: r for r in rows}
+    assert by["MARK_PRICE"]["avg_loss_usdt"] > by["CONTRACT_PRICE"]["avg_loss_usdt"]
+    assert by["MARK_PRICE"]["avg_overshoot_roi"] < by["CONTRACT_PRICE"]["avg_overshoot_roi"]
+    for r in rows:
+        assert r["avg_win_usdt"] is not None and r["avg_loss_usdt"] is not None
+
+
+def test_trades_without_the_field_are_simply_absent():
+    """Every trade before this change has no working type — it must not crash."""
+    from bot.analysis import analyse
+    t = _wt("MARK_PRICE", -10, -9)
+    t.pop("stop_working_type")
+    assert analyse([t])["by_working_type"] == []

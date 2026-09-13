@@ -166,6 +166,19 @@ class GuardConfig:
     #   ILV  armed +4.0% -> would exit ~+2.0% instead of  +5.06%   (-3 pts)
     # One winner is clipped; the one disaster is cut short.
     rescue_trail_callback_pct: float = 0.1
+    # Which price triggers a stop. Binance defaults to CONTRACT_PRICE — the
+    # LAST TRADED price on this book, wick included. MARK_PRICE is an index
+    # across venues with smoothing, and exists precisely so a single-venue
+    # wick cannot trigger a close.
+    #
+    # BR 2026-09-13 14:15: peaked +9.63% ROI on a 3% trail, so it should have
+    # exited near +6.6%. It exited -10.07% — a give-back of 19.7 ROI points =
+    # 0.99% of price, on a candle whose range was exactly 0.99%. One wick.
+    #
+    # The trade-off is real: mark lags, so a GENUINE adverse move triggers
+    # slightly later and may fill worse. This protects against fake moves and
+    # mildly penalises real ones.
+    stop_working_type: str = "MARK_PRICE"
     # Cut only positions WORSE than where they were first seen, so a
     # recovering position is never cut on depth alone.
     fail_fast_require_worsening: bool = False

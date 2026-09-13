@@ -936,7 +936,8 @@ class FuturesGuardian:
         order = self.exchange.create_order(
             symbol=pos.symbol, type="STOP_MARKET", side=side,
             amount=float(qty_str), price=None,
-            params={"stopPrice": float(price_str), "reduceOnly": True},
+            params={"stopPrice": float(price_str), "reduceOnly": True,
+                    "workingType": self.cfg.stop_working_type},
         )
         oid = str(order.get("id") or order.get("orderId") or "")
         log.info(f"Placed stop for {pos.symbol}: {side} STOP_MARKET "
@@ -963,7 +964,8 @@ class FuturesGuardian:
                 order = self.exchange.create_order(
                     symbol=pos.symbol, type="STOP_MARKET", side=side,
                     amount=float(qty_str), price=None,
-                    params={"stopPrice": float(price_str), "reduceOnly": True},
+                    params={"stopPrice": float(price_str), "reduceOnly": True,
+                    "workingType": self.cfg.stop_working_type},
                 )
                 ids.append(str(order.get("id") or order.get("orderId") or ""))
             remaining -= float(qty_str)
@@ -1010,7 +1012,8 @@ class FuturesGuardian:
             order = self.exchange.create_order(
                 symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
                 amount=float(qty_str), price=None,
-                params={"callbackRate": cb, "reduceOnly": True},
+                params={"callbackRate": cb, "reduceOnly": True,
+                        "workingType": self.cfg.stop_working_type},
             )
             oid = str(order.get("id") or order.get("orderId") or "")
             log.warning(
@@ -1042,7 +1045,8 @@ class FuturesGuardian:
         order = self.exchange.create_order(
             symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
             amount=float(qty_str), price=None,
-            params={"callbackRate": cb, "reduceOnly": True},
+            params={"callbackRate": cb, "reduceOnly": True,
+                        "workingType": self.cfg.stop_working_type},
         )
         oid = str(order.get("id") or order.get("orderId") or "")
         log.info(
@@ -1951,6 +1955,10 @@ class FuturesGuardian:
                 if meta.get("opened_seen_at") and meta.get("fill_time")
                 else None),
             "fill_price": meta.get("fill_price"),
+            # Which price triggered this trade's stops. Recorded so the
+            # MARK_PRICE change can be compared against CONTRACT_PRICE rather
+            # than assumed to have helped.
+            "stop_working_type": self.cfg.stop_working_type,
             "roi_at_60s": state.roi_checkpoints.get("60"),
             "roi_at_180s": state.roi_checkpoints.get("180"),
             "roi_at_300s": state.roi_checkpoints.get("300"),

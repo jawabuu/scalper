@@ -358,6 +358,10 @@ class BotConfig:
         "GUARD_FAIL_FAST_MAX_PEAK_ROI", 0.0))
     guard_fail_fast_loss_roi: float = field(default_factory=lambda: _env_float(
         "GUARD_FAIL_FAST_LOSS_ROI", 5.0))
+    # MARK_PRICE or CONTRACT_PRICE. Default MARK_PRICE: contract price is the
+    # last trade on this book, so a wick closes the position.
+    guard_stop_working_type: str = field(default_factory=lambda: (
+        _env("GUARD_STOP_WORKING_TYPE", "MARK_PRICE") or "MARK_PRICE").upper())
     # Price-% callback for the rescue trail used when a fixed stop is refused.
     # Tight by design — a refused stop means "get out", not "ride it". 0.1 is
     # the exchange minimum.
