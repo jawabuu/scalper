@@ -979,7 +979,8 @@ class FuturesGuardian:
         return ids[0]
 
     def _place_native_trail(self, pos: FuturesPosition,
-                            rescue: bool = False) -> str | None:
+                            rescue: bool = False,
+                            callback_pct: float | None = None) -> str | None:
         """
         Place Binance's own TRAILING_STOP_MARKET for the armed phase.
 
@@ -1001,7 +1002,14 @@ class FuturesGuardian:
             # position is already losing. Without an activationPrice Binance
             # activates it immediately at the current mark and trails from
             # there, so it fires on a `rescue_callback_pct` adverse move.
-            cb = max(0.1, float(self.cfg.rescue_trail_callback_pct))
+            # callback_pct lets a caller size this explicitly. The adaptive
+            # trail used to pass its value by temporarily MUTATING
+            # cfg.rescue_trail_callback_pct — which is shared state the
+            # dashboard can also write through update_rules(), so it was a
+            # race waiting for a second writer.
+            cb = max(0.1, float(callback_pct
+                                if callback_pct is not None
+                                else self.cfg.rescue_trail_callback_pct))
             qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
             side = stop_side(pos)
             if self.dry_run:
@@ -1079,12 +1087,7 @@ class FuturesGuardian:
                         f"0.1-10% band — leaving the fixed stop alone")
             return
         try:
-            saved = self.cfg.rescue_trail_callback_pct
-            try:
-                self.cfg.rescue_trail_callback_pct = cb
-                oid = self._place_native_trail(pos, rescue=True)
-            finally:
-                self.cfg.rescue_trail_callback_pct = saved
+            oid = self._place_native_trail(pos, rescue=True, callback_pct=cb)
             if not oid:
                 return
             state.adaptive_trail_id = oid

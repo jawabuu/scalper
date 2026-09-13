@@ -1549,8 +1549,8 @@ def _trail_guardian(**cfgkw):
     g._record = lambda *a, **k: None
     g.dry_run = False
 
-    def _native(pos, rescue=False):
-        g.placed.append(g.cfg.rescue_trail_callback_pct)
+    def _native(pos, rescue=False, callback_pct=None):
+        g.placed.append(callback_pct)
         return f"trail-{len(g.placed)}"
     g._place_native_trail = _native
     return g
@@ -1811,3 +1811,43 @@ def test_a_trailing_stop_counts_as_protective():
             {"reduceOnly": True, "side": "buy", "type": typ}, P())
     assert not is_protective_stop(
         {"reduceOnly": False, "side": "buy", "type": "TRAILING_STOP_MARKET"}, P())
+
+
+def test_the_adaptive_trail_does_not_mutate_shared_config():
+    """
+    It used to pass its callback by temporarily writing
+    cfg.rescue_trail_callback_pct — shared state the dashboard can also write
+    through update_rules(). Sequential position management made it safe today
+    and a race the moment a second writer appeared.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_adaptive_trail)
+    assert "self.cfg.rescue_trail_callback_pct =" not in src
+    assert "callback_pct=cb" in src
+
+
+def test_a_failed_trail_leaves_the_position_on_the_fixed_stop():
+    """
+    On failure adaptive_trail_id stays None, so: the fixed stop logic below
+    still runs, the 0.1% rescue is NOT skipped, and the next cycle retries.
+    """
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+
+    def _boom(pos, rescue=False, callback_pct=None):
+        raise RuntimeError("exchange refused")
+    g._place_native_trail = _boom
+    st = GuardState()
+    g._ensure_adaptive_trail(_TrailPos(), st, 30.0)   # must not raise
+    assert st.adaptive_trail_id is None
+
+
+def test_a_none_response_is_treated_as_failure_not_success():
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    g._place_native_trail = lambda pos, rescue=False, callback_pct=None: None
+    st = GuardState()
+    g._ensure_adaptive_trail(_TrailPos(), st, 30.0)
+    assert st.adaptive_trail_id is None
+    assert g._all_stop_ids.get("X/USDT:USDT") in (None, [])
