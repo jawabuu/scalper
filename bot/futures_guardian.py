@@ -1193,6 +1193,73 @@ class FuturesGuardian:
                         f"{tracked['armed']} are both held — arming should "
                         f"have superseded the adaptive one.")
 
+    def _wait_counterfactual(self, symbol: str, side: str, meta: dict) -> dict:
+        """
+        What would WAITING have done?
+
+        The entry is a trailing stop that fires on a retrace, so it can fill on
+        a noise wiggle inside a fast move — BR filled 0.13% off a candle low and
+        ran 3.5% against it in six seconds. The operator's proposal is to wait
+        two candles after the signal and then enter at market.
+
+        This answers that from history instead of changing behaviour. At close,
+        it pulls the candles covering the signal and reports where price was
+        one and two candles later, and how far it travelled against the
+        position in between.
+
+            wait_1c_pct / wait_2c_pct   price vs the ACTUAL fill, signed so
+                                        POSITIVE means waiting got a better
+                                        entry
+            wait_worst_pct              the worst adverse excursion between the
+                                        signal and the 2-candle mark, as a % of
+                                        the fill. If that exceeds the stop
+                                        distance, waiting would have watched
+                                        the move happen rather than sat in it.
+
+        Measurement only. One klines call per closed trade, off the hot path,
+        and any failure returns empty rather than disturbing the record.
+        """
+        out = {}
+        try:
+            ctx = meta.get("entry_context") or {}
+            sized_at = ctx.get("sized_at")
+            entry = meta.get("entry_price")
+            if not sized_at or not entry:
+                return out
+            tf = getattr(self, "atr_timeframe", "3m")
+            secs = 180 if tf.endswith("m") and tf[:-1] == "3" else 180
+            since = int((float(sized_at) - secs) * 1000)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=tf,
+                                              since=since, limit=4)
+            after = [c for c in (ohlcv or []) if c[0] / 1000.0 >= float(sized_at)]
+            if not after:
+                return out
+            entry = float(entry)
+            short = str(side).lower() == "short"
+
+            def vs_fill(price):
+                # positive = a BETTER entry than the one actually taken
+                d = (price - entry) / entry * 100.0
+                return round(d if short else -d, 3)
+
+            if len(after) >= 1:
+                out["wait_1c_pct"] = vs_fill(float(after[0][4]))
+            if len(after) >= 2:
+                out["wait_2c_pct"] = vs_fill(float(after[1][4]))
+            window = after[:2]
+            if window:
+                # worst move AGAINST the position over the wait
+                adverse = [(max(float(c[2]) for c in window) - entry) / entry * 100.0
+                           if short else
+                           (entry - min(float(c[3]) for c in window)) / entry * 100.0]
+                out["wait_worst_pct"] = round(max(adverse), 3)
+            out["wait_candles_seen"] = len(after)
+            return out
+        except Exception as e:
+            log.debug(f"{symbol}: wait counterfactual unavailable: "
+                      f"{_safe_err(e)}")
+            return out
+
     def _cancel_profit_floor(self, symbol: str, state):
         """
         Drop the floor when the position closes.
@@ -2229,6 +2296,9 @@ class FuturesGuardian:
             # MARK_PRICE change can be compared against CONTRACT_PRICE rather
             # than assumed to have helped.
             "stop_working_type": self.cfg.stop_working_type,
+            # What waiting two candles after the signal would have done.
+            # Recorded only — nothing waits.
+            **self._wait_counterfactual(symbol, meta.get("side"), meta),
             "roi_at_60s": state.roi_checkpoints.get("60"),
             "roi_at_180s": state.roi_checkpoints.get("180"),
             "roi_at_300s": state.roi_checkpoints.get("300"),

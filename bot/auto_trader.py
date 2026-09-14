@@ -261,13 +261,18 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                         f"of a U is buying a falling market."))
 
     if side == "long" and cfg.long_require_convergence:
-        if not row.get("gap_narrowing"):
+        # SIGNED, not absolute. A gap going +0.10% -> +0.02% shrinks just as
+        # much as one going -0.30% -> -0.05%, but the first is EMA9 FALLING
+        # toward EMA21 from above — a top rolling over — and the second is
+        # EMA9 rising toward it from underneath. Only the second is a long.
+        # A crossover in progress (-0.02 -> +0.02) is rising and passes.
+        if not row.get("gap_rising"):
             return AutoDecision(
                 False, symbol, side,
-                reason=(f"EMA gap not narrowing "
-                        f"({row.get('gap_narrowing_pct')}%) — EMA9 is not "
-                        f"turning toward EMA21, so this is a downtrend rather "
-                        f"than a recovery"))
+                reason=(f"EMA9 is not gaining on EMA21 "
+                        f"(signed gap moved {row.get('gap_rise_pct')}% from "
+                        f"{row.get('ema_gap_pct')}%) — converging from the top "
+                        f"is a rollover, not a recovery"))
 
     if cfg.veto_breakout:
         brk = row.get("breakout") or {}
@@ -928,6 +933,8 @@ class AutoTrader:
                         "atr_pct": row.get("atr_pct"),
                         "recent_tr_pct": row.get("recent_tr_pct"),
                         "gap_narrowing": row.get("gap_narrowing"),
+                        "gap_rising": row.get("gap_rising"),
+                        "gap_rise_pct": row.get("gap_rise_pct"),
                         "turned_up": (row.get("turn") or {}).get("turned_up"),
                         "bars_since_low": (row.get("turn") or {}).get("bars_since_low"),
                         "turn_rise_pct": (row.get("turn") or {}).get("rise_pct"),

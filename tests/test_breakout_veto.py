@@ -34,7 +34,7 @@ def _long(**kw):
     mirror of the STORJ/TA case."""
     row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 40.0,
            "pct_above_24h_low": 0.1, "pct_below_24h_high": -60.0,
-           "strength": "strengthening", "gap_narrowing": True,
+           "strength": "strengthening", "gap_narrowing": True, "gap_rising": True,
            "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2}}
     row.update(kw)
     return row
@@ -1130,7 +1130,7 @@ def _long_cand(**kw):
     row = {"symbol": "4/USDT:USDT", "direction": "long", "rsi": 48.0,
            "pct_above_24h_low": 1.13, "pct_below_24h_high": -19.26,
            "strength": "strengthening", "atr_pct": 0.6,
-           "gap_narrowing": True, "gap_narrowing_pct": -0.4,
+           "gap_narrowing": True, "gap_rising": True, "gap_narrowing_pct": -0.4,
            "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2}}
     row.update(kw)
     return row
@@ -1146,10 +1146,48 @@ def test_the_gate_is_on_by_default():
 
 def test_a_long_with_a_widening_gap_is_refused():
     cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
-    d = evaluate_candidate(_long_cand(gap_narrowing=False, gap_narrowing_pct=0.3),
+    d = evaluate_candidate(_long_cand(gap_rising=False, gap_rise_pct=-0.3),
                            streak=2, cfg=cfg, atr_pct=0.6)
     assert not d.enter
-    assert "not narrowing" in d.reason
+    assert "not gaining on EMA21" in d.reason
+
+
+def test_converging_from_the_TOP_is_refused():
+    """
+    LAB 2026-09-14 07:52: EMA9 0.05299 ABOVE EMA21 0.05296, curving DOWN
+    toward it. The absolute test called that "narrowing" — the same verdict it
+    gives a bottom forming underneath. The signed test separates them.
+    """
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    rolling_over = _long_cand(ema_gap_pct=0.057, gap_narrowing=True,
+                              gap_rising=False, gap_rise_pct=-0.08)
+    d = evaluate_candidate(rolling_over, streak=2, cfg=cfg, atr_pct=0.6)
+    assert not d.enter
+    assert "from the top" in d.reason
+
+
+def test_a_crossover_in_progress_is_allowed():
+    """No objection to a cross — only to converging from above."""
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    crossing = _long_cand(ema_gap_pct=0.022, gap_rising=True, gap_rise_pct=0.04)
+    assert evaluate_candidate(crossing, streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_the_signed_test_separates_the_two_shrinking_cases():
+    from bot.scanner import gap_rising, ScanConfig
+    pd = pytest.importorskip("pandas")
+
+    def frame(gaps):
+        slow = [1.0] * len(gaps)
+        fast = [1.0 * (1 + g / 100) for g in gaps]
+        return pd.DataFrame({"ema_fast": fast, "ema_slow": slow})
+
+    cfg = ScanConfig()
+    lb = cfg.convergence_lookback
+    from_below = frame([-0.30] * lb + [-0.05])
+    from_above = frame([+0.10] * lb + [+0.02])
+    assert gap_rising(from_below, cfg)[0] is True
+    assert gap_rising(from_above, cfg)[0] is False
 
 
 def test_a_long_with_a_narrowing_gap_is_allowed():
@@ -1157,11 +1195,11 @@ def test_a_long_with_a_narrowing_gap_is_allowed():
     assert evaluate_candidate(_long_cand(), streak=2, cfg=cfg, atr_pct=0.6).enter
 
 
-def test_a_missing_flag_is_treated_as_not_narrowing():
+def test_a_missing_flag_is_treated_as_not_rising():
     """Older rows carry no verdict; refusing is the safe reading for a long."""
     cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
     row = _long_cand()
-    row.pop("gap_narrowing")
+    row.pop("gap_rising")
     assert not evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter
 
 
@@ -1967,3 +2005,103 @@ def test_the_audit_is_throttled_per_symbol():
     for _ in range(10):
         g._audit_protection(_TrailPos(), st)
     assert len(calls) == 1
+
+
+# ── Wait counterfactual ─────────────────────────────────────────────────────
+
+def _wait_guardian(candles):
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g.atr_timeframe = "3m"
+    g.exchange = type("X", (), {
+        "fetch_ohlcv": staticmethod(lambda s, timeframe=None, since=None,
+                                    limit=None: candles)})()
+    return g
+
+
+def test_waiting_is_scored_positive_when_it_gets_a_better_short_entry():
+    """
+    A short filled at 0.28884 while price ran up. Two candles later it is
+    higher, so waiting would have SOLD HIGHER — a better entry.
+    """
+    g = _wait_guardian([
+        [1_000_000, 0.289, 0.2995, 0.2885, 0.2955, 1],
+        [1_180_000, 0.2955, 0.2999, 0.294, 0.2990, 1],
+    ])
+    meta = {"entry_price": 0.28884,
+            "entry_context": {"sized_at": 1000.0}}
+    out = g._wait_counterfactual("BR/USDT:USDT", "short", meta)
+    assert out["wait_1c_pct"] > 0 and out["wait_2c_pct"] > 0
+    assert out["wait_candles_seen"] == 2
+
+
+def test_waiting_is_scored_negative_when_the_move_already_went():
+    """A short whose price fell away: waiting sells LOWER, a worse entry."""
+    g = _wait_guardian([
+        [1_000_000, 0.289, 0.289, 0.280, 0.282, 1],
+        [1_180_000, 0.282, 0.283, 0.275, 0.276, 1],
+    ])
+    meta = {"entry_price": 0.28884, "entry_context": {"sized_at": 1000.0}}
+    out = g._wait_counterfactual("BR/USDT:USDT", "short", meta)
+    assert out["wait_2c_pct"] < 0
+
+
+def test_the_worst_adverse_excursion_is_reported():
+    """If that exceeds the stop, waiting meant watching rather than sitting."""
+    g = _wait_guardian([
+        [1_000_000, 0.289, 0.300, 0.288, 0.295, 1],
+        [1_180_000, 0.295, 0.297, 0.294, 0.296, 1],
+    ])
+    meta = {"entry_price": 0.28884, "entry_context": {"sized_at": 1000.0}}
+    out = g._wait_counterfactual("BR/USDT:USDT", "short", meta)
+    assert out["wait_worst_pct"] == pytest.approx(
+        (0.300 - 0.28884) / 0.28884 * 100, abs=0.01)
+
+
+def test_a_long_is_scored_the_other_way_round():
+    g = _wait_guardian([
+        [1_000_000, 0.2112, 0.2112, 0.2070, 0.2074, 1],
+        [1_180_000, 0.2074, 0.2080, 0.2060, 0.2065, 1],
+    ])
+    meta = {"entry_price": 0.2112, "entry_context": {"sized_at": 1000.0}}
+    out = g._wait_counterfactual("USELESS/USDT:USDT", "long", meta)
+    assert out["wait_2c_pct"] > 0          # buying lower is better for a long
+
+
+def test_it_never_disturbs_the_record_on_failure():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g.atr_timeframe = "3m"
+
+    def _boom(*a, **k):
+        raise RuntimeError("klines unavailable")
+    g.exchange = type("X", (), {"fetch_ohlcv": staticmethod(_boom)})()
+    out = g._wait_counterfactual(
+        "X/USDT:USDT", "short",
+        {"entry_price": 1.0, "entry_context": {"sized_at": 1000.0}})
+    assert out == {}
+
+
+def test_a_trade_without_a_signal_time_is_skipped():
+    g = _wait_guardian([[1_000_000, 1, 1, 1, 1, 1]])
+    assert g._wait_counterfactual("X/USDT:USDT", "short",
+                                  {"entry_price": 1.0}) == {}
+
+
+def test_the_aggregate_split_reports_winners_and_losers_apart():
+    from bot.analysis import analyse
+    def t(pnl, w2):
+        return {"symbol": "X/USDT:USDT", "side": "short", "final_roi": 10.0,
+                "realised_pnl_usdt": pnl, "fees_usdt": 1.7, "margin_usdt": 88.0,
+                "exit_is_estimate": False, "wait_1c_pct": w2 / 2,
+                "wait_2c_pct": w2, "wait_worst_pct": 1.0,
+                "entry_context": {"sized_stop_roi": 30.0}}
+    out = analyse([t(20, 0.8), t(15, 0.4), t(-30, -0.6)])["wait_two_candles"]
+    assert out["n"] == 3
+    assert out["n_winners"] == 2 and out["n_losers"] == 1
+    assert out["winners_2c_pct"] > 0 > out["losers_2c_pct"]
+    assert out["share_better_2c"] == pytest.approx(66.7, abs=0.1)

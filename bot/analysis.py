@@ -462,6 +462,9 @@ def _diag_row(t: dict, thin_callback_pct: float = THIN_CALLBACK_PCT) -> dict:
         "roi_at_0s": t.get("roi_at_0s"),
         "signal_age_s": t.get("signal_age_s"),
         "observation_lag_s": t.get("observation_lag_s"),
+        "wait_1c_pct": t.get("wait_1c_pct"),
+        "wait_2c_pct": t.get("wait_2c_pct"),
+        "wait_worst_pct": t.get("wait_worst_pct"),
         "drift_since_sizing_pct": t.get("drift_since_sizing_pct"),
         "change_24h_pct": ctx.get("change_24h_pct"),
         "body_pct": ctx.get("body_pct"),
@@ -532,6 +535,10 @@ def diagnostics_report(rows: list[dict], omitted: int = 0) -> str:
                    f"signal_age {_fmt(r['signal_age_s'],1)}s  "
                    f"drift {_fmt(r['drift_since_sizing_pct'],3)}% (+ve = good fill)  "
                    f"obs_lag {_fmt(r['observation_lag_s'],2)}s")
+        out.append(f"  if we waited : 1 candle {_fmt(r['wait_1c_pct'],3)}%  "
+                   f"2 candles {_fmt(r['wait_2c_pct'],3)}% "
+                   f"(+ve = a better entry)  "
+                   f"worst adverse {_fmt(r['wait_worst_pct'],3)}%")
         out.append(f"  taper        : ratio {_fmt(r['taper_ratio'],3)} "
                    f"(under 1 = pushes shrinking)  tapering {_fmt(r['tapering'])}  "
                    f"vol_ratio {_fmt(r['taper_vol_ratio'],3)}  "
@@ -603,6 +610,34 @@ def analyse(trades: list[dict]) -> dict:
         st = group_stats(group)
         st["label"] = src
         callback_rule.append(st)
+
+    # ── Would waiting two candles have helped? ──
+    # The entry is a trailing stop that fires on a retrace, so it can fill on a
+    # noise wiggle inside a fast move. Recording where price sat one and two
+    # candles after the SIGNAL answers the question from history. Positive
+    # means waiting would have entered at a better price than the fill taken.
+    waited = [t for t in trades if t.get("wait_2c_pct") is not None]
+    wait_stats = None
+    if waited:
+        def _avg(key, rows):
+            vals = [float(r[key]) for r in rows if r.get(key) is not None]
+            return round(sum(vals) / len(vals), 3) if vals else None
+        wins = [t for t in waited if (_realised(t) or 0) > 0]
+        losses = [t for t in waited if (_realised(t) or 0) < 0]
+        wait_stats = {
+            "n": len(waited),
+            "avg_1c_pct": _avg("wait_1c_pct", waited),
+            "avg_2c_pct": _avg("wait_2c_pct", waited),
+            "avg_worst_pct": _avg("wait_worst_pct", waited),
+            "winners_2c_pct": _avg("wait_2c_pct", wins),
+            "losers_2c_pct": _avg("wait_2c_pct", losses),
+            "n_winners": len(wins),
+            "n_losers": len(losses),
+            # How often waiting would have found a better entry at all.
+            "share_better_2c": (
+                round(sum(1 for t in waited
+                          if (t.get("wait_2c_pct") or 0) > 0) / len(waited) * 100, 1)),
+        }
 
     # ── Which price triggered the stops ──
     # Binance's default, CONTRACT_PRICE, is the last trade on THIS book, so a
@@ -904,6 +939,7 @@ def analyse(trades: list[dict]) -> dict:
         "by_hour": [b for b in by_hour if b.get("n")],
         "by_callback_rule": callback_rule,
         "by_working_type": working_type,
+        "wait_two_candles": wait_stats,
         "reentries": {"override_reentries": group_stats(reentries),
                       "fresh_entries": group_stats(fresh)},
         "notes": notes,

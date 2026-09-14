@@ -29,7 +29,7 @@ def _long(**kw):
     # test_a_long_with_a_widening_gap_is_refused.
     row = {"symbol": "Y/USDT:USDT", "direction": "long", "rsi": 55.0,
            "pct_above_24h_low": 2.0, "pct_below_24h_high": -30.0,
-           "strength": "strengthening", "gap_narrowing": True,
+           "strength": "strengthening", "gap_narrowing": True, "gap_rising": True,
            "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2}}
     row.update(kw)
     return row
@@ -480,7 +480,7 @@ def _band_cfg(lo=45.0, hi=50.0):
 
 def _long_row(rsi):
     return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": rsi,
-            "gap_narrowing": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
+            "gap_narrowing": True, "gap_rising": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
             "atr_pct": 0.5, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
 
@@ -539,7 +539,7 @@ def _dir_cfg(mode):
 
 def _dir_row(side, rsi):
     return {"symbol": "X/USDT:USDT", "direction": side, "rsi": rsi,
-            "gap_narrowing": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
+            "gap_narrowing": True, "gap_rising": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
             "atr_pct": 0.5, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0,
             "range_pos_24h": 0.1 if side == "long" else 0.9}
@@ -767,7 +767,7 @@ def test_rule_refusals_are_recorded_with_a_reason():
                           max_dist_to_extreme_pct=3.0,
                           required_strength_sweeps=2)
     far = {"symbol": "ATOM/USDT:USDT", "direction": "long", "rsi": 47.7,
-           "gap_narrowing": True,   # isolate the distance rule under test
+           "gap_narrowing": True, "gap_rising": True,   # isolate the distance rule under test
            "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
            "atr_pct": 0.307, "pct_above_24h_low": 12.06,
            "pct_below_24h_high": -0.83, "range_pos_24h": 0.93}
@@ -883,7 +883,7 @@ def _atr_cfg(floor):
 
 def _atr_row(atr):
     return {"symbol": "X/USDT:USDT", "direction": "long", "rsi": 48,
-            "gap_narrowing": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
+            "gap_narrowing": True, "gap_rising": True, "turn": {"turned_up": True, "bars_since_low": 4, "rise_pct": 1.2},
             "atr_pct": atr, "pct_above_24h_low": 1.0,
             "pct_below_24h_high": -1.0, "range_pos_24h": 0.1}
 

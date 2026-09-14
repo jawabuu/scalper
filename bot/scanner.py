@@ -126,6 +126,11 @@ class Candidate:
     # always computed this; the long branch recorded the raw delta and threw
     # the verdict away, so "recovering" in its own comment was never tested.
     gap_narrowing: bool = False
+    # Signed gap increasing: EMA9 GAINING on EMA21. Distinct from
+    # gap_narrowing, which is absolute and cannot tell a bottom forming from a
+    # top rolling over.
+    gap_rising: bool = False
+    gap_rise_pct: float = 0.0
     # Right side of a U or V: the fast EMA's low is behind us and it is rising
     # off it. Distinct from gap_narrowing, which is only a two-point shrink.
     turn: dict = field(default_factory=dict)
@@ -179,6 +184,8 @@ class Candidate:
             "breakout": dict(self.breakout or {}),
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "gap_narrowing": bool(self.gap_narrowing),
+            "gap_rising": bool(self.gap_rising),
+            "gap_rise_pct": round(float(self.gap_rise_pct or 0.0), 4),
             "turn": dict(self.turn or {}),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
             "volume_24h_usdt": round(float(self.volume_24h_usdt), 0),
@@ -465,6 +472,40 @@ def gap_series(df: pd.DataFrame) -> pd.Series:
     return (df["ema_fast"] - df["ema_slow"]) / df["ema_slow"] * 100
 
 
+def gap_rising(df: pd.DataFrame, cfg: ScanConfig) -> tuple[bool, float]:
+    """
+    Is EMA9 GAINING on EMA21 — the SIGNED gap increasing?
+
+    is_converging() compares ABSOLUTE gaps, so it cannot tell these apart:
+
+        -0.30% -> -0.05%   EMA9 rising toward EMA21 from underneath
+        +0.10% -> +0.02%   EMA9 FALLING toward EMA21 from above
+
+    Both shrink in absolute terms and both read as "narrowing". They are
+    opposite situations: the first is a bottom forming, the second is a top
+    rolling over. LAB at 2026-09-14 07:52 was the second — EMA9 0.05299 above
+    EMA21 0.05296, yellow curving down toward pink — and the long gate let it
+    through.
+
+    The signed test needs no sign restriction and no threshold. A crossover in
+    progress (-0.02 -> +0.02) is rising and passes, which is correct: the
+    operator's objection is to converging FROM THE TOP, not to a cross.
+
+    Returns (rising, signed_change).
+    """
+    try:
+        gaps = gap_series(df)
+        lb = max(1, int(cfg.convergence_lookback))
+        if len(gaps) < lb + 1:
+            return False, 0.0
+        now = float(gaps.iloc[-1])
+        before = float(gaps.iloc[-1 - lb])
+        change = now - before
+        return bool(change > float(cfg.min_convergence_pct)), round(change, 4)
+    except Exception:
+        return False, 0.0
+
+
 def turned(df: pd.DataFrame, cfg: ScanConfig, direction: str = "long") -> dict:
     """
     Is this the RIGHT side of a U or a V — has the bottom been crossed?
@@ -598,6 +639,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     tap_long = candle_taper(df, "long", cfg.taper_window)
     turn_short = turned(df, cfg, "short")
     turn_long = turned(df, cfg, "long")
+    rising, rise_change = gap_rising(df, cfg)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -628,8 +670,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             breakout=breakout_structure(df, high_24h, low_24h, "short",
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
-            gap_change_pct=gap_change, gap_narrowing=narrowing,
-            turn=turn_short, change_24h_pct=change_24h_pct,
+            gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
+            gap_rise_pct=rise_change, turn=turn_short, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -649,8 +691,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
             breakout=breakout_structure(df, high_24h, low_24h, "long",
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
-            gap_change_pct=gap_change, gap_narrowing=narrowing,
-            turn=turn_long, change_24h_pct=change_24h_pct,
+            gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
+            gap_rise_pct=rise_change, turn=turn_long, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,
