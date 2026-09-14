@@ -3248,10 +3248,16 @@ function renderGuardian(g) {
     const envTag = g.demo
       ? '<span class="guard-flag gf-dry">DEMO ACCOUNT</span>'
       : '<span class="guard-flag gf-live">LIVE ACCOUNT</span>';
+    const rl = (g && g.rate_limit) || {};
+    const rlTag = rl.limited_now
+      ? `<span class="flag">RATE-LIMITED ${rl.seconds_remaining}s</span>`
+      : (rl.hits_last_hour
+          ? `<span class="chip">rate-limit hits/h: ${rl.hits_last_hour}</span>`
+          : '');
     const ffTag = c.fail_fast_enabled
       ? `<span class="chip">fail-fast ${c.fail_fast_s}s</span>`
       : `<span class="flag">FAIL-FAST OFF</span>`;
-    meta.innerHTML = `${envTag} ${mode} ${ffTag} &nbsp;(stop -${c.initial_stop_roi}% ROI · `
+    meta.innerHTML = `${envTag} ${mode} ${ffTag} ${rlTag} &nbsp;(stop -${c.initial_stop_roi}% ROI · `
       + `arm +${c.arm_roi}% · ${trail} · ${ago})`;
   }
 

@@ -2130,3 +2130,82 @@ def test_the_taper_window_default_and_knob():
     from bot.scanner import ScanConfig
     assert ScanConfig().taper_window == 10
     assert ScanConfig(taper_window=14).taper_window == 14
+
+
+# ── Rate-limit monitor ──────────────────────────────────────────────────────
+
+def _fresh_monitor():
+    from bot.futures_guardian import RateLimitMonitor
+    return RateLimitMonitor()
+
+
+def test_it_recognises_every_shape_the_limit_arrives_in():
+    """
+    Same condition, different call paths: ccxt.RateLimitExceeded,
+    ccxt.DDoSProtection, a bare HTTP 429, or Binance's own -1003.
+    """
+    m = _fresh_monitor()
+    for text in ('binanceusdm {"code":-1003,"msg":"Too many requests."}',
+                 "HTTP 429 Too Many Requests",
+                 "DDoSProtection: way too many requests",
+                 "HTTP 418 IP banned until ..."):
+        assert m.looks_rate_limited(text), text
+
+
+def test_ordinary_errors_are_not_flagged():
+    m = _fresh_monitor()
+    for text in ('binanceusdm {"code":-2021,"msg":"Order would immediately trigger."}',
+                 'binanceusdm {"code":-2011,"msg":"Unknown order sent."}',
+                 "ConnectionResetError"):
+        assert not m.looks_rate_limited(text), text
+
+
+def test_a_hit_sets_a_cooldown_and_counts(caplog):
+    m = _fresh_monitor()
+    with caplog.at_level("ERROR"):
+        hit = m.note(RuntimeError(), 'binanceusdm {"code":-1003,"msg":"Too many requests."}')
+    assert hit is True
+    st = m.status()
+    assert st["limited_now"] is True
+    assert st["hits_last_hour"] == 1
+    assert 0 < st["seconds_remaining"] <= m.COOLDOWN_S
+    assert any("RATE-LIMITED" in r.message for r in caplog.records)
+
+
+def test_a_non_rate_limit_error_changes_nothing():
+    m = _fresh_monitor()
+    assert m.note(RuntimeError(), "code -2021 order would immediately trigger") is False
+    assert m.status()["limited_now"] is False
+    assert m.status()["hits_last_hour"] == 0
+
+
+def test_hits_age_out_of_the_hourly_count():
+    import time as _t
+    m = _fresh_monitor()
+    m.hits = [_t.time() - 4000, _t.time() - 10]      # one over an hour old
+    assert m.status()["hits_last_hour"] == 1
+
+
+def test_detection_rides_on_the_shared_error_formatter():
+    """
+    Every except block in the guardian formats through _safe_err, so detection
+    needs no hook per call site — which is how it would have been missed.
+    """
+    import inspect
+    from bot import futures_guardian as fg
+    src = inspect.getsource(fg._safe_err)
+    assert "RATE_LIMIT.note" in src
+
+
+def test_the_poll_loop_backs_off_while_limited():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    i = src.index('RATE_LIMIT.status()\n            if rl["limited_now"]')
+    assert "seconds_remaining" in src[i:i + 400]
+
+
+def test_the_status_reaches_the_snapshot():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    assert '"rate_limit": RATE_LIMIT.status()' in inspect.getsource(FuturesGuardian)

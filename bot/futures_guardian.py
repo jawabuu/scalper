@@ -43,13 +43,86 @@ from .futures_guard import (
 log = logging.getLogger("futures_guardian")
 
 
+class RateLimitMonitor:
+    """
+    Notices when Binance is rate-limiting us, and says so loudly.
+
+    `enableRateLimit: True` is client-side PACING — ccxt spaces requests to
+    stay under the published limit. It does nothing when a limit is actually
+    hit: there was no retry, no backoff, and no signal anywhere that it had
+    happened. Binance escalates repeated 429s to a temporary IP ban (418), so
+    silently continuing at the same rate is the worst response available.
+
+    Detection is by error CODE and message rather than exception class, because
+    the same condition arrives as ccxt.RateLimitExceeded, ccxt.DDoSProtection
+    or a bare HTTP error depending on the call path.
+
+        429    too many requests
+        418    IP banned (an escalated 429)
+        -1003  TOO_MANY_REQUESTS, Binance's own weight error
+    """
+
+    MARKERS = ("429", "418", "-1003", "too many requests",
+               "rate limit", "ratelimit", "way too many requests",
+               "ip banned", "ddosprotection")
+    COOLDOWN_S = 60.0
+
+    def __init__(self):
+        self.hits: list[float] = []
+        self.last_at: float | None = None
+        self.last_msg: str = ""
+        self.cooldown_until: float = 0.0
+
+    @classmethod
+    def looks_rate_limited(cls, text: str) -> bool:
+        t = (text or "").lower()
+        return any(m in t for m in cls.MARKERS)
+
+    def note(self, err, text: str = "") -> bool:
+        """Record a rate-limit error. Returns True if it was one."""
+        blob = f"{type(err).__name__} {text}".lower()
+        if not self.looks_rate_limited(blob):
+            return False
+        now = time.time()
+        self.hits.append(now)
+        self.hits = [h for h in self.hits if now - h < 3600]
+        self.last_at, self.last_msg = now, text[:200]
+        self.cooldown_until = now + self.COOLDOWN_S
+        log.error(
+            f"RATE-LIMITED by the exchange ({len(self.hits)} time(s) in the "
+            f"last hour): {text[:160]} — backing off for "
+            f"{self.COOLDOWN_S:.0f}s. Repeated 429s escalate to an IP ban.")
+        return True
+
+    def status(self) -> dict:
+        now = time.time()
+        self.hits = [h for h in self.hits if now - h < 3600]
+        return {
+            "limited_now": now < self.cooldown_until,
+            "seconds_remaining": max(0, round(self.cooldown_until - now)),
+            "hits_last_hour": len(self.hits),
+            "last_at": self.last_at,
+            "last_message": self.last_msg,
+        }
+
+
+RATE_LIMIT = RateLimitMonitor()
+
+
 def _safe_err(err) -> str:
     """Exchange error as code + message, never the signed request URL."""
     from bot.futures_entry import _safe_err as _f
     try:
-        return _f(err)
+        text = _f(err)
     except Exception:
-        return f"{type(err).__name__}"
+        text = f"{type(err).__name__}"
+    # Every except block in the guardian formats through here, so detection
+    # rides along automatically rather than needing a hook per call site.
+    try:
+        RATE_LIMIT.note(err, text)
+    except Exception:
+        pass
+    return text
 
 
 def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
@@ -3075,7 +3148,15 @@ class FuturesGuardian:
             interval = self.poll_interval
             if self._has_pending_entries():
                 interval = min(interval, self.pending_poll_interval)
-            time.sleep(interval)
+            # If the exchange rate-limited us, stretch the poll rather than
+            # continuing at the rate that caused it. Protection is already
+            # resting on the exchange, so a slower loop costs observation, not
+            # safety.
+            rl = RATE_LIMIT.status()
+            if rl["limited_now"]:
+                time.sleep(max(interval, min(rl["seconds_remaining"], 15)))
+            else:
+                time.sleep(interval)
 
     def start_background(self):
         t = threading.Thread(target=self.run_forever, daemon=True,
@@ -3140,4 +3221,5 @@ class FuturesGuardian:
                 "fail_fast_loss_roi": self.cfg.fail_fast_loss_roi,
                 "fail_fast_enabled": bool(self.cfg.fail_fast_s),
             },
+            "rate_limit": RATE_LIMIT.status(),
         }
