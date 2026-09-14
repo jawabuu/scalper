@@ -70,8 +70,12 @@ class ScanConfig:
     # acceleration it reads ~1.6x low, and ~1.8x low on a blow-off. Over a
     # normal or quiet tape the two agree, so this only bites when it should.
     recent_tr_candles: int = 3
-    # How many candles back to look for the taper comparison.
-    taper_window: int = 6
+    # How many candles to scan for the taper comparison. candle_taper needs
+    # FOUR candles moving with the trend inside this window before it can
+    # compare the recent two against the previous two — at 6 it found them on
+    # only 54 of 232 trades. Widening raises coverage without changing what is
+    # compared; the cost is that the "previous two" can sit further back.
+    taper_window: int = 10
     # Window for the U/V turn test, and how many candles the low must be
     # behind us before it counts as crossed rather than still forming.
     turn_lookback: int = 10

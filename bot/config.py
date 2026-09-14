@@ -323,6 +323,8 @@ class BotConfig:
     # us and rising off it. Default TRUE.
     auto_long_require_turn: bool = field(default_factory=lambda: _env_bool(
         "AUTO_LONG_REQUIRE_TURN", True))
+    auto_taper_window: int = field(default_factory=lambda: _env_int(
+        "AUTO_TAPER_WINDOW", 10))
     auto_turn_lookback: int = field(default_factory=lambda: _env_int(
         "AUTO_TURN_LOOKBACK", 10))
     auto_turn_min_bars_since: int = field(default_factory=lambda: _env_int(

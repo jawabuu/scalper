@@ -945,11 +945,13 @@ def test_the_refusal_reason_is_logged():
 # ── Candle taper: the operator's visual rule for timing a turn ──────────────
 
 def _run(bodies, green=True):
+    """Signed bodies: positive = green, negative = red."""
     pd = pytest.importorskip("pandas")
     rows, px = [], 1.0
     for b in bodies:
         o = px
-        c = px * (1 + b) if green else px * (1 - b)
+        up = (b > 0) if green else (b < 0)
+        c = px * (1 + abs(b)) if up else px * (1 - abs(b))
         hi = max(o, c) * 1.001
         lo = min(o, c) * 0.999
         rows.append((o, hi, lo, c, 1e6))
@@ -2105,3 +2107,26 @@ def test_the_aggregate_split_reports_winners_and_losers_apart():
     assert out["n_winners"] == 2 and out["n_losers"] == 1
     assert out["winners_2c_pct"] > 0 > out["losers_2c_pct"]
     assert out["share_better_2c"] == pytest.approx(66.7, abs=0.1)
+
+
+def test_a_wider_taper_window_raises_coverage_without_changing_the_comparison():
+    """
+    candle_taper needs FOUR trend candles before it can compare the recent two
+    against the previous two. At window 6 only 54 of 232 real trades produced a
+    reading. Widening scans further for those four; it does not change what is
+    compared.
+    """
+    from bot.scanner import candle_taper
+    # four green pushes, but spaced out by red candles
+    mixed = _run([0.04, -0.01, 0.03, -0.01, 0.012, -0.005, 0.008])
+    narrow = candle_taper(mixed, "short", 4)
+    wide = candle_taper(mixed, "short", 10)
+    assert narrow["taper_ratio"] is None        # cannot find four in four bars
+    assert wide["taper_ratio"] is not None
+    assert wide["tapering"] is True             # 0.04,0.03 -> 0.012,0.008
+
+
+def test_the_taper_window_default_and_knob():
+    from bot.scanner import ScanConfig
+    assert ScanConfig().taper_window == 10
+    assert ScanConfig(taper_window=14).taper_window == 14

@@ -1951,6 +1951,21 @@ function timeAgo(iso) {
 // sections are unchanged between polls — analysis only moves when a trade
 // closes. Compare first and skip the write when nothing differs, so reading
 // a long section is not interrupted by a refresh that changed nothing.
+// Timestamps carried only a time, so a row from yesterday looked like one
+// from an hour ago — and reading a trade history across a 24h cycle boundary
+// meant guessing. Show the date whenever it is not today.
+function stamp(secs) {
+  if (!secs) return '';
+  const d = new Date(secs * 1000);
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const t = d.toLocaleTimeString();
+  if (sameDay) return t;
+  const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return day + ' ' + t;
+}
+
 function setEl(id, html) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -2519,7 +2534,7 @@ async function refreshFuturesHistory() {
           t.trough_roi === null || t.trough_roi === undefined
             ? '—' : (t.trough_roi > 0 ? '+' : '') + t.trough_roi + '%'}</td>
         <td class="num">${pnlCell}</td>
-        <td style="color:var(--muted);font-size:11px">${t.closed_at ? new Date(t.closed_at*1000).toLocaleTimeString() : ''}</td>
+        <td style="color:var(--muted);font-size:11px">${stamp(t.closed_at)}</td>
       </tr>`;
     }).join('');
     el.innerHTML = `<table><thead><tr>
@@ -3303,7 +3318,7 @@ function renderGuardian(g) {
   }
 
   const acts = (g.recent_actions || []).slice(0, 6).map(a =>
-    `${new Date(a.ts * 1000).toLocaleTimeString()} · ${a.symbol.replace('/USDT:USDT','')} · ${a.action} · ${a.detail}`
+    `${stamp(a.ts)} · ${a.symbol.replace('/USDT:USDT','')} · ${a.action} · ${a.detail}`
   ).join('<br>');
   setEl('guard-actions', acts ? ('<strong>Recent:</strong><br>' + acts) : '');
 }

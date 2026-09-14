@@ -172,6 +172,7 @@ if __name__ == "__main__":
             min_atr_pct=cfg.scan_min_atr_pct,
             max_atr_pct=cfg.scan_max_atr_pct,
             recent_tr_candles=cfg.auto_recent_tr_candles,
+            taper_window=cfg.auto_taper_window,
             turn_lookback=cfg.auto_turn_lookback,
             turn_min_bars_since=cfg.auto_turn_min_bars_since,
             extreme_band_pct=cfg.scan_extreme_band_pct,
