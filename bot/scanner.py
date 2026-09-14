@@ -78,6 +78,8 @@ class ScanConfig:
     taper_window: int = 10
     # Window for the U/V turn test, and how many candles the low must be
     # behind us before it counts as crossed rather than still forming.
+    # How far back to look for the leg that created the setup.
+    advance_lookback: int = 30
     turn_lookback: int = 10
     turn_min_bars_since: int = 2
     # How many candles to read body/wick structure over.
@@ -134,6 +136,9 @@ class Candidate:
     # gap_narrowing, which is absolute and cannot tell a bottom forming from a
     # top rolling over.
     gap_rising: bool = False
+    # Volume across the advance that created the setup, measured over the whole
+    # leg rather than the last two candles.
+    advance: dict = field(default_factory=dict)
     gap_rise_pct: float = 0.0
     # Right side of a U or V: the fast EMA's low is behind us and it is rising
     # off it. Distinct from gap_narrowing, which is only a two-point shrink.
@@ -189,6 +194,7 @@ class Candidate:
             "gap_narrowing_pct": round(float(self.gap_change_pct), 3),
             "gap_narrowing": bool(self.gap_narrowing),
             "gap_rising": bool(self.gap_rising),
+            "advance": dict(self.advance or {}),
             "gap_rise_pct": round(float(self.gap_rise_pct or 0.0), 4),
             "turn": dict(self.turn or {}),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
@@ -476,6 +482,64 @@ def gap_series(df: pd.DataFrame) -> pd.Series:
     return (df["ema_fast"] - df["ema_slow"]) / df["ema_slow"] * 100
 
 
+def advance_volume(df: pd.DataFrame, direction: str = "short",
+                   lookback: int = 30) -> dict:
+    """
+    Volume across the ADVANCE THAT CREATED THE SETUP — not the last two candles.
+
+    taper_vol_ratio compares the most recent two trend candles against the two
+    before them. That is a local burst reading taken at the moment of
+    evaluation, and it answered a different question from the one asked:
+    whether volume is DIMINISHING as price climbs into RSI 75. That is a
+    property of the whole leg, measured BEFORE the candidate becomes eligible.
+
+    For a SHORT the leg runs from the lowest low in the window up to the
+    highest high. Its volume is split in half and compared:
+
+        vol_trend < 1   volume falling as price rose — classic bearish
+                        divergence, the exhaustion the fade is looking for
+        vol_trend > 1   volume building into the high — participation, which
+                        reads as a breakout rather than a top
+
+    `peak_vol_early` is the stricter textbook shape: the heaviest bar of the
+    advance sat in the FIRST half, so the later highs were made on thinner
+    trade. Longs are the mirror — the decline into the low.
+
+    Measurement only. Nothing gates on this.
+    """
+    out = {"adv_bars": None, "adv_vol_trend": None, "adv_price_pct": None,
+           "peak_vol_early": None}
+    try:
+        if df is None or len(df) < 8 or "volume" not in df:
+            return out
+        win = df.tail(max(8, int(lookback))).reset_index(drop=True)
+        short = direction == "short"
+        # The leg: for a short, trough -> peak. For a long, peak -> trough.
+        if short:
+            i_start = int(win["low"].idxmin())
+            i_end = int(win["high"].iloc[i_start:].idxmax()) if i_start < len(win)-1 else len(win)-1
+        else:
+            i_start = int(win["high"].idxmax())
+            i_end = int(win["low"].iloc[i_start:].idxmin()) if i_start < len(win)-1 else len(win)-1
+        leg = win.iloc[i_start:i_end + 1]
+        if len(leg) < 4:
+            return out
+        out["adv_bars"] = len(leg)
+        p0 = float(leg["low"].iloc[0] if short else leg["high"].iloc[0])
+        p1 = float(leg["high"].iloc[-1] if short else leg["low"].iloc[-1])
+        out["adv_price_pct"] = round((p1 - p0) / p0 * 100, 3) if p0 else None
+        half = len(leg) // 2
+        first = leg["volume"].iloc[:half].mean()
+        second = leg["volume"].iloc[half:].mean()
+        if first and first > 0:
+            out["adv_vol_trend"] = round(float(second) / float(first), 3)
+        out["peak_vol_early"] = bool(int(leg["volume"].reset_index(drop=True)
+                                         .idxmax()) < half)
+        return out
+    except Exception:
+        return out
+
+
 def gap_rising(df: pd.DataFrame, cfg: ScanConfig) -> tuple[bool, float]:
     """
     Is EMA9 GAINING on EMA21 — the SIGNED gap increasing?
@@ -644,6 +708,8 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     turn_short = turned(df, cfg, "short")
     turn_long = turned(df, cfg, "long")
     rising, rise_change = gap_rising(df, cfg)
+    adv_short = advance_volume(df, "short", cfg.advance_lookback)
+    adv_long = advance_volume(df, "long", cfg.advance_lookback)
     atr_pct = None
     if "atr" in row and not pd.isna(row["atr"]) and close_px > 0:
         atr_pct = float(row["atr"]) / close_px * 100
@@ -675,7 +741,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
-            gap_rise_pct=rise_change, turn=turn_short, change_24h_pct=change_24h_pct,
+            gap_rise_pct=rise_change, turn=turn_short, advance=adv_short, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -696,7 +762,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
-            gap_rise_pct=rise_change, turn=turn_long, change_24h_pct=change_24h_pct,
+            gap_rise_pct=rise_change, turn=turn_long, advance=adv_long, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,

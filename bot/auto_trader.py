@@ -197,6 +197,38 @@ def callback_for(distance_pct: float, atr_pct: float | None,
     return round(cb, 2), notes, source
 
 
+def _refusal_key(reason: str) -> str:
+    """
+    Collapse a refusal reason to the RULE that produced it.
+
+    The full text carries the candidate's numbers, so counting raw strings
+    would produce one bucket per candidate. These keys let a cycle summary
+    show which gate actually does the work — and whether the others are
+    decoration.
+    """
+    r = (reason or "").lower()
+    # ORDER MATTERS. The distance refusal reads "RSI 80, strengthened 1 scans,
+    # 13.65% from the 24h high, limit 3.0%" — it opens with RSI, so a naive
+    # "rsi" check first would file every distance refusal under the RSI band
+    # and hide the distance gate entirely. Specific markers precede general.
+    for marker, key in (
+        ("disabled (", "direction"),          # "longs disabled (short only)"
+        ("gaining on ema21", "gap_not_rising"),
+        ("no turn yet", "no_turn"),
+        ("breakout structure", "breakout_veto"),
+        ("limit", "distance"),                # "... 13.65% from the 24h high, limit 3%"
+        ("from the 24h", "distance"),
+        ("ceiling", "rsi_band"),              # "RSI 54.3 above the long ceiling"
+        ("floor of", "rsi_band"),             # "RSI 41.2 below the long floor of"
+        ("strengthen", "streak"),             # "... strengthened 1 scans — needs 2"
+        ("atr", "min_atr"),                   # "ATR 0.48% below the 0.5% floor"
+        ("rsi", "rsi_band"),
+    ):
+        if marker in r:
+            return key
+    return "other"
+
+
 def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                        atr_pct: float | None = None) -> AutoDecision:
     """
@@ -640,6 +672,7 @@ class AutoTrader:
             "config": {
                 "callback_min_pct": self.cfg.callback_min_pct,
                 "long_require_turn": self.cfg.long_require_turn,
+                "last_refusals": dict(getattr(self, "_last_refusals", {})),
                 "long_require_convergence": self.cfg.long_require_convergence,
                 "callback_use_velocity": self.cfg.callback_use_velocity,
                 "veto_breakout": self.cfg.veto_breakout,
@@ -837,6 +870,13 @@ class AutoTrader:
         if not self.cfg.enabled:
             return
 
+        # Which RULE refused a candidate was never logged — only "a position
+        # already exists", which is not a rule at all. So there was no way to
+        # tell whether one gate was doing all the work and the rest were
+        # decoration. Tallied per cycle rather than one line per candidate,
+        # which would be hundreds an hour.
+        refusals: dict[str, int] = {}
+
         snap = self.scanner.snapshot()
         rows = snap.get("candidates") or []
         # Pass the scan timestamp so a repeated read of the same snapshot does
@@ -891,6 +931,8 @@ class AutoTrader:
                 # dashboard full of candidates with no entries gave no clue
                 # whether the bot was broken or the rules simply did not match.
                 self._skip_reasons[symbol] = decision.reason
+                refusals[_refusal_key(decision.reason)] = refusals.get(
+                    _refusal_key(decision.reason), 0) + 1
                 continue
             self._skip_reasons.pop(symbol, None)
 
@@ -934,6 +976,10 @@ class AutoTrader:
                         "recent_tr_pct": row.get("recent_tr_pct"),
                         "gap_narrowing": row.get("gap_narrowing"),
                         "gap_rising": row.get("gap_rising"),
+                        "adv_vol_trend": (row.get("advance") or {}).get("adv_vol_trend"),
+                        "adv_bars": (row.get("advance") or {}).get("adv_bars"),
+                        "adv_price_pct": (row.get("advance") or {}).get("adv_price_pct"),
+                        "peak_vol_early": (row.get("advance") or {}).get("peak_vol_early"),
                         "gap_rise_pct": row.get("gap_rise_pct"),
                         "turned_up": (row.get("turn") or {}).get("turned_up"),
                         "bars_since_low": (row.get("turn") or {}).get("bars_since_low"),
@@ -999,6 +1045,12 @@ class AutoTrader:
                 self._skip_reasons[symbol] = f"exchange rejected: {detail}"
                 self._rejections += 1
                 _log.warning(f"auto-trade: {symbol} entry rejected — {detail}")
+
+        if refusals:
+            top = ", ".join(f"{k}={v}" for k, v in
+                            sorted(refusals.items(), key=lambda kv: -kv[1]))
+            _log.info(f"auto-trade refusals this cycle: {top}")
+            self._last_refusals = dict(refusals)
 
     def _check_daily_drawdown(self, balance: float):
         """

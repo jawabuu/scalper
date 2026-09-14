@@ -2209,3 +2209,105 @@ def test_the_status_reaches_the_snapshot():
     import inspect
     from bot.futures_guardian import FuturesGuardian
     assert '"rate_limit": RATE_LIMIT.status()' in inspect.getsource(FuturesGuardian)
+
+
+# ── Refusal tally ───────────────────────────────────────────────────────────
+
+def test_every_gate_maps_to_its_own_key():
+    """
+    Refusal text carries the candidate's numbers, so counting raw strings gives
+    one bucket per candidate. The classifier collapses each to its rule.
+    """
+    from bot.auto_trader import _refusal_key
+    cases = {
+        "longs disabled (short only)": "direction",
+        "ATR 0.48% below the 0.5% floor": "min_atr",
+        "RSI 54.3 above the long ceiling of 52.0": "rsi_band",
+        "RSI 41.2 below the long floor of 45.0": "rsi_band",
+        "EMA9 is not gaining on EMA21 (signed gap moved -0.08%)": "gap_not_rising",
+        "no turn yet — the fast EMA's low is 0 candle(s) back": "no_turn",
+        "breakout structure: at the 24h extreme, 3 consecutive candles": "breakout_veto",
+        "RSI 80, strengthened 1 scans, 13.65% from the 24h high, limit 3.0%": "distance",
+        "RSI 76, strengthened 1 scans — needs 2": "streak",
+    }
+    for text, key in cases.items():
+        assert _refusal_key(text) == key, (text, _refusal_key(text))
+
+
+def test_an_unrecognised_reason_lands_in_other():
+    from bot.auto_trader import _refusal_key
+    assert _refusal_key("something entirely new") == "other"
+    assert _refusal_key("") == "other"
+    assert _refusal_key(None) == "other"
+
+
+# ── Advance volume ──────────────────────────────────────────────────────────
+
+def _leg(prices, vols):
+    pd = pytest.importorskip("pandas")
+    rows = []
+    for i, (p, v) in enumerate(zip(prices, vols)):
+        o = prices[i - 1] if i else p
+        rows.append((o, max(o, p) * 1.001, min(o, p) * 0.999, p, v))
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"])
+
+
+def test_volume_fading_into_the_high_is_divergence():
+    """The exhaustion case: price climbs, participation drains."""
+    from bot.scanner import advance_volume
+    up = [1.00, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.09]
+    a = advance_volume(_leg(up, [100, 95, 90, 80, 70, 55, 45, 35, 28, 20]), "short")
+    assert a["adv_vol_trend"] < 1
+    assert a["peak_vol_early"] is True
+    assert a["adv_price_pct"] > 0
+
+
+def test_volume_building_into_the_high_is_participation():
+    from bot.scanner import advance_volume
+    up = [1.00, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.09]
+    a = advance_volume(_leg(up, [20, 28, 35, 45, 55, 70, 80, 90, 95, 100]), "short")
+    assert a["adv_vol_trend"] > 1
+    assert a["peak_vol_early"] is False
+
+
+def test_it_measures_the_LEG_not_the_last_two_candles():
+    """
+    The distinction that prompted it: taper_vol_ratio compares the most recent
+    two pushes. This spans the whole advance, so a late burst inside a fading
+    leg does not flip the verdict.
+    """
+    from bot.scanner import advance_volume, candle_taper
+    up = [1.00, 1.01, 1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08, 1.09]
+    vols = [100, 95, 90, 80, 70, 55, 45, 35, 60, 65]     # fading, late uptick
+    a = advance_volume(_leg(up, vols), "short")
+    assert a["adv_vol_trend"] < 1          # the LEG still faded
+    assert a["adv_bars"] >= 8              # and it spans the leg, not 2 bars
+
+
+def test_the_long_side_reads_the_decline_into_the_low():
+    from bot.scanner import advance_volume
+    down = [1.09, 1.08, 1.07, 1.06, 1.05, 1.04, 1.03, 1.02, 1.01, 1.00]
+    a = advance_volume(_leg(down, [100, 95, 90, 80, 70, 55, 45, 35, 28, 20]), "long")
+    assert a["adv_vol_trend"] < 1
+    assert a["adv_price_pct"] < 0
+
+
+def test_advance_volume_survives_degenerate_input():
+    from bot.scanner import advance_volume
+    pd = pytest.importorskip("pandas")
+    assert advance_volume(None, "short")["adv_vol_trend"] is None
+    assert advance_volume(pd.DataFrame(), "short")["adv_vol_trend"] is None
+
+
+def test_the_distance_refusal_is_not_filed_under_RSI():
+    """
+    Its text OPENS with "RSI 80, strengthened 1 scans, 13.65% from the 24h
+    high, limit 3.0%". A naive rsi-first match filed every distance refusal
+    under the RSI band and hid the distance gate completely.
+    """
+    from bot.auto_trader import _refusal_key
+    assert _refusal_key(
+        "RSI 80, strengthened 1 scans, 13.65% from the 24h high, "
+        "limit 3.0%") == "distance"
+    assert _refusal_key("RSI 54.3 above the long ceiling of 52.0") == "rsi_band"
+    assert _refusal_key("RSI 41.2 below the long floor of 45.0") == "rsi_band"
