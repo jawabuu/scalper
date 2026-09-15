@@ -3275,9 +3275,20 @@ function renderGuardian(g) {
             : (s.armed
                 ? '<span class="guard-flag gf-armed">ARMED</span>'
                 : '<span style="color:var(--muted)">initial</span>'));
+      // ARK 2026-09-15 showed "+2%" here while NOTHING was resting on the
+      // exchange — this cell renders the guardian's intent. A peak past the
+      // breakeven threshold with no floor id is now called out, because a
+      // position that looks protected and is not is worse than one that
+      // plainly shows no stop.
+      const fs = ((g && g.floor_state) || {})[s.symbol] || {};
+      const noFloor = fs.peak_roi >= (c.breakeven_at_roi || 3)
+        && fs.has_floor === false;
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
         : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`
+          + (noFloor
+             ? ` <span class="flag" title="peak reached ${fs.peak_roi}% but no floor order is resting (${fs.failed_attempts} failed attempt(s))">NO FLOOR</span>`
+             : '')
           + (s.risk_overshoot
              ? ` <span class="rq rq-weak" title="risks $${s.risk_overshoot.loss_at_stop} vs $${s.risk_overshoot.budget} budget">${s.risk_overshoot.ratio}x risk</span>`
              : '');

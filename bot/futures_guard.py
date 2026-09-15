@@ -106,6 +106,9 @@ class GuardState:
     adaptive_trail_id: str | None = None
     floor_stop_id: str | None = None
     floor_roi: float | None = None
+    # How many times the floor has failed to place. Not persisted:
+    # a restart should re-try rather than inherit a grudge.
+    floor_attempts: int = 0
     # Set when the exchange refuses the protective stop because the position is
     # already past that level (Binance -2021). The position is UNPROTECTED and
     # the operator must decide what to do — the guardian will not close a
@@ -168,7 +171,17 @@ class GuardConfig:
     # trade sitting at -1% is slow, not failing — cutting it pays a fee to
     # avoid nothing. 0 disables.
     fail_fast_s: float = 0.0
-    fail_fast_max_peak_roi: float = 0.0
+    # Fail-fast applies to a position whose peak never cleared this. It left a
+    # COVERAGE GAP: at 0.5 a trade peaking at +2% got neither fail-fast (peak
+    # too high) nor the profit floor (peak below breakeven_at_roi, 3). Nine
+    # such trades appeared in 262 and ALL NINE lost, costing $249.44.
+    #
+    # Raised to 1.0 rather than to 3.0. At 3.0 every winner that dipped before
+    # making +3% becomes cuttable, and 61 of 163 winners dipped to -5% or worse
+    # at some point, together worth +$1,205.71 — four times the gap being
+    # closed. 1.0 covers "barely green then collapsed" and leaves recoveries
+    # alone.
+    fail_fast_max_peak_roi: float = 1.0
     fail_fast_loss_roi: float = 5.0
     # Callback for the RESCUE trail placed when a fixed stop is refused, as a
     # PRICE percentage. 0.1 is Binance's minimum callbackRate.

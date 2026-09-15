@@ -1394,24 +1394,70 @@ class FuturesGuardian:
         level = getattr(self.cfg, "breakeven_stop_roi", 0.0)
         if not at or state.peak_roi < at:
             return
+
+        # ADAPTIVE LEVEL. Placing the floor at a fixed +2% ROI assumes price is
+        # still above it. If the peak was made and given back between two 2.5s
+        # polls, a stop at +2% sits on the wrong side of the market: Binance
+        # refuses it with -2021 "would immediately trigger", and every retry
+        # for the life of the position fails identically. ARK peaked +3.98%,
+        # showed "Stop @ ROI +2%" on the dashboard, and ran to -20% with
+        # nothing resting.
+        #
+        # So the floor is placed at the best level STILL AVAILABLE: the
+        # configured one when the peak is intact, less when it is not, and
+        # never above the current price. It locks what is actually there
+        # rather than failing to lock anything.
+        current = roi_pct(pos, price)
+        buffer = max(0.2, abs(level) * 0.25)
+        usable = min(level, current - buffer)
+        if usable <= 0:
+            # Nothing positive left to protect. Fail-fast owns this case; a
+            # floor at or below break-even would only lock in a loss.
+            self._floor_unavailable(pos, state, current, level)
+            return
         try:
-            floor_price = price_for_roi(pos, level)
+            floor_price = price_for_roi(pos, usable)
             oid = self._place_stop(pos, floor_price)
             if not oid:
+                # A None return is a FAILURE, not a quiet no-op. This path was
+                # silent, so a floor that never went on looked identical to one
+                # that did.
+                self._floor_unavailable(pos, state, current, usable)
                 return
             state.floor_stop_id = oid
-            state.floor_roi = level
+            state.floor_roi = usable
+            state.floor_attempts = 0
             self._all_stop_ids.setdefault(pos.symbol, []).append(oid)
             log.warning(
-                f"{pos.symbol}: PROFIT FLOOR placed at +{level:.1f}% ROI "
+                f"{pos.symbol}: PROFIT FLOOR placed at +{usable:.1f}% ROI "
                 f"@ {floor_price} (peak reached +{state.peak_roi:.1f}%). "
                 f"This order is not cancelled while the position is open.")
             self._record(pos.symbol, "profit_floor",
-                         f"floor at +{level:.1f}% ROI after peak "
+                         f"floor at +{usable:.1f}% ROI after peak "
                          f"+{state.peak_roi:.1f}%")
         except Exception as e:
-            log.error(f"{pos.symbol}: could not place the profit floor: "
-                      f"{_safe_err(e)}")
+            self._floor_unavailable(pos, state, current, usable, _safe_err(e))
+
+    def _floor_unavailable(self, pos, state, current: float, wanted: float,
+                           err: str = ""):
+        """
+        The floor could not be placed. Say so LOUDLY.
+
+        Previously this logged once at error and moved on, leaving
+        floor_stop_id as None. The dashboard kept showing "Stop @ ROI +2%",
+        because that field is the guardian's INTENT, not what the exchange
+        holds — so a position with no floor at all looked protected.
+        """
+        state.floor_attempts = getattr(state, "floor_attempts", 0) + 1
+        if state.floor_attempts in (1, 5) or state.floor_attempts % 40 == 0:
+            log.error(
+                f"PROTECTION-NO-FLOOR {pos.symbol}: peak reached "
+                f"+{state.peak_roi:.1f}% but NO profit floor is resting "
+                f"(attempt {state.floor_attempts}, wanted +{wanted:.1f}% ROI, "
+                f"currently {current:+.1f}%). This position is NOT protected "
+                f"at break-even." + (f" exchange said: {err}" if err else ""))
+            self._record(pos.symbol, "no_profit_floor",
+                         f"peak +{state.peak_roi:.1f}%, no floor resting")
 
     def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None,
                                  state=None):
@@ -3235,4 +3281,15 @@ class FuturesGuardian:
                 "fail_fast_enabled": bool(self.cfg.fail_fast_s),
             },
             "rate_limit": RATE_LIMIT.status(),
+            # What is ACTUALLY resting, per symbol, so the dashboard can stop
+            # showing the configured floor level for a position that has none.
+            "floor_state": {
+                sym: {
+                    "floor_roi": getattr(st, "floor_roi", None),
+                    "has_floor": bool(getattr(st, "floor_stop_id", None)),
+                    "failed_attempts": getattr(st, "floor_attempts", 0),
+                    "peak_roi": st.peak_roi,
+                }
+                for sym, st in (self._states or {}).items()
+            },
         }

@@ -1327,11 +1327,17 @@ def _floor_guardian(**cfgkw):
     return g
 
 
+# A price at which _FloorPos is genuinely in profit. The floor now places at
+# the best level STILL AVAILABLE, so a fixture sitting exactly at entry has
+# nothing to lock and correctly places nothing.
+_IN_PROFIT = 0.1354 * (1 - 0.0025)      # short, +5% ROI at 20x
+
+
 def test_no_floor_before_the_peak_clears_breakeven():
     from bot.futures_guard import GuardState
     g = _floor_guardian()
     st = GuardState(peak_roi=2.9)
-    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert st.floor_stop_id is None
     assert g.placed == []
 
@@ -1340,7 +1346,7 @@ def test_a_floor_is_placed_once_the_peak_clears_breakeven():
     from bot.futures_guard import GuardState
     g = _floor_guardian()
     st = GuardState(peak_roi=7.36)          # PUNDIX
-    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert st.floor_stop_id == "floor-1"
     assert st.floor_roi == 2.0
     assert len(g.placed) == 1
@@ -1352,7 +1358,7 @@ def test_it_is_never_placed_twice_however_many_cycles_run():
     g = _floor_guardian()
     st = GuardState(peak_roi=12.0)
     for _ in range(50):
-        g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+        g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert len(g.placed) == 1
     assert st.floor_stop_id == "floor-1"
 
@@ -1375,7 +1381,7 @@ def test_a_restart_does_not_place_a_second_floor():
     assert back.floor_stop_id == "floor-1"
 
     g = _floor_guardian()
-    g._ensure_profit_floor(_FloorPos(), back, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), back, _IN_PROFIT)
     assert g.placed == []               # nothing re-placed
 
 
@@ -1427,7 +1433,7 @@ def test_the_floor_can_be_switched_off():
     from bot.futures_guard import GuardState
     g = _floor_guardian(profit_floor_enabled=False)
     st = GuardState(peak_roi=12.0)
-    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert st.floor_stop_id is None and g.placed == []
 
 
@@ -1441,7 +1447,7 @@ def test_the_floor_is_inert_when_breakeven_is_not_configured():
     assert GuardConfig().breakeven_at_roi == 0.0
     g = _floor_guardian(breakeven_at_roi=0.0, breakeven_stop_roi=0.0)
     st = GuardState(peak_roi=20.0)
-    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert st.floor_stop_id is None and g.placed == []
 
 
@@ -1450,7 +1456,7 @@ def test_at_the_operators_settings_the_floor_clears_fees():
     from bot.futures_guard import GuardState
     g = _floor_guardian(breakeven_at_roi=3.0, breakeven_stop_roi=2.0)
     st = GuardState(peak_roi=3.1)
-    g._ensure_profit_floor(_FloorPos(), st, 0.1354)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
     assert st.floor_roi == 2.0
     assert st.floor_roi > 1.9      # net positive after the round trip
 
@@ -2370,3 +2376,94 @@ def test_the_parse_checks_believability_not_just_zero():
     src = inspect.getsource(FuturesGuardian)
     assert "implied < 1.5" in src
     assert "margin field unusable" in src
+
+
+# ── Adaptive floor level, and a loud failure ───────────────────────────────
+#
+# ARK/USDT 2026-09-15 on live: peaked +3.98%, the dashboard showed
+# "Stop @ ROI +2%", and it ran to -20.13% with nothing resting. That UI field
+# is the guardian's INTENT, not what the exchange holds.
+
+def test_the_floor_places_at_the_configured_level_when_the_peak_is_intact():
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=7.36)
+    g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)   # +5% ROI now
+    assert st.floor_stop_id is not None
+    assert st.floor_roi == 2.0                            # full level available
+
+
+def test_it_places_LOWER_rather_than_failing_when_the_peak_is_given_back():
+    """
+    The peak was made and handed back between polls. A fixed +2% stop would
+    sit on the wrong side of the market and be refused for the life of the
+    position. Locking less beats locking nothing.
+    """
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=3.98)
+    barely = 0.1354 * (1 - 0.0005)       # short, +1% ROI at 20x
+    g._ensure_profit_floor(_FloorPos(), st, barely)
+    assert st.floor_stop_id is not None
+    assert 0 < st.floor_roi < 2.0
+
+
+def test_nothing_is_placed_once_the_profit_is_gone(caplog):
+    """A floor at or below break-even would only lock in a loss."""
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    st = GuardState(peak_roi=3.98)
+    underwater = 0.1354 * (1 + 0.005)    # short, -10% ROI
+    with caplog.at_level("ERROR"):
+        g._ensure_profit_floor(_FloorPos(), st, underwater)
+    assert st.floor_stop_id is None
+    assert any("PROTECTION-NO-FLOOR" in r.message for r in caplog.records)
+
+
+def test_a_refused_placement_is_reported_not_swallowed(caplog):
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+
+    def _boom(pos, price):
+        raise RuntimeError('binance {"code":-2021,"msg":"Order would immediately trigger."}')
+    g._place_stop = _boom
+    st = GuardState(peak_roi=7.36)
+    with caplog.at_level("ERROR"):
+        g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "PROTECTION-NO-FLOOR" in msgs
+    assert "-2021" in msgs                 # the exchange's reason is carried
+    assert st.floor_stop_id is None
+
+
+def test_repeated_failures_do_not_spam_but_do_keep_reporting(caplog):
+    from bot.futures_guard import GuardState
+    g = _floor_guardian()
+    g._place_stop = lambda pos, price: None
+    st = GuardState(peak_roi=7.36)
+    with caplog.at_level("ERROR"):
+        for _ in range(6):
+            g._ensure_profit_floor(_FloorPos(), st, _IN_PROFIT)
+    n = len([r for r in caplog.records if "PROTECTION-NO-FLOOR" in r.message])
+    assert n == 2                          # attempts 1 and 5, not all six
+    assert st.floor_attempts == 6
+
+
+def test_the_fail_fast_band_no_longer_leaves_a_hole():
+    """
+    peak <= 1.0 -> fail-fast; peak >= 3.0 -> floor. The old 0.5 left trades
+    peaking between 0.5 and 3 with neither. Nine such trades in 262, all nine
+    losers, -$249.44.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig()
+    assert cfg.fail_fast_max_peak_roi == 1.0
+
+
+def test_it_was_not_raised_to_three():
+    """
+    At 3.0 every winner that dipped before making +3% becomes cuttable. 61 of
+    163 winners dipped to -5% or worse, worth +$1,205.71 — four times the gap.
+    """
+    from bot.futures_guard import GuardConfig
+    assert GuardConfig().fail_fast_max_peak_roi < 3.0
