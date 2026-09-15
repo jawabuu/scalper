@@ -2454,24 +2454,43 @@ def test_repeated_failures_do_not_spam_but_do_keep_reporting(caplog):
     assert st.floor_attempts == 6
 
 
-def test_the_fail_fast_band_no_longer_leaves_a_hole():
+def test_the_two_bands_meet_by_construction():
     """
-    peak <= 1.0 -> fail-fast; peak >= 3.0 -> floor. The old 0.5 left trades
-    peaking between 0.5 and 3 with neither. Nine such trades in 262, all nine
-    losers, -$249.44.
-    """
-    from bot.futures_guard import GuardConfig
-    cfg = GuardConfig()
-    assert cfg.fail_fast_max_peak_roi == 1.0
-
-
-def test_it_was_not_raised_to_three():
-    """
-    At 3.0 every winner that dipped before making +3% becomes cuttable. 61 of
-    163 winners dipped to -5% or worse, worth +$1,205.71 — four times the gap.
+    REZ 2026-09-15 peaked +2.08% — above the 1.0 fail-fast ceiling and below
+    the 3.0 floor threshold — and ran to -16.74% with no protection of any
+    kind. Two independent settings defined the coverage and nothing joined
+    them, so every change to either reopened a hole.
     """
     from bot.futures_guard import GuardConfig
-    assert GuardConfig().fail_fast_max_peak_roi < 3.0
+    from bot.futures_guardian import _peak_ceiling
+    cfg = GuardConfig(breakeven_at_roi=3.0)
+    assert cfg.fail_fast_max_peak_roi is None      # unset by default
+    assert _peak_ceiling(cfg) == 3.0               # tied to the floor threshold
+
+
+def test_moving_the_floor_threshold_moves_the_ceiling_with_it():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import _peak_ceiling
+    for at in (2.0, 3.0, 5.0):
+        assert _peak_ceiling(GuardConfig(breakeven_at_roi=at)) == at
+
+
+def test_an_explicit_ceiling_still_overrides():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import _peak_ceiling
+    cfg = GuardConfig(breakeven_at_roi=3.0, fail_fast_max_peak_roi=0.5)
+    assert _peak_ceiling(cfg) == 0.5
+
+
+def test_a_peak_inside_the_old_hole_is_now_fail_fast_eligible():
+    """REZ's +2.08% peak, against a 3.0 floor threshold."""
+    from bot.futures_guard import GuardConfig, GuardState
+    from bot.futures_guardian import _peak_ceiling
+    cfg = GuardConfig(breakeven_at_roi=3.0)
+    st = GuardState(peak_roi=2.08)
+    assert st.peak_roi <= _peak_ceiling(cfg)       # covered now
+    old = GuardConfig(breakeven_at_roi=3.0, fail_fast_max_peak_roi=1.0)
+    assert st.peak_roi > _peak_ceiling(old)        # was not
 
 
 # ── Velocity floor, shorts only ─────────────────────────────────────────────
@@ -2574,3 +2593,14 @@ def test_evaluate_candidate_passes_the_side_through():
     from bot import auto_trader
     src = inspect.getsource(auto_trader.evaluate_candidate)
     assert "side=side" in src
+
+
+def test_a_hand_set_gap_is_reported_at_startup(caplog):
+    """
+    Nothing stopped an operator reopening the hole by hand, and it was silent.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.__init__)
+    assert "PROTECTION GAP" in src
+    assert "Protection is continuous" in src

@@ -109,6 +109,20 @@ class RateLimitMonitor:
 RATE_LIMIT = RateLimitMonitor()
 
 
+def _peak_ceiling(cfg) -> float:
+    """
+    The fail-fast peak ceiling actually in force.
+
+    Defaults to breakeven_at_roi so the fail-fast band and the profit-floor
+    band MEET. Every version where these were independent left a hole, and a
+    position landing in it had no protection of any kind.
+    """
+    v = getattr(cfg, "fail_fast_max_peak_roi", None)
+    if v is not None:
+        return float(v)
+    return float(getattr(cfg, "breakeven_at_roi", 0.0) or 0.0)
+
+
 def _safe_err(err) -> str:
     """Exchange error as code + message, never the signed request URL."""
     from bot.futures_entry import _safe_err as _f
@@ -247,8 +261,26 @@ class FuturesGuardian:
         if self.cfg.fail_fast_s:
             log.info(
                 f"Fail-fast ARMED: cut after {self.cfg.fail_fast_s:.0f}s when "
-                f"peak <= {self.cfg.fail_fast_max_peak_roi:+.1f}% ROI and "
+                f"peak <= {_peak_ceiling(self.cfg):+.1f}% ROI and "
                 f"current <= {-abs(self.cfg.fail_fast_loss_roi):.1f}% ROI")
+            # The two bands must MEET. A position peaking above the fail-fast
+            # ceiling but below the floor threshold gets NEITHER, and nothing
+            # in the code prevents an operator opening that gap by hand.
+            ceiling = _peak_ceiling(self.cfg)
+            at = float(self.cfg.breakeven_at_roi or 0.0)
+            if at and ceiling < at:
+                log.error(
+                    f"PROTECTION GAP: a position peaking between "
+                    f"+{ceiling:.1f}% and +{at:.1f}% ROI gets NEITHER fail-fast "
+                    f"(peak too high) NOR a profit floor (peak too low). REZ "
+                    f"peaked +2.08% in exactly this band and ran to -16.74%. "
+                    f"Unset GUARD_FAIL_FAST_MAX_PEAK_ROI to tie the two "
+                    f"together, or raise it to {at:.1f}.")
+            elif at:
+                log.info(
+                    f"Protection is continuous: fail-fast covers peaks up to "
+                    f"+{ceiling:.1f}% ROI, the profit floor takes over at "
+                    f"+{at:.1f}%.")
         else:
             log.warning(
                 "Fail-fast DISABLED (GUARD_FAIL_FAST_S is 0 or unset) — losing "
@@ -765,7 +797,7 @@ class FuturesGuardian:
         cfg = self.cfg
         if not getattr(cfg, "fail_fast_s", 0):
             return False
-        if state.peak_roi > getattr(cfg, "fail_fast_max_peak_roi", 0.0):
+        if state.peak_roi > _peak_ceiling(cfg):
             return False                      # it has been green — leave it
         floor = getattr(cfg, "fail_fast_loss_roi", 5.0)
         if current_roi > -abs(floor):
@@ -3276,7 +3308,7 @@ class FuturesGuardian:
                 # looked identical to a working configuration. 119 trades ran
                 # with it silently off.
                 "fail_fast_s": self.cfg.fail_fast_s,
-                "fail_fast_max_peak_roi": self.cfg.fail_fast_max_peak_roi,
+                "fail_fast_max_peak_roi": _peak_ceiling(self.cfg),
                 "fail_fast_loss_roi": self.cfg.fail_fast_loss_roi,
                 "fail_fast_enabled": bool(self.cfg.fail_fast_s),
             },

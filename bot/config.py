@@ -365,8 +365,12 @@ class BotConfig:
         "AUTO_MIN_ATR_PCT", 0.0))
     guard_fail_fast_s: float = field(default_factory=lambda: _env_float(
         "GUARD_FAIL_FAST_S", 0.0))
-    guard_fail_fast_max_peak_roi: float = field(default_factory=lambda: _env_float(
-        "GUARD_FAIL_FAST_MAX_PEAK_ROI", 0.0))
+    # Blank or unset ties the fail-fast ceiling to GUARD_BREAKEVEN_AT_ROI so
+    # the two protected bands meet. A number overrides and is warned about at
+    # startup if it leaves a gap.
+    guard_fail_fast_max_peak_roi: float | None = field(default_factory=lambda: (
+        float(_env("GUARD_FAIL_FAST_MAX_PEAK_ROI", "").strip())
+        if _env("GUARD_FAIL_FAST_MAX_PEAK_ROI", "").strip() else None))
     guard_fail_fast_loss_roi: float = field(default_factory=lambda: _env_float(
         "GUARD_FAIL_FAST_LOSS_ROI", 5.0))
     # Native trail at the position's own stop distance, placed at adoption.
