@@ -199,9 +199,14 @@ def test_roi_checkpoints_survive_a_restart(tmp_path):
 
 # ── Velocity-aware callback floor ───────────────────────────────────────────
 
-def test_velocity_floor_off_by_default():
+def test_velocity_floor_off_in_the_bare_dataclass():
+    """
+    AutoTradeConfig defaults to "off"; the deployed default is "short" and
+    comes from BotConfig / AUTO_CALLBACK_USE_VELOCITY.
+    """
     cfg = AutoTradeConfig(enabled=True)
-    assert cfg.callback_use_velocity is False
+    from bot.auto_trader import velocity_mode
+    assert velocity_mode(cfg.callback_use_velocity) == "off"
     cb, _, src = callback_for(0.15, 0.512, cfg, recent_tr_pct=2.69)
     assert cb == pytest.approx(0.38, abs=0.01)   # STORJ, exactly as logged
     assert src == "atr_floor"
@@ -2467,3 +2472,105 @@ def test_it_was_not_raised_to_three():
     """
     from bot.futures_guard import GuardConfig
     assert GuardConfig().fail_fast_max_peak_roi < 3.0
+
+
+# ── Velocity floor, shorts only ─────────────────────────────────────────────
+#
+# Of 64 velocity-floored trades the nine LONGS returned -$17.64 each — 14% of
+# the population and 233% of the net loss — while the 55 shorts returned
+# +$1.65. The same shape appears without velocity: atr_floor longs -$13.00,
+# `ratio` longs +$6.13. It is ATR-based WIDENING of a long's callback that
+# hurts, not velocity itself.
+
+def _cbcfg(**kw):
+    base = dict(enabled=True, callback_ratio=0.25, callback_atr_mult=0.75,
+                callback_use_velocity="all")
+    base.update(kw)
+    return AutoTradeConfig(**base)
+
+
+def test_a_short_still_gets_the_velocity_floor():
+    from bot.auto_trader import callback_for
+    cb, _, src = callback_for(0.30, 1.022, _cbcfg(callback_use_velocity="short"),
+                              recent_tr_pct=2.633, side="short")
+    assert src == "velocity_floor"
+    assert cb == pytest.approx(0.75 * 2.633, abs=0.01)
+
+
+def test_a_long_does_not():
+    from bot.auto_trader import callback_for
+    cb, _, src = callback_for(0.30, 1.022, _cbcfg(callback_use_velocity="short"),
+                              recent_tr_pct=2.633, side="long")
+    assert src != "velocity_floor"
+    assert cb == pytest.approx(0.75 * 1.022, abs=0.01)   # the ATR floor instead
+
+
+def test_the_two_sides_now_differ_on_identical_inputs():
+    from bot.auto_trader import callback_for
+    args = dict(recent_tr_pct=6.214)
+    cfg = _cbcfg(callback_use_velocity="short")
+    short_cb = callback_for(0.22, 1.498, cfg, side="short", **args)[0]
+    long_cb = callback_for(0.22, 1.498, cfg, side="long", **args)[0]
+    assert short_cb > long_cb
+
+
+def test_the_split_can_be_switched_off():
+    """velocity_shorts_only=False restores the old behaviour for both sides."""
+    from bot.auto_trader import callback_for
+    cfg = _cbcfg(callback_use_velocity="all")
+    _, _, src = callback_for(0.30, 1.022, cfg, recent_tr_pct=2.633, side="long")
+    assert src == "velocity_floor"
+
+
+def test_no_side_given_keeps_the_floor():
+    """Callers that do not pass a side must not silently lose the floor."""
+    from bot.auto_trader import callback_for
+    _, _, src = callback_for(0.30, 1.022, _cbcfg(callback_use_velocity="short"),
+                             recent_tr_pct=2.633)
+    assert src == "velocity_floor"
+
+
+def test_the_flag_is_off_entirely_when_velocity_is_disabled():
+    from bot.auto_trader import callback_for
+    cfg = _cbcfg(callback_use_velocity="off")
+    for side in ("short", "long"):
+        _, _, src = callback_for(0.30, 1.022, cfg, recent_tr_pct=2.633, side=side)
+        assert src != "velocity_floor"
+
+
+def test_the_setting_takes_four_values():
+    """One setting replaced two booleans that could contradict each other."""
+    from bot.auto_trader import velocity_mode
+    assert velocity_mode("shorts") == "short"
+    assert velocity_mode("longs") == "long"
+    assert velocity_mode("all") == "all"
+    assert velocity_mode("off") == "off"
+    # the booleans it replaced still work
+    assert velocity_mode(True) == "all"
+    assert velocity_mode(False) == "off"
+    assert velocity_mode(None) == "off"
+    assert velocity_mode("nonsense") == "off"
+
+
+def test_shorts_is_the_default():
+    from bot.config import BotConfig
+    from bot.auto_trader import velocity_mode
+    assert velocity_mode(BotConfig().auto_callback_use_velocity) == "short"
+
+
+def test_long_only_mode_is_available_even_though_the_data_advises_against_it():
+    from bot.auto_trader import callback_for
+    cfg = _cbcfg(callback_use_velocity="longs")
+    assert callback_for(0.30, 1.022, cfg, recent_tr_pct=2.633,
+                        side="long")[2] == "velocity_floor"
+    assert callback_for(0.30, 1.022, cfg, recent_tr_pct=2.633,
+                        side="short")[2] != "velocity_floor"
+
+
+def test_evaluate_candidate_passes_the_side_through():
+    """The split is useless if the call site does not tell callback_for which
+    direction it is sizing."""
+    import inspect
+    from bot import auto_trader
+    src = inspect.getsource(auto_trader.evaluate_candidate)
+    assert "side=side" in src

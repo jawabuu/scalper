@@ -58,7 +58,14 @@ class AutoTradeConfig:
     # Longs must also show the TURN, not merely a shrinking gap.
     long_require_turn: bool = True
     long_require_convergence: bool = True
-    callback_use_velocity: bool = False
+    # off | all | short | long. Two booleans said the same thing twice and
+    # could contradict each other; one setting cannot.
+    #   short  velocity floor on shorts only (the default)
+    #   all    both directions — the behaviour that reversed
+    #   long   longs only
+    #   off    disabled
+    # Accepts the old booleans too: True -> "all", False -> "off".
+    callback_use_velocity: object = "off"
     # Refuse candidates the scanner flagged as an EXPANDING move rather than an
     # exhausted one (price at the 24h extreme, consecutive candles carrying it,
     # EMA gap wide AND widening). scanner.breakout_structure() has computed this
@@ -143,9 +150,31 @@ def distance_to_extreme(candidate_row: dict, side: str) -> float | None:
     return abs(float(v))
 
 
+def velocity_mode(value) -> str:
+    """
+    Normalise AUTO_CALLBACK_USE_VELOCITY to one of off | all | short | long.
+
+    Accepts the booleans it replaced so an existing deployment keeps working:
+    True means both directions, False means disabled.
+    """
+    if value is True:
+        return "all"
+    if value is False or value is None:
+        return "off"
+    v = str(value).strip().lower()
+    if v in ("1", "true", "yes", "on", "all", "both"):
+        return "all"
+    if v in ("short", "shorts"):
+        return "short"
+    if v in ("long", "longs"):
+        return "long"
+    return "off"
+
+
 def callback_for(distance_pct: float, atr_pct: float | None,
                  cfg: AutoTradeConfig,
-                 recent_tr_pct: float | None = None) -> tuple[float, list[str], str]:
+                 recent_tr_pct: float | None = None,
+                 side: str | None = None) -> tuple[float, list[str], str]:
     """
     Trailing callback = half the distance to the extreme, bounded.
 
@@ -164,13 +193,24 @@ def callback_for(distance_pct: float, atr_pct: float | None,
     # keeps the floor honest when velocity is rising and changes nothing when
     # it is not — over a normal tape the two measures agree.
     vol_pct = atr_pct
-    if cfg.callback_use_velocity and recent_tr_pct and atr_pct:
+    # SHORT ONLY by default. On 64 velocity-floored trades the nine LONGS
+    # returned -$17.64 each — 14% of the population and 233% of the net loss —
+    # while the 55 shorts returned +$1.65. The same pattern shows without
+    # velocity: atr_floor longs returned -$13.00 while `ratio` longs returned
+    # +$6.13, so it is ATR-based WIDENING of a long's callback that hurts, not
+    # velocity as such. A long that waits for a deeper retrace enters after the
+    # bounce has run.
+    mode = velocity_mode(cfg.callback_use_velocity)
+    use_velocity = mode != "off" and (
+        mode == "all" or not side or side == mode)
+
+    if use_velocity and recent_tr_pct and atr_pct:
         if recent_tr_pct > atr_pct:
             vol_pct = recent_tr_pct
             notes.append(
                 f"velocity {recent_tr_pct:.2f}% exceeds ATR {atr_pct:.2f}% — "
                 f"floor taken from recent range")
-    elif cfg.callback_use_velocity and recent_tr_pct and not atr_pct:
+    elif use_velocity and recent_tr_pct and not atr_pct:
         vol_pct = recent_tr_pct
 
     if vol_pct and cfg.callback_atr_mult:
@@ -182,7 +222,7 @@ def callback_for(distance_pct: float, atr_pct: float | None,
                 f"({vol_pct:.2f}%) — raised to {floor:.2f}%")
             cb = floor
             source = ("velocity_floor"
-                      if cfg.callback_use_velocity and recent_tr_pct
+                      if use_velocity and recent_tr_pct
                       and atr_pct and recent_tr_pct > atr_pct else "atr_floor")
 
     if cb < cfg.callback_min_pct:
@@ -331,7 +371,8 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                                    f"limit {cfg.max_dist_to_extreme_pct}%")
 
     cb, notes, cb_source = callback_for(dist, atr_pct, cfg,
-                                       recent_tr_pct=row.get("recent_tr_pct"))
+                                       recent_tr_pct=row.get("recent_tr_pct"),
+                                       side=side)
     extreme = "24h low" if side == "long" else "24h high"
     return AutoDecision(
         True, symbol, side, callback_pct=cb,
@@ -674,7 +715,8 @@ class AutoTrader:
                 "long_require_turn": self.cfg.long_require_turn,
                 "last_refusals": dict(getattr(self, "_last_refusals", {})),
                 "long_require_convergence": self.cfg.long_require_convergence,
-                "callback_use_velocity": self.cfg.callback_use_velocity,
+                "callback_use_velocity": velocity_mode(
+                    self.cfg.callback_use_velocity),
                 "veto_breakout": self.cfg.veto_breakout,
                 "max_dist_to_extreme_pct": self.cfg.max_dist_to_extreme_pct,
                 "required_strength_sweeps": self.cfg.required_strength_sweeps,
@@ -715,7 +757,7 @@ class AutoTrader:
         "callback_min_pct": (float, 0.1, 5.0),
         "long_require_turn": (bool, None, (True, False)),
         "long_require_convergence": (bool, None, (True, False)),
-        "callback_use_velocity": (bool, None, (True, False)),
+        "callback_use_velocity": (str, None, ("off", "all", "short", "long")),
         "veto_breakout": (bool, None, (True, False)),
         "max_dist_to_extreme_pct": (float, 0.1, 50.0),
         "required_strength_sweeps": (int, 1, 10),

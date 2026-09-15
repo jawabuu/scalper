@@ -333,8 +333,9 @@ class BotConfig:
     # condition the scanner's own comment already claimed to apply.
     auto_long_require_convergence: bool = field(default_factory=lambda: _env_bool(
         "AUTO_LONG_REQUIRE_CONVERGENCE", True))
-    auto_callback_use_velocity: bool = field(default_factory=lambda: _env_bool(
-        "AUTO_CALLBACK_USE_VELOCITY", False))
+    # off | all | short | long  (True/False still accepted)
+    auto_callback_use_velocity: str = field(default_factory=lambda: (
+        _env("AUTO_CALLBACK_USE_VELOCITY", "short") or "short").strip().lower())
     auto_recent_tr_candles: int = field(default_factory=lambda: _env_int(
         "AUTO_RECENT_TR_CANDLES", 3))
     scan_extreme_band_pct: float = field(default_factory=lambda: _env_float(
