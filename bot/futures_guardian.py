@@ -500,14 +500,27 @@ class FuturesGuardian:
                     margin = float(margin_raw) if margin_raw else 0.0
                 except (TypeError, ValueError):
                     margin = 0.0
-                if margin <= 0:
-                    # Last resort: reconstruct from the reported leverage.
-                    margin = notional / max(lev, 1)
+                # A CROSS-margin position reports isolatedMargin as 0, and the
+                # unified `collateral` field has been observed carrying the
+                # NOTIONAL instead of the margin. That gives notional/margin =
+                # 1.0, so every ROI reads 20x too small and every threshold
+                # sits 20x too wide — PUFFER showed +4.1% where Binance showed
+                # +86.37%, and nothing warned because margin was not <= 0.
+                #
+                # So the check is not "is margin missing" but "is the leverage
+                # it implies believable".
+                implied = (notional / margin) if margin > 0 else 0.0
+                if margin <= 0 or implied < 1.5:
+                    reconstructed = notional / max(lev, 1)
                     log.warning(
-                        f"{p.get('symbol')}: no usable margin field; reconstructed "
-                        f"{margin:.4f} from leverage={lev}. ROI figures depend on "
-                        f"this — verify against the Binance UI."
+                        f"{p.get('symbol')}: margin field unusable "
+                        f"({margin_raw!r} -> {margin:.4f}, implying {implied:.2f}x "
+                        f"leverage on a {notional:.2f} notional). Reconstructing "
+                        f"{reconstructed:.4f} from leverage={lev}. Cross-margin "
+                        f"positions report this differently — verify ROI against "
+                        f"the Binance UI."
                     )
+                    margin = reconstructed
 
                 # Binance reports updateTime in ms on positionRisk. On a
                 # freshly opened position that is the fill time.

@@ -60,7 +60,13 @@ class FuturesPosition:
         back to the reported field if margin is unusable.
         """
         if self.margin > 0 and self.notional > 0:
-            return self.notional / self.margin
+            derived = self.notional / self.margin
+            # A derived 1.0x on a leveraged venue means the margin field was
+            # really the notional — a cross-margin payload quirk. Trusting it
+            # scales every ROI down by the leverage and every stop distance up
+            # by it, which is silent and total. Prefer the reported field.
+            if derived >= 1.5:
+                return derived
         return float(self.leverage or 1)
 
 

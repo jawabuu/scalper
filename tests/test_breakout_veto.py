@@ -2311,3 +2311,62 @@ def test_the_distance_refusal_is_not_filed_under_RSI():
         "limit 3.0%") == "distance"
     assert _refusal_key("RSI 54.3 above the long ceiling of 52.0") == "rsi_band"
     assert _refusal_key("RSI 41.2 below the long floor of 45.0") == "rsi_band"
+
+
+# ── Cross-margin leverage ───────────────────────────────────────────────────
+#
+# PUFFER 2026-09-15: the bot showed +4.1% ROI and margin $1800.91 while Binance
+# showed +86.37% on $85.48 of margin. $1800.91 is the NOTIONAL — 65,345 x
+# 0.0275599 — so notional/margin derived 1.0x and every ROI came out 20x small.
+# Nothing warned, because margin was not <= 0.
+
+def _puffer(margin):
+    from bot.futures_guard import FuturesPosition
+    return FuturesPosition(symbol="PUFFER/USDT:USDT", side="short",
+                           entry_price=0.0275599, qty=65345.0,
+                           leverage=20, margin=margin)
+
+
+def test_a_margin_equal_to_notional_does_not_yield_1x():
+    pos = _puffer(65345.0 * 0.0275599)          # the cross-margin payload
+    assert pos.effective_leverage == 20.0       # falls back to the reported field
+
+
+def test_a_real_margin_still_derives_the_true_leverage():
+    """The derivation exists because the reported field has been 1 on isolated
+    positions. It must keep working."""
+    pos = _puffer(85.48)
+    assert 20 < pos.effective_leverage < 22
+
+
+def test_roi_matches_binance_once_leverage_is_right():
+    """
+    Binance: +73.83 USDT on 1800.90 notional is a 4.0996% favourable move,
+    and +73.83 on 85.48 of margin is +86.37% ROI. Both must fall out.
+    """
+    from bot.futures_guard import roi_pct
+    pos = _puffer(85.48)
+    move = 73.83 / pos.notional
+    assert roi_pct(pos, pos.entry_price * (1 - move)) == pytest.approx(86.37, abs=0.1)
+
+
+def test_the_broken_payload_reported_a_twentieth_of_it():
+    """What the operator actually saw on the dashboard: +4.1%."""
+    from bot.futures_guard import roi_pct
+    broken = _puffer(65345.0 * 0.0275599)
+    broken.leverage = 1                          # nothing to fall back to
+    move = 73.83 / broken.notional
+    assert roi_pct(broken, broken.entry_price * (1 - move)) == pytest.approx(
+        4.10, abs=0.05)
+
+
+def test_the_parse_checks_believability_not_just_zero():
+    """
+    The old guard was `if margin <= 0`. 1800.90 is not zero, so it never fired.
+    The check is now whether the implied leverage is credible.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert "implied < 1.5" in src
+    assert "margin field unusable" in src
