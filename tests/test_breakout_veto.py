@@ -3512,9 +3512,10 @@ def test_stream_health_is_delivery_not_the_socket_flag():
 
 def test_a_resubscribe_is_not_counted_as_a_reconnect():
     """The tracked set changes every cycle; counting those made a healthy
-    stream look like it was flapping."""
+    stream look like it was flapping. Needs the websocket ON — with it off
+    there is no socket to resubscribe."""
     from bot.candidate_stream import CandidateStream
-    s = CandidateStream(demo=True)
+    s = CandidateStream(demo=True, websocket_enabled=True)
     for syms in (["A/USDT:USDT"], ["B/USDT:USDT"], ["C/USDT:USDT"]):
         s.track(syms)
     st = s.status()
@@ -3951,8 +3952,8 @@ def test_a_successful_override_is_now_logged():
     import inspect
     from bot.auto_trader import AutoTrader
     src = inspect.getsource(AutoTrader.run_once)
-    assert "if ok and why:" in src
-    i = src.index("if ok and why:")
+    assert 'if ok and why and why != "ok":' in src
+    i = src.index('if ok and why and why != "ok":')
     block = src[i:i + 900]
     assert "_log.warning" in block
     assert "cooldown_override" in block
@@ -3980,3 +3981,101 @@ def test_a_winner_still_sets_no_cooldown():
         assert not a.state.symbol_blocked_until.get("BR/USDT:USDT")
     finally:
         logging.disable(logging.NOTSET)
+
+
+def test_ordinary_success_does_not_log_a_reason():
+    """
+    check_safety returns (True, "ok") on plain success, so `if ok and why:`
+    logged `auto-trade: BR/USDT:USDT — ok` on EVERY entry. Only the override
+    is worth a line.
+    """
+    from bot.auto_trader import check_safety, SafetyState, AutoTradeConfig
+    ok, why = check_safety(SafetyState(), AutoTradeConfig(), balance=5000.0,
+                           open_positions=0, symbol="BR/USDT:USDT",
+                           current_rsi=80.0, side="short")
+    assert (ok, why) == (True, "ok")
+    import inspect
+    from bot.auto_trader import AutoTrader
+    assert 'if ok and why and why != "ok":' in inspect.getsource(AutoTrader.run_once)
+
+
+def test_a_plaintext_tls_reply_is_reported_as_a_proxy_problem():
+    """
+    SSL: WRONG_VERSION_NUMBER means TLS began and plaintext came back. Through
+    an HTTP proxy that is a CONNECT tunnel that was never opened — the PROXY
+    answered, not the host. Reporting it as "cannot reach this host" pointed
+    the diagnosis in the wrong direction.
+    """
+    import inspect
+    from bot import candidate_stream
+    for fn in (candidate_stream.CandidateStream._probe,
+               candidate_stream.CandidateStream._run):
+        src = inspect.getsource(fn)
+        if "WRONG_VERSION_NUMBER" in src:
+            assert "CANDIDATE_STREAM_PROXY=none" in src
+            break
+    else:
+        raise AssertionError("no TLS-plaintext branch found")
+
+
+# ── REST is the transport on both environments ─────────────────────────────
+#
+# Demo ran the websocket while live fell back to REST, so the two were
+# gathering inputs differently and findings did not translate. The websocket
+# buys ~1s against REST's <=3s, and the drift gate is looking for
+# percent-scale movement — LSK moved 12% between scan and sizing.
+
+def test_the_websocket_is_off_by_default():
+    from bot.candidate_stream import CandidateStream
+    from bot.config import BotConfig
+    assert CandidateStream(demo=True).websocket_enabled is False
+    assert BotConfig().stream_websocket_enabled is False
+
+
+def test_no_socket_thread_is_started_when_it_is_off():
+    import logging
+    from bot.candidate_stream import CandidateStream
+    logging.disable(logging.CRITICAL)
+    try:
+        s = CandidateStream(demo=True, rest_fetcher=lambda: {})
+        s.start()
+        assert s._thread is None
+    finally:
+        s.stop()
+        logging.disable(logging.NOTSET)
+
+
+def test_rest_still_runs_with_the_websocket_off():
+    import time, logging
+    from bot.candidate_stream import CandidateStream
+    logging.disable(logging.CRITICAL)
+    try:
+        s = CandidateStream(demo=True, rest_interval_s=0.05,
+                            rest_fetcher=lambda: {"brusdt": 1.23})
+        s.track(["BR/USDT:USDT"])
+        s.start()
+        time.sleep(0.25)
+        assert s.price("BR/USDT:USDT") == pytest.approx(1.23)
+        assert s.status()["source"] == "rest"
+    finally:
+        s.stop()
+        logging.disable(logging.NOTSET)
+
+
+def test_tracking_does_not_churn_a_socket_that_does_not_exist():
+    """track() forced a resubscribe every cycle; with no socket that is pure
+    churn against an endpoint nothing is listening to."""
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=True)
+    for syms in (["A/USDT:USDT"], ["B/USDT:USDT"], ["C/USDT:USDT"]):
+        s.track(syms)
+    assert s.status()["resubscribes"] == 0
+
+
+def test_the_health_line_hides_socket_fields_when_it_is_off():
+    """"connected=False" must not read as a fault on a REST-only run."""
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.run_once)
+    assert 'ws_on = h.get("websocket_enabled")' in src
+    assert '"ws=off "' in src

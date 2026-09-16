@@ -347,6 +347,11 @@ class BotConfig:
         "CANDIDATE_STREAM_ENABLED", True))
     stream_stale_after_s: float = field(default_factory=lambda: _env_float(
         "CANDIDATE_STREAM_STALE_S", 20.0))
+    # The websocket is OPT-IN; REST is the transport on both environments so
+    # findings translate. See CandidateStream for why the ~1s it buys does not
+    # change any decision the drift gate makes.
+    stream_websocket_enabled: bool = field(default_factory=lambda: _env_bool(
+        "CANDIDATE_WEBSOCKET_ENABLED", False))
     # Override the websocket endpoint, e.g. to try an alternate live host.
     stream_url: str = field(default_factory=lambda: _env(
         "CANDIDATE_STREAM_URL", "").strip())

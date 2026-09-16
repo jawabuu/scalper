@@ -294,7 +294,8 @@ if __name__ == "__main__":
                             proxy=_stream_proxy(cfg),
                             base_url=cfg.stream_url or None,
                             rest_fetcher=fetcher,
-                            rest_interval_s=cfg.stream_rest_interval_s)
+                            rest_interval_s=cfg.stream_rest_interval_s,
+                            websocket_enabled=cfg.stream_websocket_enabled)
                         auto.stream.start()
                     except Exception as e:
                         log.error(f"candidate stream unavailable ({e}) — "

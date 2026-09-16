@@ -63,7 +63,8 @@ class CandidateStream:
                  proxy: str | None = None,
                  base_url: str | None = None,
                  rest_fetcher=None,
-                 rest_interval_s: float = 3.0):
+                 rest_interval_s: float = 3.0,
+                 websocket_enabled: bool = False):
         self.demo = demo
         self.stale_after_s = float(stale_after_s)
         # The live host accepted the socket and delivered nothing, on a clean
@@ -89,6 +90,18 @@ class CandidateStream:
         # percent-scale movement — LSK moved 12% — so seconds are ample.
         # Websocket is preferred when available; this is what makes the live
         # container useful anyway.
+        # WEBSOCKET IS OPT-IN. REST is the transport on BOTH environments so
+        # findings translate: a measurement taken on demo means the same thing
+        # on live only if the inputs were gathered the same way.
+        #
+        # It buys ~1s freshness against REST's <=3s, and the drift gate is
+        # looking for percent-scale movement — LSK moved 12% between scan and
+        # sizing. Two seconds does not change that verdict. Against it: a
+        # permanently churning reconnect loop wherever a proxy will not tunnel
+        # wss://, a probe every few minutes, and a failure mode with no REST
+        # equivalent (one unrecognised symbol silences the whole subscription,
+        # where one REST call returns every symbol).
+        self.websocket_enabled = bool(websocket_enabled)
         self.rest_fetcher = rest_fetcher
         self.rest_interval_s = float(rest_interval_s)
         self._rest_thread: threading.Thread | None = None
@@ -188,8 +201,10 @@ class CandidateStream:
                      f"(+{len(added)} -{len(dropped)})")
             # The subscription is rebuilt on reconnect; forcing one is simpler
             # and cheaper than managing SUBSCRIBE/UNSUBSCRIBE frames for a set
-            # that turns over every couple of minutes anyway.
-            self._reconnect()
+            # that turns over every couple of minutes anyway. No socket, no
+            # resubscribe — REST reads self._want directly.
+            if self.websocket_enabled:
+                self._reconnect()
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
@@ -202,10 +217,14 @@ class CandidateStream:
             self._rest_thread.start()
             log.info(f"candidate REST fallback every {self.rest_interval_s:g}s "
                      f"(used whenever the websocket has no fresh quote)")
+        if not self.websocket_enabled:
+            log.info("candidate stream: websocket DISABLED, REST only "
+                     "(CANDIDATE_WEBSOCKET_ENABLED=true to turn it on)")
+            return
         self._thread = threading.Thread(target=self._run, name="candidate-stream",
                                         daemon=True)
         self._thread.start()
-        log.info("candidate stream started")
+        log.info("candidate stream started (websocket + REST)")
 
     def stop(self):
         self._stop.set()
@@ -222,8 +241,18 @@ class CandidateStream:
             try:
                 asyncio.run(self._session())
             except Exception as e:
-                self._last_error = str(e)[:200]
-                log.warning(f"candidate stream session ended: {e}")
+                txt = str(e)
+                self._last_error = txt[:200]
+                if "WRONG_VERSION_NUMBER" in txt or "record layer" in txt:
+                    log.error(
+                        f"candidate stream: TLS got a PLAINTEXT reply from "
+                        f"{'the proxy' if self.proxy else 'the host'} "
+                        f"({txt[:90]}). A wss:// connection through an HTTP "
+                        f"proxy needs a CONNECT tunnel; answering in the clear "
+                        f"means it was not opened. Try "
+                        f"CANDIDATE_STREAM_PROXY=none.")
+                else:
+                    log.warning(f"candidate stream session ended: {e}")
             if self._stop.is_set():
                 break
             if self._resubscribing and not self._silent_sessions:
@@ -398,9 +427,22 @@ class CandidateStream:
                         "which is why it works.")
                     self._probe_result = "host silent for btcusdt too"
         except Exception as e:
-            log.error(f"candidate stream PROBE FAILED to connect: "
-                      f"{str(e)[:160]} — the proxy cannot reach this host.")
-            self._probe_result = f"probe connect failed: {str(e)[:80]}"
+            txt = str(e)
+            if "WRONG_VERSION_NUMBER" in txt or "record layer" in txt:
+                # The client began TLS and got back plaintext. Through an HTTP
+                # proxy that means the CONNECT tunnel was never opened and the
+                # proxy answered in the clear — an error page, a block notice.
+                # It is the PROXY, not the host.
+                log.error(
+                    "candidate stream PROBE: TLS got a plaintext reply "
+                    "(WRONG_VERSION_NUMBER). The proxy is answering instead of "
+                    "opening a CONNECT tunnel to this host — set "
+                    "CANDIDATE_STREAM_PROXY=none to bypass it for the stream.")
+                self._probe_result = "proxy did not tunnel (plaintext reply)"
+            else:
+                log.error(f"candidate stream PROBE FAILED to connect: "
+                          f"{txt[:160]} — the proxy cannot reach this host.")
+                self._probe_result = f"probe connect failed: {txt[:80]}"
 
     async def _idle(self):
         """Nothing eligible: wait rather than hammering a connect."""
@@ -482,6 +524,7 @@ class CandidateStream:
                         if q.age(now) <= self.stale_after_s)
             return {
                 "healthy": self.healthy(now),
+                "websocket_enabled": self.websocket_enabled,
                 "connected": self._connected,
                 "resubscribes": self._resubscribes,
                 "silent_sessions": self._silent_sessions,

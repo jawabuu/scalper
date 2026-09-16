@@ -1213,7 +1213,10 @@ class AutoTrader:
             ok, why = check_safety(self.state, self.cfg, balance=balance,
                                    open_positions=len(positions), symbol=symbol,
                                    current_rsi=row.get("rsi"), side=side)
-            if ok and why:
+            # "ok" is what check_safety returns on ORDINARY success, so a
+            # bare truthiness test logged a useless line on every entry. Only
+            # the override is worth a line.
+            if ok and why and why != "ok":
                 # check_safety returns a REASON on success too, and the only
                 # one it produces is "cooldown overridden". That was discarded,
                 # so a symbol re-entered minutes after a loss left no trace at
@@ -1346,14 +1349,21 @@ class AutoTrader:
                 h = st.status()
                 # Delivery, not the socket flag — see CandidateStream.healthy
                 healthy = h.get("healthy")
-                msg = (f"STREAM {'ok' if healthy else 'DEGRADED'}: "
-                       f"src={h.get('source')} "
-                       f"connected={h.get('connected')} "
-                       f"rest={h.get('rest_polls')}/{h.get('rest_errors')}e "
-                       f"tracking={h.get('tracking')} fresh={h.get('fresh')}/"
-                       f"{h.get('quotes')} msgs={h.get('messages')} "
-                       f"reconnects={h.get('reconnects')} "
-                       f"last_msg={h.get('last_message_age_s')}s")
+                # Socket fields only when a socket is meant to exist, so
+                # "connected=False" cannot read as a fault on a REST-only run.
+                ws_on = h.get("websocket_enabled")
+                ws_part = (
+                    f"connected={h.get('connected')} "
+                    f"msgs={h.get('messages')} "
+                    f"reconnects={h.get('reconnects')} " if ws_on else "ws=off ")
+                msg = (
+                    f"STREAM {'ok' if healthy else 'DEGRADED'}: "
+                    f"src={h.get('source')} "
+                    f"{ws_part}"
+                    f"rest={h.get('rest_polls')}/{h.get('rest_errors')}e "
+                    f"tracking={h.get('tracking')} "
+                    f"fresh={h.get('fresh')}/{h.get('quotes')} "
+                    f"last_msg={h.get('last_message_age_s')}s")
                 if healthy:
                     if self._stream_log_n % 20 == 0:
                         _log.info(msg)
