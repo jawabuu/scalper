@@ -2923,7 +2923,10 @@ def test_only_the_session_table_gets_toggles():
 def test_the_toggle_writes_through_the_existing_rules_endpoint():
     from pathlib import Path
     ui = _ui()
-    assert "onAutoRuleValue('sessions', sessions)" in ui
+    assert "JSON.stringify({ rules: { sessions } })" in ui
+    # and the click must show something BEFORE the request returns
+    assert "sess-pending" in ui
+    assert "sess-failed" in ui
     assert '"sessions": (dict, None, None),' in Path("bot/auto_trader.py").read_text()
 
 
@@ -3210,3 +3213,67 @@ def test_a_rule_update_failure_is_a_400_not_a_500():
     assert "except Exception as e:" in block
     assert "status_code=400" in block
     assert "except HTTPException:" in block      # real 400s pass through
+
+
+# ── Today's baseline ───────────────────────────────────────────────────────
+
+def _dt(ts, pnl):
+    return {"symbol": "X/USDT:USDT", "side": "short", "final_roi": 5.0,
+            "realised_pnl_usdt": pnl, "fees_usdt": 1.7, "margin_usdt": 88.0,
+            "exit_is_estimate": False, "closed_at": ts,
+            "entry_context": {"sized_stop_roi": 30.0}}
+
+
+def test_the_baseline_is_reconstructed_from_the_wallet():
+    """
+    day_start_balance is set when the day KEY changes, so a mid-day restart
+    stores the balance at THAT moment. The card read "from $5308" when the
+    real 00:00 figure was $5063.54, and the percentage inherited the error.
+    """
+    from bot.analysis import day_report
+    start = 1_000_000.0
+    out = day_report([_dt(start + 60, 228.65)], day_baseline=5308.0,
+                     day_start_ts=start, wallet_now=5292.19)
+    assert out["baseline"] == pytest.approx(5063.54, abs=0.01)
+    assert out["baseline_source"] == "reconstructed"
+    assert out["pct"] == pytest.approx(4.516, abs=0.01)
+
+
+def test_it_falls_back_to_the_stored_value_with_no_trades():
+    from bot.analysis import day_report
+    out = day_report([], day_baseline=5308.0, day_start_ts=1_000_000.0,
+                     wallet_now=5292.19)
+    assert out["baseline"] == 5308.0
+    assert out["baseline_source"] == "stored"
+
+
+def test_yesterdays_trades_do_not_move_todays_baseline():
+    from bot.analysis import day_report
+    start = 1_000_000.0
+    out = day_report([_dt(start - 3600, 500.0), _dt(start + 60, 100.0)],
+                     day_baseline=9999.0, day_start_ts=start, wallet_now=5100.0)
+    assert out["baseline"] == pytest.approx(5000.0, abs=0.01)
+    assert out["trades"] == 1
+
+
+def test_a_losing_day_reconstructs_upward():
+    """Net negative means the day STARTED higher than the wallet is now."""
+    from bot.analysis import day_report
+    start = 1_000_000.0
+    out = day_report([_dt(start + 60, -150.0)], day_baseline=None,
+                     day_start_ts=start, wallet_now=4850.0)
+    assert out["baseline"] == pytest.approx(5000.0, abs=0.01)
+    assert out["pct"] < 0
+
+
+def test_a_missing_wallet_does_not_invent_a_baseline():
+    from bot.analysis import day_report
+    out = day_report([_dt(1_000_060.0, 10.0)], day_baseline=5000.0,
+                     day_start_ts=1_000_000.0, wallet_now=None)
+    assert out["baseline"] == 5000.0
+    assert out["baseline_source"] == "stored"
+
+
+def test_the_card_marks_a_stored_baseline_as_uncertain():
+    ui = _ui()
+    assert "dy.baseline_source === 'stored'" in ui

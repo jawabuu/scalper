@@ -308,6 +308,7 @@ def day_report(trades: list[dict], day_baseline: float | None,
     """
     out = {
         "baseline": round(float(day_baseline), 2) if day_baseline else None,
+        "baseline_source": "stored",
         "started_at": day_start_ts,
         "tz_offset_h": tz_offset_h,
         "trades": 0, "net_pnl": 0.0, "pct": None, "wins": 0,
@@ -325,8 +326,34 @@ def day_report(trades: list[dict], day_baseline: float | None,
         out["trades"] = len(today)
         out["wins"] = sum(1 for t in today if (_realised(t) or 0) > 0)
         out["net_pnl"] = round(net, 4)
-        if day_baseline and float(day_baseline) > 0:
-            out["pct"] = round(net / float(day_baseline) * 100, 3)
+
+        # RECONSTRUCT the baseline rather than trust the stored one.
+        #
+        # day_start_balance is set by roll_day() when the day KEY changes, so
+        # on a mid-day restart it holds the balance at THAT MOMENT, not at
+        # local midnight. The card read "from $5308" when the real 00:00
+        # figure was $5063.54 — and the percentage inherited the error,
+        # because it is computed from the same number.
+        #
+        # Working backwards from the current wallet is exact as long as the
+        # trades are recorded, and it survives restarts, redeploys and the
+        # container being down overnight:
+        #
+        #     baseline = wallet_now - (realised P&L since local midnight)
+        #
+        # It cannot see a deposit, withdrawal or funding payment made since
+        # midnight; those would surface as a baseline error. The stored value
+        # is the fallback when there is nothing to reconstruct from.
+        base = None
+        if wallet_now and float(wallet_now) > 0 and today:
+            base = float(wallet_now) - net
+            if base > 0:
+                out["baseline"] = round(base, 2)
+                out["baseline_source"] = "reconstructed"
+        if base is None or base <= 0:
+            base = float(day_baseline) if day_baseline else None
+        if base and base > 0:
+            out["pct"] = round(net / base * 100, 3)
         return out
     except Exception as e:
         out["error"] = str(e)

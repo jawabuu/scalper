@@ -293,6 +293,10 @@
               background: transparent; }
   .sess-on  { color: var(--pos); border-color: var(--pos); }
   .sess-off { color: var(--muted); opacity: 0.6; }
+  /* In flight: the click registered and the write has not come back yet. */
+  .sess-pending { opacity: 0.45; font-style: italic; }
+  .sess-failed  { color: var(--neg); border-color: var(--neg); }
+  .sess-btn:disabled { cursor: progress; }
   .stats-row .stat { min-width: 0; }
   .stats-row .stat-label { white-space: nowrap; overflow: hidden;
                            text-overflow: ellipsis; }
@@ -2951,7 +2955,7 @@ function sessionToggles(label) {
   const on = (d) => d === 'L' ? !/L0/.test(spec) : !/S0/.test(spec);
   const btn = (d) => {
     const isOn = on(d);
-    return `<button onclick="toggleSession('${key}','${d}')" `
+    return `<button id="sess-${key}-${d}" onclick="toggleSession('${key}','${d}')" `
       + `class="sess-btn ${isOn ? 'sess-on' : 'sess-off'}" `
       + `title="${d === 'L' ? 'longs' : 'shorts'} ${isOn ? 'on' : 'off'} `
       + `in this session (UTC hours)">${d}${isOn ? '1' : '0'}</button>`;
@@ -2970,16 +2974,48 @@ function sessionSummary(sessions) {
   return off.length ? off.join(' ') : 'all sessions';
 }
 
-function toggleSession(key, dir) {
+// The button used to do nothing visible until the next analysis refresh —
+// seconds later, on a slower clock than the click. It now captures INTENT
+// immediately, shows that the write is in flight, and confirms or reverts
+// from the server's answer rather than from a poll.
+async function toggleSession(key, dir) {
   const cur = (_autoSessions || {})[key] || 'L1S1';
   const lg = !/L0/.test(cur), sh = !/S0/.test(cur);
   const next = dir === 'L'
     ? `L${lg ? 0 : 1}S${sh ? 1 : 0}`
     : `L${lg ? 1 : 0}S${sh ? 0 : 1}`;
+
+  const btn = document.getElementById(`sess-${key}-${dir}`);
+  const wantOn = dir === 'L' ? !lg : !sh;
+  if (btn) {
+    btn.textContent = `${dir}${wantOn ? '1' : '0'}`;
+    btn.className = `sess-btn ${wantOn ? 'sess-on' : 'sess-off'} sess-pending`;
+    btn.disabled = true;
+  }
+
   const sessions = Object.assign({}, _autoSessions || {});
   sessions[key] = next;
-  _autoSessions = sessions;          // optimistic, corrected on next refresh
-  onAutoRuleValue('sessions', sessions);
+  try {
+    const r = await fetch(API + '/api/auto-trade', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rules: { sessions } }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    _autoSessions = sessions;
+    if (btn) { btn.classList.remove('sess-pending'); btn.disabled = false; }
+  } catch (e) {
+    // Revert to what the server still holds, and say why.
+    if (btn) {
+      const was = (_autoSessions || {})[key] || 'L1S1';
+      const on = dir === 'L' ? !/L0/.test(was) : !/S0/.test(was);
+      btn.textContent = `${dir}${on ? '1' : '0'}`;
+      btn.className = `sess-btn ${on ? 'sess-on' : 'sess-off'} sess-failed`;
+      btn.disabled = false;
+      btn.title = `not saved: ${e.message}`;
+      setTimeout(() => btn.classList.remove('sess-failed'), 2500);
+    }
+  }
 }
 
 function timeTable(title, rows, note, withToggles) {
@@ -3144,7 +3180,12 @@ async function refreshAnalysis() {
       setEl('s-day-sub',
         money(`${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`)
         + ` · ${dy.trades}t${dy.trades ? ` ${dy.wins}W` : ''}`
-        + `<br>from ` + money(`$${Number(dy.baseline || 0).toFixed(0)}`) + ` · ${tz}`);
+        + `<br>from ` + money(`$${Number(dy.baseline || 0).toFixed(0)}`)
+        + (dy.baseline_source === 'stored'
+           ? `<span title="no trades closed since local midnight, so the `
+             + `baseline is the stored one — it may be the balance at the `
+             + `last restart rather than at 00:00">*</span>` : '')
+        + ` · ${tz}`);
     }
 
     // Return on the capital actually committed, not a mean of ROI percentages
