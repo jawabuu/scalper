@@ -81,6 +81,7 @@ class CandidateStream:
         # structurally wrong fails the same way every time, so reconnecting
         # at full speed is a pointless request loop.
         self._silent_sessions = 0
+        self._probe_result = ""
         self._messages = 0
         self._last_msg_at = 0.0
         self._last_error = ""
@@ -257,6 +258,12 @@ class CandidateStream:
         got = self._messages - before
         if got == 0:
             self._silent_sessions += 1
+            # PROBE. Demo works on the identical code path through the same
+            # proxy; only the host differs. Guessing from here is worthless,
+            # so ask the endpoint a question with a known answer: one
+            # well-known symbol on the SINGLE-stream URL. The result separates
+            # the three candidate causes without another deploy.
+            await self._probe()
             # Distinct from a connection failure and diagnosed differently.
             self._last_error = (
                 f"connected to {base} but received NO messages")
@@ -269,6 +276,52 @@ class CandidateStream:
         else:
             self._silent_sessions = 0
             log.info(f"candidate stream session ended after {got} message(s)")
+
+    async def _probe(self):
+        """
+        Subscribe to btcusdt alone on the /ws/ endpoint for a few seconds.
+
+            messages arrive  -> the host and proxy are fine; the COMBINED
+                                /stream?streams= form or one of the symbols
+                                in it is the problem
+            silent           -> the host itself is not delivering to us:
+                                geo-restriction on the live endpoint, or a
+                                connection-rate block. Demo would still work,
+                                which is exactly what is observed.
+            handshake fails  -> the proxy cannot reach this host at all
+        """
+        import aiohttp
+        base = (WS_BASE_DEMO if self.demo else WS_BASE).replace("/stream", "/ws")
+        url = f"{base}/btcusdt@markPrice@1s"
+        log.warning(f"candidate stream PROBE: {url}")
+        try:
+            timeout = aiohttp.ClientTimeout(total=20, sock_read=10)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.ws_connect(url, proxy=self.proxy,
+                                           heartbeat=15) as ws:
+                    for _ in range(6):
+                        try:
+                            msg = await ws.receive(timeout=3)
+                        except Exception:
+                            continue
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            log.warning(
+                                "candidate stream PROBE OK: the host and proxy "
+                                "are fine. The combined /stream?streams= URL "
+                                "or a symbol inside it is what is silent.")
+                            self._probe_result = "single-stream works"
+                            return
+                    log.error(
+                        "candidate stream PROBE SILENT: btcusdt alone on /ws/ "
+                        "also returned nothing. The endpoint is not delivering "
+                        "to this IP — geo-restriction on the LIVE host or a "
+                        "connection-rate block. Demo uses a different host, "
+                        "which is why it works.")
+                    self._probe_result = "host silent for btcusdt too"
+        except Exception as e:
+            log.error(f"candidate stream PROBE FAILED to connect: "
+                      f"{str(e)[:160]} — the proxy cannot reach this host.")
+            self._probe_result = f"probe connect failed: {str(e)[:80]}"
 
     async def _idle(self):
         """Nothing eligible: wait rather than hammering a connect."""
@@ -352,6 +405,7 @@ class CandidateStream:
                 "connected": self._connected,
                 "resubscribes": self._resubscribes,
                 "silent_sessions": self._silent_sessions,
+                "probe": self._probe_result,
                 "tracking": len(self._want),
                 "quotes": len(self._quotes),
                 "fresh": fresh,

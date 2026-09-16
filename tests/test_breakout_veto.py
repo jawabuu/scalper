@@ -3631,3 +3631,33 @@ def test_a_good_session_clears_the_silence_counter():
     src = inspect.getsource(candidate_stream.CandidateStream._session)
     i = src.index("session ended after")
     assert "_silent_sessions = 0" in src[max(0, i - 200):i]
+
+
+def test_a_silent_session_probes_a_known_symbol():
+    """
+    Demo works on the identical code path through the same proxy; only the
+    host differs. Guessing is worthless, so the stream asks the endpoint a
+    question with a known answer.
+    """
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._probe)
+    assert "btcusdt@markPrice@1s" in src
+    assert "/ws" in src
+    for outcome in ("PROBE OK", "PROBE SILENT", "PROBE FAILED"):
+        assert outcome in src
+
+
+def test_the_probe_distinguishes_the_three_causes():
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._probe)
+    assert "combined" in src.lower()          # URL form or a symbol
+    assert "geo-restriction" in src           # host not delivering
+    assert "cannot reach this host" in src    # proxy
+
+
+def test_the_probe_result_reaches_the_dashboard():
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False)
+    assert "probe" in s.status()
