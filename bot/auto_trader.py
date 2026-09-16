@@ -1018,6 +1018,8 @@ class AutoTrader:
                         "recent_tr_pct": row.get("recent_tr_pct"),
                         "gap_narrowing": row.get("gap_narrowing"),
                         "gap_rising": row.get("gap_rising"),
+                        "efficiency": (row.get("efficiency") or {}).get("efficiency"),
+                        "er_direction": (row.get("efficiency") or {}).get("er_direction"),
                         "adv_vol_trend": (row.get("advance") or {}).get("adv_vol_trend"),
                         "adv_bars": (row.get("advance") or {}).get("adv_bars"),
                         "adv_price_pct": (row.get("advance") or {}).get("adv_price_pct"),

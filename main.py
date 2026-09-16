@@ -173,6 +173,7 @@ if __name__ == "__main__":
             max_atr_pct=cfg.scan_max_atr_pct,
             recent_tr_candles=cfg.auto_recent_tr_candles,
             taper_window=cfg.auto_taper_window,
+            er_lookback=cfg.auto_er_lookback,
             turn_lookback=cfg.auto_turn_lookback,
             turn_min_bars_since=cfg.auto_turn_min_bars_since,
             extreme_band_pct=cfg.scan_extreme_band_pct,
@@ -236,6 +237,8 @@ if __name__ == "__main__":
                 # The guardian owns the state file; give it a way to snapshot
                 # the auto-trader's safety counters alongside its own state.
                 guardian._safety_snapshot = auto.safety_snapshot
+                # Without this the post-loss cooldown is dead code.
+                guardian.on_position_closed = auto.note_closed_trade
                 auto.restore_safety(getattr(guardian, "_restored_safety", {}))
                 set_auto_trader(auto)
 

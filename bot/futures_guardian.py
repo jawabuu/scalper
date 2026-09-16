@@ -2205,6 +2205,28 @@ class FuturesGuardian:
                     st.adaptive_trail_id = None
                 log.info(f"{sym}: position gone — clearing guard state")
                 self._record(sym, "closed", "position no longer open")
+                # Tell whoever is trading that this symbol closed. The
+                # auto-trader's entire post-loss cooldown chain hung off
+                # note_closed_trade() and NOTHING called it: record_loss never
+                # ran, symbol_blocked_until was never set, the 30-minute
+                # cooldown never applied, and max_reentries_per_symbol never
+                # bound. AKE was re-entered seven times in one day for -$94.98,
+                # four of them within 8-21 minutes of the previous close.
+                cb = getattr(self, "on_position_closed", None)
+                if cb:
+                    try:
+                        # The realised figure is computed INSIDE
+                        # _record_closed_trade, not carried on meta, so read it
+                        # from the record that call just produced.
+                        rec = getattr(self, "_last_closed_rec", None) or {}
+                        if rec.get("symbol") != sym:
+                            rec = {}
+                        cb(sym,
+                           rec.get("realised_pnl_usdt"),
+                           (rec.get("entry_context") or {}).get("rsi"))
+                    except Exception as e:
+                        log.warning(f"{sym}: close callback failed: "
+                                    f"{_safe_err(e)}")
                 del self._states[sym]
                 self._pos_meta.pop(sym, None)
                 self._capped_stop_reported.pop(sym, None)
@@ -2535,6 +2557,7 @@ class FuturesGuardian:
         }
         with self._lock:
             self._closed_trades.append(rec)
+            self._last_closed_rec = rec
             # A 100-trade cap silently truncated the record: a 24-hour run kept
             # reporting exactly 100 trades while far more had closed, so every
             # split was computed on a moving window rather than the whole

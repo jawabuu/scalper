@@ -3233,12 +3233,18 @@ function renderGuardian(g) {
   if (!viewAllows('guard-panel')) return;
   panel.style.display = '';
 
+  // Hoisted: the row map below needs it too, and it used to be declared
+  // inside the `if (meta)` block. Referencing it from the map threw
+  // "c is not defined", which killed renderGuardian entirely and showed
+  // "Guardian endpoint unavailable" for the whole panel — a scope slip
+  // reading as a backend outage.
+  const c = g.config || {};
+
   const meta = document.getElementById('guard-meta');
   if (meta) {
     const mode = g.dry_run
       ? '<span class="guard-flag gf-dry">DRY RUN</span>'
       : '<span class="guard-flag gf-live">LIVE ORDERS</span>';
-    const c = g.config || {};
     const ago = g.last_cycle_ago_s == null ? '—' : Math.round(g.last_cycle_ago_s) + 's ago';
     const trail = c.use_native_trail
       ? `native trail ${c.trail_callback_pct}% price`
@@ -3280,9 +3286,14 @@ function renderGuardian(g) {
       // breakeven threshold with no floor id is now called out, because a
       // position that looks protected and is not is worse than one that
       // plainly shows no stop.
-      const fs = ((g && g.floor_state) || {})[s.symbol] || {};
-      const noFloor = fs.peak_roi >= (c.breakeven_at_roi || 3)
-        && fs.has_floor === false;
+      // Wrapped: a badge is decoration, so any future slip here must degrade
+      // to "no badge" rather than blanking the positions table.
+      let noFloor = false, fs = {};
+      try {
+        fs = ((g && g.floor_state) || {})[sym] || {};
+        noFloor = fs.has_floor === false
+          && Number(fs.peak_roi) >= Number(c.breakeven_at_roi || 3);
+      } catch (e) { noFloor = false; }
       const stop = s.stop_roi === null || s.stop_roi === undefined
         ? '—'
         : `<span class="${s.stop_roi >= 0 ? 'pos' : 'neg'}">${s.stop_roi >= 0 ? '+' : ''}${s.stop_roi}%</span>`

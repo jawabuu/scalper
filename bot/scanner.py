@@ -80,6 +80,8 @@ class ScanConfig:
     # behind us before it counts as crossed rather than still forming.
     # How far back to look for the leg that created the setup.
     advance_lookback: int = 30
+    # Window for the efficiency ratio (trend vs chop).
+    er_lookback: int = 20
     turn_lookback: int = 10
     turn_min_bars_since: int = 2
     # How many candles to read body/wick structure over.
@@ -139,6 +141,8 @@ class Candidate:
     # Volume across the advance that created the setup, measured over the whole
     # leg rather than the last two candles.
     advance: dict = field(default_factory=dict)
+    # Trend-vs-chop: net displacement over total path travelled.
+    efficiency: dict = field(default_factory=dict)
     gap_rise_pct: float = 0.0
     # Right side of a U or V: the fast EMA's low is behind us and it is rising
     # off it. Distinct from gap_narrowing, which is only a two-point shrink.
@@ -195,6 +199,7 @@ class Candidate:
             "gap_narrowing": bool(self.gap_narrowing),
             "gap_rising": bool(self.gap_rising),
             "advance": dict(self.advance or {}),
+            "efficiency": dict(self.efficiency or {}),
             "gap_rise_pct": round(float(self.gap_rise_pct or 0.0), 4),
             "turn": dict(self.turn or {}),
             "change_24h_pct": round(float(self.change_24h_pct), 2),
@@ -482,6 +487,47 @@ def gap_series(df: pd.DataFrame) -> pd.Series:
     return (df["ema_fast"] - df["ema_slow"]) / df["ema_slow"] * 100
 
 
+def efficiency_ratio(df: pd.DataFrame, lookback: int = 20) -> dict:
+    """
+    Is the move GOING somewhere, or just moving?
+
+    Kaufman's efficiency ratio: net displacement over the sum of absolute
+    candle-to-candle moves.
+
+        near 1.0   every candle pushed the same way — a trend
+        near 0.0   large candles cancelling out — chop
+
+    A fade wants a LOW ratio: plenty of movement that goes nowhere, so a
+    stretched price snaps back. A high ratio is a trend, and fading a trend
+    catches the pullback and pays for the resumption.
+
+    AKE/USDT 2026-09-16 ran 0.0165 -> 0.0283 (+68.57%) in a day with large
+    alternating candles. Seven shorts were taken against it for -$94.98. The
+    alternating candles look like chop at 3-minute resolution; the ratio says
+    otherwise, which is the distinction no other recorded measure makes.
+
+    `direction` carries the sign of the net move, so a high ratio can be read
+    as "trending WITH the fade" or "trending AGAINST it".
+    """
+    out = {"efficiency": None, "er_bars": None, "er_direction": None}
+    try:
+        if df is None or "close" not in df or len(df) < 6:
+            return out
+        closes = df["close"].astype(float).tail(max(6, int(lookback)))
+        if len(closes) < 6:
+            return out
+        net = float(closes.iloc[-1]) - float(closes.iloc[0])
+        path = float(closes.diff().abs().sum())
+        if path <= 0:
+            return out
+        out["efficiency"] = round(abs(net) / path, 3)
+        out["er_bars"] = len(closes)
+        out["er_direction"] = "up" if net > 0 else ("down" if net < 0 else "flat")
+        return out
+    except Exception:
+        return out
+
+
 def advance_volume(df: pd.DataFrame, direction: str = "short",
                    lookback: int = 30) -> dict:
     """
@@ -708,6 +754,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     turn_short = turned(df, cfg, "short")
     turn_long = turned(df, cfg, "long")
     rising, rise_change = gap_rising(df, cfg)
+    eff = efficiency_ratio(df, cfg.er_lookback)
     adv_short = advance_volume(df, "short", cfg.advance_lookback)
     adv_long = advance_volume(df, "long", cfg.advance_lookback)
     atr_pct = None
@@ -741,7 +788,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
-            gap_rise_pct=rise_change, turn=turn_short, advance=adv_short, change_24h_pct=change_24h_pct,
+            gap_rise_pct=rise_change, turn=turn_short, advance=adv_short, efficiency=eff, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_short,
@@ -762,7 +809,7 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                                         gap, gap_change,
                                         extreme_band_pct=cfg.extreme_band_pct),
             gap_change_pct=gap_change, gap_narrowing=narrowing, gap_rising=rising,
-            gap_rise_pct=rise_change, turn=turn_long, advance=adv_long, change_24h_pct=change_24h_pct,
+            gap_rise_pct=rise_change, turn=turn_long, advance=adv_long, efficiency=eff, change_24h_pct=change_24h_pct,
             volume_24h_usdt=volume_24h_usdt, range_pos_24h=rpos,
             pct_above_24h_low=above_low, pct_below_24h_high=below_high,
             atr_pct=atr_pct, recent_tr_pct=rtr, shape=shp, taper=tap_long,

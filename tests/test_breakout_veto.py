@@ -2604,3 +2604,112 @@ def test_a_hand_set_gap_is_reported_at_startup(caplog):
     src = inspect.getsource(FuturesGuardian.__init__)
     assert "PROTECTION GAP" in src
     assert "Protection is continuous" in src
+
+
+# ── The post-loss cooldown was dead code ───────────────────────────────────
+#
+# AKE/USDT 2026-09-16: seven entries in one day for -$94.98, four of them 8-21
+# minutes after the previous close, against AUTO_SYMBOL_COOLDOWN_S=1800.
+# note_closed_trade() held the whole chain and NOTHING called it.
+
+def test_the_guardian_tells_someone_when_a_position_closes():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert 'getattr(self, "on_position_closed", None)' in src
+
+
+def test_main_wires_the_callback_to_the_auto_trader():
+    """The hook is useless unwired — which is exactly how it shipped."""
+    from pathlib import Path
+    src = Path("main.py").read_text()
+    assert "guardian.on_position_closed = auto.note_closed_trade" in src
+
+
+def test_a_loss_blocks_the_symbol_for_the_cooldown():
+    from bot.auto_trader import (SafetyState, AutoTradeConfig, record_loss,
+                                 check_safety)
+    cfg = AutoTradeConfig(symbol_cooldown_s=1800.0, cooldown_override_rsi_delta=0)
+    st = SafetyState()
+    record_loss(st, "AKE/USDT:USDT", cfg, entry_rsi=76.0, now=1000.0)
+    args = dict(balance=5000.0, open_positions=0, symbol="AKE/USDT:USDT")
+    ok, why = check_safety(st, cfg, now=1000.0 + 8 * 60, **args)
+    assert not ok                       # 8 minutes later, as AKE was
+    ok, _ = check_safety(st, cfg, now=1000.0 + 1801, **args)
+    assert ok
+
+
+def test_the_reentry_cap_binds_once_losses_are_recorded():
+    from bot.auto_trader import (SafetyState, AutoTradeConfig, record_loss,
+                                 record_reentry, check_safety)
+    cfg = AutoTradeConfig(symbol_cooldown_s=1800.0,
+                          cooldown_override_rsi_delta=3.0,
+                          max_reentries_per_symbol=2)
+    st = SafetyState()
+    record_loss(st, "AKE/USDT:USDT", cfg, entry_rsi=76.0, now=1000.0)
+    args = dict(balance=5000.0, open_positions=0, symbol="AKE/USDT:USDT",
+                side="short")
+    for i in range(2):
+        ok, why = check_safety(st, cfg, now=1100.0, current_rsi=85.0, **args)
+        assert ok and "cooldown overridden" in why
+        record_reentry(st, "AKE/USDT:USDT")
+    ok, why = check_safety(st, cfg, now=1100.0, current_rsi=90.0, **args)
+    assert not ok
+    assert "already retried" in why
+
+
+def test_a_winning_close_does_not_block_the_symbol():
+    from bot.auto_trader import AutoTradeConfig
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.note_closed_trade)
+    assert "realised < 0" in src
+
+
+# ── Efficiency ratio: trend or chop ────────────────────────────────────────
+
+def _closes(vals):
+    pd = pytest.importorskip("pandas")
+    return pd.DataFrame({"close": vals})
+
+
+def test_a_clean_trend_scores_near_one():
+    from bot.scanner import efficiency_ratio
+    e = efficiency_ratio(_closes([1 + i * 0.01 for i in range(20)]))
+    assert e["efficiency"] > 0.95
+    assert e["er_direction"] == "up"
+
+
+def test_pure_chop_scores_near_zero():
+    from bot.scanner import efficiency_ratio
+    e = efficiency_ratio(_closes([1 + (0.03 if i % 2 else -0.03) for i in range(20)]))
+    assert e["efficiency"] < 0.15
+
+
+def test_the_AKE_shape_is_distinguished_from_chop():
+    """
+    Large alternating candles inside a trend. It LOOKS like chop at 3-minute
+    resolution — AKE ran +68.57% that way while seven shorts faded it — and no
+    other recorded measure separates the two.
+    """
+    from bot.scanner import efficiency_ratio
+    trending = efficiency_ratio(
+        _closes([1 + i * 0.01 + (0.02 if i % 2 else -0.02) for i in range(20)]))
+    choppy = efficiency_ratio(
+        _closes([1 + (0.03 if i % 2 else -0.03) for i in range(20)]))
+    assert trending["efficiency"] > choppy["efficiency"] * 2
+
+
+def test_efficiency_survives_degenerate_input():
+    from bot.scanner import efficiency_ratio
+    pd = pytest.importorskip("pandas")
+    assert efficiency_ratio(None)["efficiency"] is None
+    assert efficiency_ratio(pd.DataFrame())["efficiency"] is None
+    assert efficiency_ratio(_closes([1.0] * 20))["efficiency"] is None
+
+
+def test_both_directions_carry_the_reading():
+    import inspect
+    from bot import scanner
+    src = inspect.getsource(scanner.evaluate_symbol)
+    assert src.count("efficiency=eff,") == 2
