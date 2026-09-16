@@ -2965,6 +2965,22 @@ function sessionToggles(label) {
 
 // One line for the auto-trade bar: only the sessions that are not fully open
 // are worth naming, so the common case stays short.
+// Stream health where it will actually be seen. A stream that stops
+// delivering degrades entries to the scan snapshot with nothing failing, so
+// silence is the wrong signal.
+function streamBadge(st) {
+  if (!st || !st.enabled) return '';
+  const ok = st.connected && st.fresh > 0;
+  const label = ok ? `live ${st.fresh}/${st.tracking}` : 'LIVE FEED DOWN';
+  const colour = ok ? 'var(--pos)' : 'var(--neg)';
+  const tip = ok
+    ? `${st.messages} ticks, ${st.reconnects} reconnect(s), last `
+      + `${st.last_message_age_s}s ago`
+    : `entries are using the scan snapshot, up to one scanner interval old`
+      + (st.last_error ? ` — ${st.last_error}` : '');
+  return `<span style="color:${colour}" title="${tip}">${label}</span>`;
+}
+
 function sessionSummary(sessions) {
   const ss = sessions || {};
   const keys = ['AS', 'EU', 'OV', 'US'];
@@ -3500,6 +3516,8 @@ async function refreshAuto() {
     setEl('auto-meta',
       (a.halted_reason ? a.halted_reason + ' · ' : '')
       + `${sessionSummary(c.sessions)} · `
+      + streamBadge(a.stream)
+      + `${(a.stream && a.stream.enabled) ? ' · ' : ''}`
       + `${c.directions && c.directions !== 'all' ? c.directions + ' only' : 'both sides'} · `
       + `within ${c.max_dist_to_extreme_pct}% of extreme · `
       + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `

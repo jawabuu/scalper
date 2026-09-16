@@ -340,6 +340,17 @@ class BotConfig:
         "HIDE_CARD_AMOUNTS", False))
     day_tz_offset_h: float = field(default_factory=lambda: _env_float(
         "DAY_TZ_OFFSET_H", 0.0))
+    # Live prices for eligible candidates, so entry decisions are not made on
+    # a scan up to SCANNER_INTERVAL old. Default ON; a failure degrades to the
+    # scan snapshot rather than stopping entries.
+    stream_enabled: bool = field(default_factory=lambda: _env_bool(
+        "CANDIDATE_STREAM_ENABLED", True))
+    stream_stale_after_s: float = field(default_factory=lambda: _env_float(
+        "CANDIDATE_STREAM_STALE_S", 20.0))
+    auto_defer_rising_volume: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_DEFER_RISING_VOLUME", True))
+    auto_defer_vol_trend: float = field(default_factory=lambda: _env_float(
+        "AUTO_DEFER_VOL_TREND", 1.0))
     auto_er_lookback: int = field(default_factory=lambda: _env_int(
         "AUTO_ER_LOOKBACK", 20))
     auto_taper_window: int = field(default_factory=lambda: _env_int(

@@ -3277,3 +3277,201 @@ def test_a_missing_wallet_does_not_invent_a_baseline():
 def test_the_card_marks_a_stored_baseline_as_uncertain():
     ui = _ui()
     assert "dy.baseline_source === 'stored'" in ui
+
+
+# ── Candidate price stream ─────────────────────────────────────────────────
+#
+# Every gate was applied to a scan up to 120s old while the order was SIZED at
+# the current price. LSK/USDT 2026-09-16 was decided on a 0.5239 market and
+# sized at 0.4612 — a 12% gap.
+
+def _stream():
+    from bot.candidate_stream import CandidateStream
+    return CandidateStream(demo=True, stale_after_s=20.0)
+
+
+def test_symbols_are_converted_to_the_wire_form():
+    s = _stream()
+    assert s._wire("BTC/USDT:USDT") == "btcusdt"
+    assert s._wire("1000PEPE/USDT:USDT") == "1000pepeusdt"
+    assert s._wire("SYN/USDT") == "synusdt"
+
+
+def test_a_quote_is_readable_after_ingest():
+    s = _stream()
+    s._ingest('{"data":{"s":"BTCUSDT","p":"64000.5"}}')
+    assert s.price("BTC/USDT:USDT") == pytest.approx(64000.5)
+
+
+def test_a_stale_quote_is_not_returned():
+    """Falling back to the scan figure is correct; a stale price is not."""
+    import time
+    s = _stream()
+    s._ingest('{"data":{"s":"BTCUSDT","p":"64000.5"}}')
+    assert s.price("BTC/USDT:USDT", now=time.time() + 25) is None
+
+
+def test_an_unknown_symbol_returns_none_not_an_error():
+    assert _stream().price("NOPE/USDT:USDT") is None
+
+
+def test_a_malformed_frame_is_ignored():
+    s = _stream()
+    for junk in ("", "not json", '{"data":{}}', '{"data":{"s":"X"}}'):
+        s._ingest(junk)
+    assert s.status()["quotes"] == 0
+
+
+def test_tracking_drops_symbols_that_are_no_longer_eligible():
+    s = _stream()
+    s._ingest('{"data":{"s":"BTCUSDT","p":"1"}}')
+    s.track(["ETH/USDT:USDT"])
+    assert s.price("BTC/USDT:USDT") is None      # dropped with its quote
+    assert s.status()["tracking"] == 1
+
+
+# ── Drift gate ─────────────────────────────────────────────────────────────
+
+def _drift_row(side, dist, hi=None, lo=None, live=None):
+    return {"symbol": "LSK/USDT:USDT", "direction": side,
+            "dist_to_extreme_pct": dist, "high_24h": hi, "low_24h": lo,
+            "live_price": live}
+
+
+def test_drift_reconstructs_the_price_the_scan_decided_at():
+    """LSK: dist 0.98% from a 0.5291 high back-solves to 0.5239."""
+    from bot.auto_trader import live_drift
+    row = _drift_row("short", 0.98, hi=0.5291)
+    drift, live_dist = live_drift(row, 0.4612)
+    assert drift == pytest.approx(-11.97, abs=0.05)
+    assert live_dist == pytest.approx(12.83, abs=0.1)
+
+
+def test_no_live_quote_means_no_opinion():
+    from bot.auto_trader import live_drift
+    assert live_drift(_drift_row("short", 0.98, hi=0.5291), None) == (None, None)
+
+
+def test_a_missing_extreme_does_not_guess():
+    from bot.auto_trader import live_drift
+    assert live_drift(_drift_row("short", 0.98), 0.46) == (None, None)
+
+
+def test_a_stale_signal_is_refused():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75,
+                          max_dist_to_extreme_pct=3.0)
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    row.update({"dist_to_extreme_pct": 0.98, "high_24h": 0.5291,
+                "live_price": 0.4612})
+    d = evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0)
+    assert not d.enter
+    assert "stale signal" in d.reason
+
+
+def test_a_live_price_close_to_the_scan_still_enters():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75,
+                          max_dist_to_extreme_pct=3.0, veto_breakout=False)
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    row.update({"dist_to_extreme_pct": 0.98, "high_24h": 0.5291,
+                "live_price": 0.5291 * (1 - 0.012)})
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+# ── Volume deferral, shorts only ───────────────────────────────────────────
+#
+# Across 89 shorts, volume FADING into the high returned +$2.14/trade against
+# -$1.00 when it was BUILDING. Not mirrored for longs: a top forms on
+# declining volume (distribution) while a bottom often forms on a volume SPIKE
+# (a selling climax), so the same reading means the opposite thing — and the
+# long sample is 16 trades with both buckets losing.
+
+def _vol_short(vol_trend):
+    row = _short(breakout=_brk(gap_widening=False, breakout=False))
+    row["advance"] = {"adv_vol_trend": vol_trend, "adv_bars": 25}
+    return row
+
+
+def test_a_short_is_deferred_while_volume_builds():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False)
+    d = evaluate_candidate(_vol_short(1.92), streak=2, cfg=cfg, atr_pct=2.0)
+    assert not d.enter
+    assert "volume still building" in d.reason
+
+
+def test_a_short_enters_once_volume_is_fading():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False)
+    assert evaluate_candidate(_vol_short(0.62), streak=2, cfg=cfg,
+                              atr_pct=2.0).enter
+
+
+def test_a_missing_volume_reading_does_not_defer():
+    """Most trades predate the measure; absence must not block them."""
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False)
+    row = _vol_short(None)
+    row["advance"] = {}
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=2.0).enter
+
+
+def test_longs_are_not_deferred_on_rising_volume():
+    """
+    The asymmetry is the point: a selling climax on peak volume is the classic
+    bottom, so building volume may MARK a long entry rather than forbid it.
+    """
+    cfg = AutoTradeConfig(enabled=True, long_rsi_min=45, long_rsi_max=52)
+    row = _long_cand()
+    row["advance"] = {"adv_vol_trend": 3.5, "adv_bars": 25}
+    assert evaluate_candidate(row, streak=2, cfg=cfg, atr_pct=0.6).enter
+
+
+def test_the_deferral_can_be_switched_off():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_on_rising_volume=False)
+    assert evaluate_candidate(_vol_short(3.0), streak=2, cfg=cfg,
+                              atr_pct=2.0).enter
+
+
+def test_the_threshold_is_tunable():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.5)
+    assert evaluate_candidate(_vol_short(1.9), streak=2, cfg=cfg,
+                              atr_pct=2.0).enter          # under the bar now
+    assert not evaluate_candidate(_vol_short(2.6), streak=2, cfg=cfg,
+                                  atr_pct=2.0).enter
+
+
+def test_both_new_refusals_have_their_own_tally_key():
+    from bot.auto_trader import _refusal_key
+    assert _refusal_key("volume still building into the high (adv 1.9)") == "vol_deferred"
+    assert _refusal_key("stale signal: the scan saw 0.98%") == "stale_signal"
+
+
+def test_a_missing_stream_never_breaks_a_cycle():
+    """The stream is optional. Absent, every decision uses the scan snapshot."""
+    from bot.auto_trader import _stream_status
+    assert _stream_status(None) == {"enabled": False, "connected": False}
+
+    class Broken:
+        def status(self):
+            raise RuntimeError("socket gone")
+    out = _stream_status(Broken())
+    assert out["enabled"] is True and out["connected"] is False
+
+
+def test_stream_health_is_logged_every_cycle():
+    """
+    A stream that stops delivering degrades entries to the scan snapshot with
+    nothing failing — a quiet regression only visible weeks later in the
+    numbers. One greppable word.
+    """
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    assert "STREAM ok" in src or "'ok' if healthy" in src
+    assert "STREAM-SAVED" in src
+    assert "falling back to the scan" in src
+
+
+def test_the_dashboard_shows_stream_health():
+    ui = _ui()
+    assert "function streamBadge(" in ui
+    assert "LIVE FEED DOWN" in ui

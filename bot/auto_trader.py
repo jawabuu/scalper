@@ -56,6 +56,10 @@ class AutoTradeConfig:
     # the stretch itself and does not need the EMAs to have turned. A long has
     # no equivalent, because "oversold" bounds nothing.
     # Longs must also show the TURN, not merely a shrinking gap.
+    # Defer a SHORT while volume is still expanding into the high. Shorts
+    # only — see evaluate_candidate() for why longs are not mirrored.
+    defer_on_rising_volume: bool = True
+    defer_vol_trend: float = 1.0
     long_require_turn: bool = True
     long_require_convergence: bool = True
     # off | all | short | long. Two booleans said the same thing twice and
@@ -241,6 +245,52 @@ def callback_for(distance_pct: float, atr_pct: float | None,
     return round(cb, 2), notes, source
 
 
+def _stream_status(stream) -> dict:
+    """Stream health for the dashboard. Absent is a normal state, not an error."""
+    if stream is None:
+        return {"enabled": False, "connected": False}
+    try:
+        out = stream.status()
+        out["enabled"] = True
+        return out
+    except Exception as e:
+        return {"enabled": True, "connected": False, "last_error": str(e)[:120]}
+
+
+def live_drift(row: dict, live_price: float | None) -> tuple[float | None, float | None]:
+    """
+    How far the market has moved since the scan that produced this candidate.
+
+    Returns (drift_pct, live_dist_to_extreme_pct). Both None when there is no
+    live quote — the caller then proceeds on the scan figures, as it always
+    did.
+
+    The scan's own price is not recorded directly, but it is recoverable: the
+    candidate carries dist_to_extreme_pct and the 24h extreme it was measured
+    against, so the price the DECISION was made at can be reconstructed. LSK on
+    2026-09-16 back-solved to 0.5239 while the order was sized at 0.4612.
+    """
+    try:
+        if live_price is None or live_price <= 0:
+            return None, None
+        dist = row.get("dist_to_extreme_pct")
+        side = row.get("direction") or row.get("side")
+        hi, lo = row.get("high_24h"), row.get("low_24h")
+        extreme = hi if side == "short" else lo
+        if dist is None or not extreme:
+            return None, None
+        extreme = float(extreme)
+        scan_price = (extreme * (1 - float(dist) / 100.0) if side == "short"
+                      else extreme * (1 + float(dist) / 100.0))
+        if scan_price <= 0:
+            return None, None
+        drift = (live_price - scan_price) / scan_price * 100.0
+        live_dist = (abs(extreme - live_price) / extreme * 100.0)
+        return round(drift, 3), round(live_dist, 3)
+    except Exception:
+        return None, None
+
+
 def _refusal_key(reason: str) -> str:
     """
     Collapse a refusal reason to the RULE that produced it.
@@ -256,6 +306,8 @@ def _refusal_key(reason: str) -> str:
     # "rsi" check first would file every distance refusal under the RSI band
     # and hide the distance gate entirely. Specific markers precede general.
     for marker, key in (
+        ("volume still building", "vol_deferred"),
+        ("stale signal", "stale_signal"),
         ("disabled (", "direction"),          # "longs disabled (short only)"
         ("gaining on ema21", "gap_not_rising"),
         ("no turn yet", "no_turn"),
@@ -373,6 +425,42 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
         return AutoDecision(False, symbol, side,
                             reason=f"{dist:.2f}% from the {extreme}, "
                                    f"limit {cfg.max_dist_to_extreme_pct}%")
+
+    # LIVE RE-CHECK. Everything above was decided on the scan's market, which
+    # can be two minutes old. If a live quote says the price has moved past
+    # the distance limit since then, the candidate no longer qualifies —
+    # refusing here is the difference between fading an extreme and chasing
+    # something that has already gone.
+    live_px = row.get("live_price")
+    drift_pct, live_dist = live_drift(row, live_px)
+    if live_dist is not None and cfg.max_dist_to_extreme_pct:
+        if live_dist > cfg.max_dist_to_extreme_pct:
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"stale signal: the scan saw {dist:.2f}% from the 24h "
+                        f"{'high' if side == 'short' else 'low'}, live is "
+                        f"{live_dist:.2f}% (limit {cfg.max_dist_to_extreme_pct}%, "
+                        f"drift {drift_pct:+.2f}%)"))
+
+    # VOLUME DEFERRAL, SHORTS ONLY. Volume still building into the high means
+    # the move is being bought, not exhausted — the fade is early. Across 89
+    # shorts, volume fading into the high returned +$2.14/trade against -$1.00
+    # when it was building.
+    #
+    # NOT mirrored for longs. A top forms on declining volume (distribution);
+    # a bottom often forms on a volume SPIKE (a selling climax). The same
+    # reading means the opposite thing, and the long sample is 16 trades with
+    # both buckets losing — it says nothing either way. Recorded, not acted on.
+    if side == "short" and cfg.defer_on_rising_volume:
+        adv = (row.get("advance") or {})
+        vt = adv.get("adv_vol_trend")
+        if vt is not None and float(vt) >= cfg.defer_vol_trend:
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"volume still building into the high "
+                        f"(adv_vol_trend {float(vt):.2f} >= "
+                        f"{cfg.defer_vol_trend}) — deferring, not refusing: "
+                        f"the move is being bought, so the fade is early"))
 
     cb, notes, cb_source = callback_for(dist, atr_pct, cfg,
                                        recent_tr_pct=row.get("recent_tr_pct"),
@@ -789,6 +877,7 @@ class AutoTrader:
                 "callback_min_pct": self.cfg.callback_min_pct,
                 "long_require_turn": self.cfg.long_require_turn,
                 "last_refusals": dict(getattr(self, "_last_refusals", {})),
+                "stream": (_stream_status(getattr(self, "stream", None))),
                 "long_require_convergence": self.cfg.long_require_convergence,
                 "callback_use_velocity": velocity_mode(
                     self.cfg.callback_use_velocity),
@@ -834,6 +923,8 @@ class AutoTrader:
         # from the dashboard without a redeploy.
         "callback_min_pct": (float, 0.1, 5.0),
         "long_require_turn": (bool, None, (True, False)),
+        "defer_on_rising_volume": (bool, None, (True, False)),
+        "defer_vol_trend": (float, 0.5, 5.0),
         "long_require_convergence": (bool, None, (True, False)),
         "callback_use_velocity": (str, None, ("off", "all", "short", "long")),
         "veto_breakout": (bool, None, (True, False)),
@@ -1024,6 +1115,16 @@ class AutoTrader:
         refusals: dict[str, int] = {}
 
         snap = self.scanner.snapshot()
+        # Follow eligibility rather than accumulating symbols: the stream
+        # tracks what the scanner currently considers a candidate, which is
+        # ten to twenty of the 574 it screens.
+        st = getattr(self, "stream", None)
+        if st is not None:
+            try:
+                st.track([r.get("symbol") for r in
+                          (snap.get("candidates") or [])])
+            except Exception as e:
+                _log.debug(f"stream track failed: {e}")
         rows = snap.get("candidates") or []
         # Pass the scan timestamp so a repeated read of the same snapshot does
         # not advance the streaks.
@@ -1070,6 +1171,19 @@ class AutoTrader:
                 continue
 
             streak = self.tracker.streak(symbol, side)
+            # A live quote when the stream has one; None otherwise, and the
+            # candidate is judged on the scan figures exactly as before.
+            st = getattr(self, "stream", None)
+            if st is not None:
+                try:
+                    row["live_price"] = st.price(symbol)
+                except Exception:
+                    row["live_price"] = None
+
+            # Record when the live quote is what decided it, so the value of
+            # the stream is measurable rather than assumed.
+            _pre_live = row.get("live_price")
+
             decision = evaluate_candidate(
                 row, streak, self.cfg, atr_pct=row.get("atr_pct"))
             if not decision.enter:
@@ -1077,6 +1191,10 @@ class AutoTrader:
                 # dashboard full of candidates with no entries gave no clue
                 # whether the bot was broken or the rules simply did not match.
                 self._skip_reasons[symbol] = decision.reason
+                if "stale signal" in (decision.reason or ""):
+                    _log.warning(
+                        f"STREAM-SAVED {symbol}: {decision.reason}. On the "
+                        f"scan figures alone this would have been entered.")
                 refusals[_refusal_key(decision.reason)] = refusals.get(
                     _refusal_key(decision.reason), 0) + 1
                 continue
@@ -1199,6 +1317,34 @@ class AutoTrader:
                             sorted(refusals.items(), key=lambda kv: -kv[1]))
             _log.info(f"auto-trade refusals this cycle: {top}")
             self._last_refusals = dict(refusals)
+
+        # STREAM HEALTH, once a cycle. A stream that silently stops delivering
+        # degrades entries back to the scan snapshot without anything failing —
+        # exactly the kind of quiet regression that is only noticed weeks later
+        # in the numbers. One greppable word: STREAM.
+        st = getattr(self, "stream", None)
+        if st is not None:
+            try:
+                h = st.status()
+                healthy = h.get("connected") and h.get("fresh")
+                msg = (f"STREAM {'ok' if healthy else 'DEGRADED'}: "
+                       f"connected={h.get('connected')} "
+                       f"tracking={h.get('tracking')} fresh={h.get('fresh')}/"
+                       f"{h.get('quotes')} msgs={h.get('messages')} "
+                       f"reconnects={h.get('reconnects')} "
+                       f"last_msg={h.get('last_message_age_s')}s")
+                if healthy:
+                    if self._stream_log_n % 20 == 0:
+                        _log.info(msg)
+                else:
+                    _log.warning(
+                        msg + " — entries are falling back to the scan "
+                        "snapshot, which can be up to one scanner interval old"
+                        + (f". last error: {h['last_error']}"
+                           if h.get("last_error") else ""))
+                self._stream_log_n += 1
+            except Exception as e:
+                _log.debug(f"stream status failed: {e}")
 
     def _check_daily_drawdown(self, balance: float):
         """

@@ -229,6 +229,8 @@ if __name__ == "__main__":
                     veto_breakout=cfg.auto_veto_breakout,
                     long_require_convergence=cfg.auto_long_require_convergence,
                     long_require_turn=cfg.auto_long_require_turn,
+                    defer_on_rising_volume=cfg.auto_defer_rising_volume,
+                    defer_vol_trend=cfg.auto_defer_vol_trend,
                     callback_use_velocity=cfg.auto_callback_use_velocity,
                     **({"callback_min_pct": cfg.auto_callback_min_pct}
                        if cfg.auto_callback_min_pct > 0 else {}),
@@ -256,6 +258,18 @@ if __name__ == "__main__":
                 # Without this the post-loss cooldown is dead code.
                 guardian.on_position_closed = auto.note_closed_trade
                 auto.restore_safety(getattr(guardian, "_restored_safety", {}))
+                if cfg.stream_enabled:
+                    try:
+                        from bot.candidate_stream import CandidateStream
+                        auto.stream = CandidateStream(
+                            demo=cfg.guardian_demo,
+                            stale_after_s=cfg.stream_stale_after_s,
+                            proxy=cfg.socks_proxy or None)
+                        auto.stream.start()
+                    except Exception as e:
+                        log.error(f"candidate stream unavailable ({e}) — "
+                                  f"entries will use the scan snapshot")
+                        auto.stream = None
                 set_auto_trader(auto)
 
                 def _auto_loop():
