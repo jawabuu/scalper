@@ -109,6 +109,7 @@ class CandidateStream:
         self._rest_errors = 0
         self._source = "none"
         self._skipped_last: set = set()
+        self._ws_unsafe_last: set = set()
         # Latest BNB/USDT mark, harvested from the same poll.
         self._bnb_mark: float | None = None
         self._bnb_mark_at: float = 0.0
@@ -150,22 +151,28 @@ class CandidateStream:
             base = str(symbol or "").split(":")[0].replace("/", "").upper()
             if not base.endswith("USDT"):
                 return None
-            # MUST BE ASCII. `.isalnum()` is True for CJK under Unicode, so a
-            # symbol like 龙虾USDT passed the previous check, went into the
-            # stream URL percent-encoded as %E9%BE%99%E8%99%BEusdt, and
-            # silenced the ENTIRE subscription — Binance accepted the socket
-            # and sent nothing for any symbol. These are real, tradeable
-            # pairs: 我踏马来了/USDT traded on 2026-09-13. They are excluded
-            # from the STREAM only, and still scanned, entered and guarded
-            # normally on the scan snapshot.
-            if not base.isascii():
-                return None
             stem = base[:-4]
             if not stem or not stem.replace("_", "").isalnum():
                 return None
             return base.lower()
         except Exception:
             return None
+
+    @staticmethod
+    def ws_safe(wire: str) -> bool:
+        """
+        Can this key go in a WEBSOCKET subscription URL?
+
+        Non-ASCII cannot. `龙虾usdt` becomes %E9%BE%99%E8%99%BEusdt in the
+        query, Binance accepts the socket and sends NOTHING FOR ANY SYMBOL —
+        one bad name silences every other subscription.
+
+        REST has no such problem: premiumIndex returns every symbol in one
+        response and the key is matched locally. So this restriction belongs
+        to the TRANSPORT, not to the symbol. Excluding 我踏马来了/USDT from
+        REST too cost it live prices for no reason — and it trades.
+        """
+        return bool(wire) and wire.isascii()
 
     def track(self, symbols: list[str]):
         """
@@ -181,11 +188,21 @@ class CandidateStream:
         if skipped and set(skipped) != self._skipped_last:
             self._skipped_last = set(skipped)
             log.warning(
-                f"stream skipping {len(skipped)} symbol(s) it cannot "
-                f"subscribe to (non-ASCII or not USDT-M): "
-                f"{', '.join(skipped[:6])}"
-                f"{'...' if len(skipped) > 6 else ''}. One unrecognised name "
-                f"silences the ENTIRE subscription, so they are left out.")
+                f"stream skipping {len(skipped)} symbol(s) that are not "
+                f"USDT-margined: {', '.join(skipped[:6])}"
+                f"{'...' if len(skipped) > 6 else ''}")
+        # Non-ASCII names are tracked for REST and left out of the websocket
+        # URL only. Worth a line when the socket is on, because those symbols
+        # then run on the scan snapshot; silent when it is off, because REST
+        # covers them.
+        if self.websocket_enabled:
+            unsafe = [w for w in want if not self.ws_safe(w)]
+            if unsafe and set(unsafe) != self._ws_unsafe_last:
+                self._ws_unsafe_last = set(unsafe)
+                log.warning(
+                    f"websocket cannot subscribe to {len(unsafe)} symbol(s) "
+                    f"(non-ASCII): {', '.join(unsafe[:4])} — one such name "
+                    f"silences the WHOLE subscription. REST still covers them.")
         with self._lock:
             if want == self._want:
                 return
@@ -286,7 +303,7 @@ class CandidateStream:
     async def _session(self):
         import aiohttp
         with self._lock:
-            want = sorted(self._want)
+            want = sorted(w for w in self._want if self.ws_safe(w))
         if not want:
             await self._idle()
             return

@@ -3538,7 +3538,7 @@ def test_a_stream_with_no_data_is_not_healthy():
 # the whole subscription goes silent, not just that symbol. The live universe
 # is 718 symbols against demo's 574 and is not all USDT-margined.
 
-def test_only_usdt_margined_pairs_are_subscribed():
+def test_only_usdt_margined_pairs_are_tracked():
     from bot.candidate_stream import CandidateStream as C
     assert C._wire("BTC/USDT:USDT") == "btcusdt"
     assert C._wire("1000PEPE/USDT:USDT") == "1000pepeusdt"
@@ -3548,14 +3548,13 @@ def test_only_usdt_margined_pairs_are_subscribed():
         assert C._wire(bad) is None, bad
 
 
-def test_unsubscribable_symbols_are_dropped_not_passed_through(caplog):
+def test_non_usdt_margined_symbols_are_dropped(caplog):
     from bot.candidate_stream import CandidateStream
     s = CandidateStream(demo=True)
     with caplog.at_level("WARNING"):
         s.track(["BTC/USDT:USDT", "BTC/USD:BTC", "ETH/USDT:USDT"])
     assert s.status()["tracking"] == 2
-    assert any("cannot" in r.message and "subscribe" in r.message
-               for r in caplog.records)
+    assert any("not USDT-margined" in r.message for r in caplog.records)
 
 
 def test_price_on_an_unsubscribable_symbol_is_none():
@@ -3588,7 +3587,43 @@ def test_a_resubscribe_is_not_blocked_by_silence():
     assert "async for msg in ws" not in src
 
 
-def test_non_ascii_symbols_cannot_reach_the_subscription():
+def test_non_ascii_is_a_WEBSOCKET_limit_not_a_symbol_limit():
+    """
+    These are real tradeable pairs — 我踏马来了/USDT traded on 2026-09-13.
+    Excluding them from REST too cost them live prices for no reason: REST
+    returns every symbol in one response and matches the key locally. Only the
+    websocket URL cannot carry them.
+    """
+    from bot.candidate_stream import CandidateStream as C
+    assert C._wire("我踏马来了/USDT:USDT") == "我踏马来了usdt"   # tracked
+    assert C.ws_safe("我踏马来了usdt") is False                  # not subscribed
+    assert C.ws_safe("arbusdt") is True
+
+
+def test_rest_prices_a_symbol_the_websocket_cannot_subscribe_to():
+    import time, logging
+    from bot.candidate_stream import CandidateStream
+    logging.disable(logging.CRITICAL)
+    try:
+        s = CandidateStream(demo=False, rest_interval_s=0.05,
+                            rest_fetcher=lambda: {"我踏马来了usdt": 0.0137})
+        s.track(["我踏马来了/USDT:USDT"])
+        s.start(); time.sleep(0.25)
+        assert s.price("我踏马来了/USDT:USDT") == pytest.approx(0.0137)
+    finally:
+        s.stop(); logging.disable(logging.NOTSET)
+
+
+def test_the_subscription_still_excludes_them():
+    """One non-ASCII name silences the WHOLE subscription, so the URL builder
+    must filter even though the tracker does not."""
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._session)
+    assert "self.ws_safe(w)" in src
+
+
+def _unused_non_ascii_subscription_check():
     """
     龙虾USDT silenced the ENTIRE live subscription: `.isalnum()` is True for
     CJK under Unicode, so it passed the filter, went into the URL as
@@ -3607,10 +3642,12 @@ def test_non_ascii_symbols_cannot_reach_the_subscription():
 
 
 def test_one_bad_symbol_does_not_drop_the_good_ones():
+    """Non-USDT-M is dropped; non-ASCII is kept for REST."""
     from bot.candidate_stream import CandidateStream
     s = CandidateStream(demo=False)
-    s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT", "FIL/USDT:USDT"])
-    assert s.status()["tracking"] == 2
+    s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT", "FIL/USDT:USDT",
+             "BTC/USD:BTC"])
+    assert s.status()["tracking"] == 3        # the CJK one is tracked
 
 
 def test_repeated_silence_backs_off_rather_than_looping():
@@ -3793,8 +3830,9 @@ def test_the_skip_warning_only_fires_when_the_set_changes(caplog):
     s = CandidateStream(demo=False)
     with caplog.at_level("WARNING"):
         for _ in range(3):
-            s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT"])
-    assert len([r for r in caplog.records if "cannot subscribe" in r.message]) == 1
+            s.track(["ARB/USDT:USDT", "BTC/USD:BTC"])
+    assert len([r for r in caplog.records
+                if "not USDT-margined" in r.message]) == 1
 
 
 def test_every_attribute_run_once_uses_is_initialised():
