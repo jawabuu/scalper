@@ -2566,6 +2566,7 @@ class FuturesGuardian:
             "realised_pnl_usdt": None if realised is None else round(realised, 4),
             # Commission from the income ledger. GROSS realised P&L excludes
             # it, which is why a positive P&L can sit beside a falling wallet.
+            "fee_source": getattr(self, "_last_fee_source", "ledger"),
             "fees_usdt": (None if self._last_trade_fees is None
                           else round(self._last_trade_fees, 4)),
             "net_pnl_usdt": (
@@ -2806,6 +2807,8 @@ class FuturesGuardian:
             return 0.0, 0.0, False
 
         pnl = comm = 0.0
+        unconverted = 0.0
+        fee_src = ""
         seen = False
         for r in rows:
             if not isinstance(r, dict):
@@ -2819,9 +2822,64 @@ class FuturesGuardian:
                 pnl += val
                 seen = True
             elif kind == "COMMISSION":
-                comm += abs(val)
+                # The ASSET matters. Paying fees in BNB makes `income` a BNB
+                # amount, and summing it as USDT reported 0.0000 on every live
+                # trade — so every "net of fees" figure on that account was
+                # actually GROSS while demo's was net. The two stopped being
+                # comparable, silently.
+                asset = str(r.get("asset") or "USDT").upper()
+                if asset in ("USDT", "BUSD", "USDC", ""):
+                    comm += abs(val)
+                    fee_src = fee_src or "ledger"
+                else:
+                    rate = self._fee_asset_rate(asset)
+                    if rate:
+                        comm += abs(val) * rate
+                        fee_src = "converted"
+                    else:
+                        # Better to record NOTHING than a BNB count posing as
+                        # dollars. The caller falls back to an estimate.
+                        unconverted += abs(val)
+                        fee_src = fee_src or "unconverted"
                 seen = True
+        if unconverted:
+            log.warning(
+                f"{symbol}: {unconverted:.8f} of commission in a non-USDT "
+                f"asset could not be converted — fees are understated for "
+                f"this trade.")
+        self._last_fee_source = fee_src or "ledger"
         return round(pnl, 8), round(comm, 8), seen
+
+    def estimate_fees(self, notional: float) -> float:
+        """
+        Fallback when the ledger fee cannot be used: notional x rate x 2 legs.
+
+        Approximate by construction — it assumes taker on both legs, which is
+        right for a trailing entry and a market stop but wrong for anything
+        that rests. Only used when the ledger gives nothing usable, and the
+        trade records fee_source="estimated" so the figure is never mistaken
+        for a measurement.
+        """
+        try:
+            rate = float(getattr(self.cfg, "taker_fee_rate", 0.0005) or 0.0005)
+            return round(abs(float(notional)) * rate * 2.0, 8)
+        except Exception:
+            return 0.0
+
+    def _fee_asset_rate(self, asset: str) -> float | None:
+        """
+        Price of a fee asset in USDT. BNB comes free with the candidate
+        poller — premiumIndex returns every symbol, so BNBUSDT is already in
+        hand and needs no extra call.
+        """
+        if asset == "BNB":
+            st = getattr(self, "_candidate_stream", None)
+            if st is not None:
+                try:
+                    return st.bnb_mark()
+                except Exception:
+                    return None
+        return None
 
     def _cancel_any(self, order_id: str, symbol: str) -> bool:
         """

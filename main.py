@@ -113,6 +113,7 @@ if __name__ == "__main__":
         rescue_trail_callback_pct=cfg.guard_rescue_trail_callback_pct,
         stop_working_type=cfg.guard_stop_working_type,
         profit_floor_enabled=cfg.guard_profit_floor_enabled,
+        taker_fee_rate=cfg.guard_taker_fee_rate,
         adaptive_trail_enabled=cfg.guard_adaptive_trail_enabled,
         fail_fast_require_worsening=cfg.guard_fail_fast_require_worsening,
         ).validate()
@@ -246,6 +247,7 @@ if __name__ == "__main__":
                     long_require_turn=cfg.auto_long_require_turn,
                     defer_on_rising_volume=cfg.auto_defer_rising_volume,
                     defer_vol_trend=cfg.auto_defer_vol_trend,
+                    defer_vol_late_trend=cfg.auto_defer_vol_late_trend,
                     callback_use_velocity=cfg.auto_callback_use_velocity,
                     **({"callback_min_pct": cfg.auto_callback_min_pct}
                        if cfg.auto_callback_min_pct > 0 else {}),
@@ -297,6 +299,9 @@ if __name__ == "__main__":
                             rest_interval_s=cfg.stream_rest_interval_s,
                             websocket_enabled=cfg.stream_websocket_enabled)
                         auto.stream.start()
+                        # The guardian converts BNB-denominated commissions
+                        # with the BNB mark this poller already harvests.
+                        guardian._candidate_stream = auto.stream
                     except Exception as e:
                         log.error(f"candidate stream unavailable ({e}) — "
                                   f"entries will use the scan snapshot")

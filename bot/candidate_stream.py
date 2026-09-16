@@ -109,6 +109,9 @@ class CandidateStream:
         self._rest_errors = 0
         self._source = "none"
         self._skipped_last: set = set()
+        # Latest BNB/USDT mark, harvested from the same poll.
+        self._bnb_mark: float | None = None
+        self._bnb_mark_at: float = 0.0
         self._quotes: dict[str, Quote] = {}
         self._want: set[str] = set()
         self._lock = threading.RLock()
@@ -361,6 +364,12 @@ class CandidateStream:
                 if want:
                     marks = self.rest_fetcher() or {}
                     now = time.time()
+                    # premiumIndex returns EVERY symbol, so BNBUSDT is already
+                    # in hand. Keeping it costs no call and no weight, and it
+                    # is what converts a BNB-denominated commission into USDT.
+                    bnb = marks.get("bnbusdt")
+                    if bnb:
+                        self._bnb_mark, self._bnb_mark_at = float(bnb), now
                     hit = 0
                     with self._lock:
                         for wire, px in marks.items():
@@ -498,6 +507,21 @@ class CandidateStream:
             if q.age(now) > self.stale_after_s:
                 return None
             return q.price
+
+    def bnb_mark(self, max_age_s: float = 120.0) -> float | None:
+        """
+        BNB/USDT, for converting commissions paid in BNB.
+
+        Stale is worse than absent: a price two minutes old is fine for a
+        fee that is fractions of a cent, but an hour-old one silently
+        misstates every fee in the tables.
+        """
+        with self._lock:
+            if not self._bnb_mark:
+                return None
+            if time.time() - self._bnb_mark_at > max_age_s:
+                return None
+            return self._bnb_mark
 
     def healthy(self, now: float | None = None) -> bool:
         """

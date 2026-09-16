@@ -368,6 +368,8 @@ class BotConfig:
         "AUTO_DEFER_RISING_VOLUME", True))
     auto_defer_vol_trend: float = field(default_factory=lambda: _env_float(
         "AUTO_DEFER_VOL_TREND", 1.0))
+    auto_defer_vol_late_trend: float = field(default_factory=lambda: _env_float(
+        "AUTO_DEFER_VOL_LATE_TREND", 1.5))
     auto_er_lookback: int = field(default_factory=lambda: _env_int(
         "AUTO_ER_LOOKBACK", 20))
     auto_taper_window: int = field(default_factory=lambda: _env_int(
@@ -436,6 +438,10 @@ class BotConfig:
         "GUARD_ADAPTIVE_TRAIL_ENABLED", True))
     # Hard floor at breakeven once a position has been ahead. Default TRUE:
     # a peak above GUARD_BREAKEVEN_AT_ROI must not become a loss.
+    # Per-leg fee rate for the ESTIMATE fallback only; the ledger conversion
+    # is preferred. 0.05% is standard futures taker.
+    guard_taker_fee_rate: float = field(default_factory=lambda: _env_float(
+        "GUARD_TAKER_FEE_RATE", 0.0005))
     guard_profit_floor_enabled: bool = field(default_factory=lambda: _env_bool(
         "GUARD_PROFIT_FLOOR_ENABLED", True))
     # MARK_PRICE or CONTRACT_PRICE. Default MARK_PRICE: contract price is the

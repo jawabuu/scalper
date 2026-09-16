@@ -231,6 +231,10 @@ class GuardConfig:
     stop_working_type: str = "MARK_PRICE"
     # A position that has been ahead by breakeven_at_roi gets a hard
     # STOP_MARKET at breakeven_stop_roi that nothing cancels while it is open.
+    # Round-trip fee rate per leg, for the fallback estimate only. 0.05% is
+    # Binance's standard futures taker; a VIP tier or the BNB discount lowers
+    # it, but the ledger conversion is preferred and this is the backstop.
+    taker_fee_rate: float = 0.0005
     profit_floor_enabled: bool = True
     # Place a native trailing stop at the position's OWN stop distance
     # (sized_stop_roi / leverage, as a price %) as soon as it is adopted,

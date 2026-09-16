@@ -4079,3 +4079,131 @@ def test_the_health_line_hides_socket_fields_when_it_is_off():
     src = inspect.getsource(AutoTrader.run_once)
     assert 'ws_on = h.get("websocket_enabled")' in src
     assert '"ws=off "' in src
+
+
+# ── Fees paid in BNB ───────────────────────────────────────────────────────
+#
+# The income parser summed COMMISSION rows by `income` and ignored `asset`.
+# Paying fees in BNB makes that a BNB amount — ~0.0000155 on a $15 notional —
+# which rounded to 0.0000, so every "net of fees" figure on live was GROSS
+# while demo's was net. The accounts stopped being comparable, silently.
+
+def _income_guardian(rows, bnb=None):
+    import threading
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    g._lock = threading.RLock()
+    g.exchange = type("X", (), {
+        "fapiPrivateGetIncome": staticmethod(lambda p: rows),
+        "market_id": staticmethod(lambda s: s.split("/")[0] + "USDT")})()
+    if bnb is not None:
+        g._candidate_stream = type("S", (), {"bnb_mark": staticmethod(
+            lambda max_age_s=120.0: bnb)})()
+    return g
+
+
+def test_a_usdt_commission_is_used_as_is():
+    g = _income_guardian([
+        {"incomeType": "REALIZED_PNL", "income": "-27.379", "asset": "USDT"},
+        {"incomeType": "COMMISSION", "income": "-1.76", "asset": "USDT"}])
+    pnl, comm, seen = g._income_for_position("LSK/USDT:USDT", None)
+    assert seen and comm == pytest.approx(1.76)
+    assert g._last_fee_source == "ledger"
+
+
+def test_a_bnb_commission_is_converted():
+    """0.00001552 BNB at 902.35 is ~0.014 USDT — the real cost."""
+    g = _income_guardian([
+        {"incomeType": "REALIZED_PNL", "income": "-0.5915", "asset": "USDT"},
+        {"incomeType": "COMMISSION", "income": "-0.00001552", "asset": "BNB"}],
+        bnb=902.35)
+    _, comm, _ = g._income_for_position("BULLA/USDT:USDT", None)
+    assert comm == pytest.approx(0.00001552 * 902.35, rel=1e-6)
+    assert g._last_fee_source == "converted"
+
+
+def test_an_unconvertible_asset_records_nothing_rather_than_a_wrong_number():
+    """A BNB count posing as dollars is worse than a gap the caller can fill."""
+    g = _income_guardian([
+        {"incomeType": "COMMISSION", "income": "-0.00001552", "asset": "BNB"}],
+        bnb=None)
+    _, comm, _ = g._income_for_position("BULLA/USDT:USDT", None)
+    assert comm == 0.0
+    assert g._last_fee_source == "unconverted"
+
+
+def test_the_estimate_fallback_is_notional_based():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig(taker_fee_rate=0.0005)
+    assert g.estimate_fees(15.52) == pytest.approx(15.52 * 0.0005 * 2)
+
+
+def test_the_bnb_mark_comes_free_from_the_existing_poll():
+    """premiumIndex returns every symbol — no extra call, no extra weight."""
+    import time, logging
+    from bot.candidate_stream import CandidateStream
+    logging.disable(logging.CRITICAL)
+    try:
+        s = CandidateStream(demo=False, rest_interval_s=0.05,
+                            rest_fetcher=lambda: {"brusdt": 1.0,
+                                                  "bnbusdt": 902.35})
+        s.track(["BR/USDT:USDT"])          # BNB is NOT a tracked candidate
+        s.start(); time.sleep(0.25)
+        assert s.bnb_mark() == pytest.approx(902.35)
+        assert s.bnb_mark(max_age_s=0) is None      # stale is worse than absent
+    finally:
+        s.stop(); logging.disable(logging.NOTSET)
+
+
+# ── Late volume peak ───────────────────────────────────────────────────────
+
+def _bulla(vt, early):
+    return {"symbol": "BULLA/USDT:USDT", "direction": "short", "rsi": 85.5,
+            "pct_below_24h_high": -1.69, "pct_above_24h_low": 50.0,
+            "strength": "strengthening", "atr_pct": 5.49,
+            "advance": {"adv_vol_trend": vt, "peak_vol_early": early}}
+
+
+def test_a_late_volume_peak_defers_below_the_main_threshold():
+    """
+    BULLA passed at 1.605 (under 2.0) and lost. peak_vol_early was FALSE — the
+    heaviest trade arrived in the SECOND half of a leg that had doubled.
+    """
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.0, defer_vol_late_trend=1.5)
+    d = evaluate_candidate(_bulla(1.605, False), streak=2, cfg=cfg, atr_pct=5.49)
+    assert not d.enter and "LATE in the advance" in d.reason
+
+
+def test_the_same_growth_with_an_early_peak_is_allowed():
+    """Volume merely growing is ambiguous; growing with its peak still ahead
+    is the move being bought."""
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.0, defer_vol_late_trend=1.5)
+    assert evaluate_candidate(_bulla(1.605, True), streak=2, cfg=cfg,
+                              atr_pct=5.49).enter
+
+
+def test_mild_growth_with_a_late_peak_still_passes():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.0, defer_vol_late_trend=1.5)
+    assert evaluate_candidate(_bulla(1.2, False), streak=2, cfg=cfg,
+                              atr_pct=5.49).enter
+
+
+def test_the_late_test_can_be_disabled():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.0, defer_vol_late_trend=0.0)
+    assert evaluate_candidate(_bulla(1.605, False), streak=2, cfg=cfg,
+                              atr_pct=5.49).enter
+
+
+def test_a_missing_peak_flag_does_not_defer():
+    cfg = AutoTradeConfig(enabled=True, short_rsi_min=75, veto_breakout=False,
+                          defer_vol_trend=2.0, defer_vol_late_trend=1.5)
+    assert evaluate_candidate(_bulla(1.605, None), streak=2, cfg=cfg,
+                              atr_pct=5.49).enter

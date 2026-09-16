@@ -60,6 +60,9 @@ class AutoTradeConfig:
     # only — see evaluate_candidate() for why longs are not mirrored.
     defer_on_rising_volume: bool = True
     defer_vol_trend: float = 1.0
+    # Lower bar when the heaviest volume bar sat in the SECOND half of the
+    # advance. 0 disables this second test.
+    defer_vol_late_trend: float = 1.5
     long_require_turn: bool = True
     long_require_convergence: bool = True
     # off | all | short | long. Two booleans said the same thing twice and
@@ -307,6 +310,7 @@ def _refusal_key(reason: str) -> str:
     # and hide the distance gate entirely. Specific markers precede general.
     for marker, key in (
         ("volume still building", "vol_deferred"),
+        ("heaviest volume came late", "vol_deferred_late"),
         ("stale signal", "stale_signal"),
         ("disabled (", "direction"),          # "longs disabled (short only)"
         ("gaining on ema21", "gap_not_rising"),
@@ -454,13 +458,35 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     if side == "short" and cfg.defer_on_rising_volume:
         adv = (row.get("advance") or {})
         vt = adv.get("adv_vol_trend")
-        if vt is not None and float(vt) >= cfg.defer_vol_trend:
-            return AutoDecision(
-                False, symbol, side,
-                reason=(f"volume still building into the high "
-                        f"(adv_vol_trend {float(vt):.2f} >= "
-                        f"{cfg.defer_vol_trend}) — deferring, not refusing: "
-                        f"the move is being bought, so the fade is early"))
+        early = adv.get("peak_vol_early")
+        if vt is not None:
+            vt = float(vt)
+            # TWO ways to defer, because the two readings say different
+            # things. adv_vol_trend is HOW MUCH volume grew; peak_vol_early is
+            # WHERE the heaviest bar sat.
+            #
+            # BULLA 2026-09-16 passed the first test at 1.605 (under 2.0) and
+            # lost: peak_vol_early was FALSE, so the heaviest trade arrived in
+            # the SECOND half of a leg that had doubled. Volume merely growing
+            # is ambiguous; volume growing with its peak still ahead is the
+            # move being bought, which is what a fade must not stand in front
+            # of.
+            if vt >= cfg.defer_vol_trend:
+                return AutoDecision(
+                    False, symbol, side,
+                    reason=(f"volume still building into the high "
+                            f"(adv_vol_trend {vt:.2f} >= "
+                            f"{cfg.defer_vol_trend}) — deferring, not "
+                            f"refusing: the move is being bought, so the fade "
+                            f"is early"))
+            if (early is False and cfg.defer_vol_late_trend
+                    and vt >= cfg.defer_vol_late_trend):
+                return AutoDecision(
+                    False, symbol, side,
+                    reason=(f"heaviest volume came LATE in the advance "
+                            f"(adv_vol_trend {vt:.2f} >= "
+                            f"{cfg.defer_vol_late_trend}, peak_vol_early "
+                            f"false) — the buying has not peaked yet"))
 
     cb, notes, cb_source = callback_for(dist, atr_pct, cfg,
                                        recent_tr_pct=row.get("recent_tr_pct"),
@@ -935,6 +961,7 @@ class AutoTrader:
         "long_require_turn": (bool, None, (True, False)),
         "defer_on_rising_volume": (bool, None, (True, False)),
         "defer_vol_trend": (float, 0.5, 5.0),
+        "defer_vol_late_trend": (float, 0.0, 5.0),
         "long_require_convergence": (bool, None, (True, False)),
         "callback_use_velocity": (str, None, ("off", "all", "short", "long")),
         "veto_breakout": (bool, None, (True, False)),
