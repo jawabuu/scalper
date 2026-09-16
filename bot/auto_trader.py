@@ -1329,8 +1329,9 @@ class AutoTrader:
                 # Delivery, not the socket flag — see CandidateStream.healthy
                 healthy = h.get("healthy")
                 msg = (f"STREAM {'ok' if healthy else 'DEGRADED'}: "
+                       f"src={h.get('source')} "
                        f"connected={h.get('connected')} "
-                       f"resubs={h.get('resubscribes')} "
+                       f"rest={h.get('rest_polls')}/{h.get('rest_errors')}e "
                        f"tracking={h.get('tracking')} fresh={h.get('fresh')}/"
                        f"{h.get('quotes')} msgs={h.get('messages')} "
                        f"reconnects={h.get('reconnects')} "

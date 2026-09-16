@@ -275,11 +275,25 @@ if __name__ == "__main__":
                 if cfg.stream_enabled:
                     try:
                         from bot.candidate_stream import CandidateStream
+                        from bot.candidate_stream import make_rest_fetcher
+                        # REST is the fallback because the LIVE websocket host
+                        # does not deliver to this address, while REST on the
+                        # same network does. The websocket still wins when it
+                        # works — _ingest keeps the newest timestamp either
+                        # way, so a healthy socket simply beats the poller on
+                        # recency.
+                        fetcher = None
+                        try:
+                            fetcher = make_rest_fetcher(guardian.exchange)
+                        except Exception as e:
+                            log.warning(f"REST mark fetcher unavailable: {e}")
                         auto.stream = CandidateStream(
                             demo=cfg.guardian_demo,
                             stale_after_s=cfg.stream_stale_after_s,
                             proxy=_stream_proxy(cfg),
-                            base_url=cfg.stream_url or None)
+                            base_url=cfg.stream_url or None,
+                            rest_fetcher=fetcher,
+                            rest_interval_s=cfg.stream_rest_interval_s)
                         auto.stream.start()
                     except Exception as e:
                         log.error(f"candidate stream unavailable ({e}) — "

@@ -355,6 +355,10 @@ class BotConfig:
     # while REST on the same proxy worked, so going direct is worth trying.
     stream_proxy: str = field(default_factory=lambda: _env(
         "CANDIDATE_STREAM_PROXY", "").strip())
+    # REST mark-price poll interval. One call covers every symbol, so this is
+    # ~200 weight/min against a 2400 limit — and 40x fresher than the scan.
+    stream_rest_interval_s: float = field(default_factory=lambda: _env_float(
+        "CANDIDATE_REST_INTERVAL_S", 3.0))
     auto_defer_rising_volume: bool = field(default_factory=lambda: _env_bool(
         "AUTO_DEFER_RISING_VOLUME", True))
     auto_defer_vol_trend: float = field(default_factory=lambda: _env_float(

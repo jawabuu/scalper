@@ -61,7 +61,9 @@ class CandidateStream:
     def __init__(self, demo: bool = True,
                  stale_after_s: float = DEFAULT_STALE_AFTER_S,
                  proxy: str | None = None,
-                 base_url: str | None = None):
+                 base_url: str | None = None,
+                 rest_fetcher=None,
+                 rest_interval_s: float = 3.0):
         self.demo = demo
         self.stale_after_s = float(stale_after_s)
         # The live host accepted the socket and delivered nothing, on a clean
@@ -76,6 +78,24 @@ class CandidateStream:
         # proxy at all.
         self.proxy = proxy
         self.base_url = (base_url or "").strip() or None
+        # REST FALLBACK. The live websocket host does not deliver to this
+        # address — direct or proxied, one well-known symbol, silent. REST on
+        # the same network works, and one call to /fapi/v1/premiumIndex
+        # returns the mark price for EVERY symbol, so the candidate set is a
+        # local filter rather than N requests.
+        #
+        # At 3s that is ~200 weight/min against a 2400 limit, and it is 40x
+        # fresher than the 120s scan. The drift gate is looking for
+        # percent-scale movement — LSK moved 12% — so seconds are ample.
+        # Websocket is preferred when available; this is what makes the live
+        # container useful anyway.
+        self.rest_fetcher = rest_fetcher
+        self.rest_interval_s = float(rest_interval_s)
+        self._rest_thread: threading.Thread | None = None
+        self._rest_polls = 0
+        self._rest_errors = 0
+        self._source = "none"
+        self._skipped_last: set = set()
         self._quotes: dict[str, Quote] = {}
         self._want: set[str] = set()
         self._lock = threading.RLock()
@@ -139,7 +159,11 @@ class CandidateStream:
         wired = {s: self._wire(s) for s in symbols if s}
         want = {w for w in wired.values() if w}
         skipped = [s for s, w in wired.items() if not w]
-        if skipped:
+        # Only when the set CHANGES. The candidate list is rebuilt every
+        # cycle, so an unchanged skip list was logging the same warning every
+        # 30 seconds.
+        if skipped and set(skipped) != self._skipped_last:
+            self._skipped_last = set(skipped)
             log.warning(
                 f"stream skipping {len(skipped)} symbol(s) it cannot "
                 f"subscribe to (non-ASCII or not USDT-M): "
@@ -172,6 +196,12 @@ class CandidateStream:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        if self.rest_fetcher is not None:
+            self._rest_thread = threading.Thread(
+                target=self._rest_loop, name="candidate-rest", daemon=True)
+            self._rest_thread.start()
+            log.info(f"candidate REST fallback every {self.rest_interval_s:g}s "
+                     f"(used whenever the websocket has no fresh quote)")
         self._thread = threading.Thread(target=self._run, name="candidate-stream",
                                         daemon=True)
         self._thread.start()
@@ -289,6 +319,43 @@ class CandidateStream:
             self._silent_sessions = 0
             log.info(f"candidate stream session ended after {got} message(s)")
 
+    def _rest_loop(self):
+        """
+        Poll mark prices for the tracked set. Runs alongside the websocket and
+        only fills gaps: _ingest keeps the newest timestamp either way, so a
+        healthy socket simply wins on recency.
+        """
+        while not self._stop.is_set():
+            try:
+                with self._lock:
+                    want = set(self._want)
+                if want:
+                    marks = self.rest_fetcher() or {}
+                    now = time.time()
+                    hit = 0
+                    with self._lock:
+                        for wire, px in marks.items():
+                            if wire not in want:
+                                continue
+                            q = self._quotes.get(wire)
+                            if q is None:
+                                self._quotes[wire] = Quote(float(px), now)
+                            else:
+                                q.price = float(px)
+                                q.at = now
+                            hit += 1
+                        if hit:
+                            self._rest_polls += 1
+                            self._last_msg_at = now
+                            if self._source != "websocket":
+                                self._source = "rest"
+            except Exception as e:
+                self._rest_errors += 1
+                if self._rest_errors in (1, 10) or self._rest_errors % 100 == 0:
+                    log.warning(f"candidate REST poll failed "
+                                f"({self._rest_errors}): {str(e)[:140]}")
+            self._stop.wait(self.rest_interval_s)
+
     async def _probe(self):
         """
         Subscribe to btcusdt alone on the /ws/ endpoint for a few seconds.
@@ -364,6 +431,7 @@ class CandidateStream:
                     q.at = now
                 self._messages += 1
                 self._last_msg_at = now
+                self._source = "websocket"
         except Exception:
             # A malformed frame is not worth a log line per tick.
             pass
@@ -418,6 +486,9 @@ class CandidateStream:
                 "resubscribes": self._resubscribes,
                 "silent_sessions": self._silent_sessions,
                 "probe": self._probe_result,
+                "source": self._source,
+                "rest_polls": self._rest_polls,
+                "rest_errors": self._rest_errors,
                 "tracking": len(self._want),
                 "quotes": len(self._quotes),
                 "fresh": fresh,
@@ -427,3 +498,41 @@ class CandidateStream:
                                        if self._last_msg_at else None),
                 "last_error": self._last_error,
             }
+
+
+def make_rest_fetcher(exchange):
+    """
+    A fetcher over ccxt that returns {wire_symbol: mark_price}.
+
+    ONE call for every symbol — /fapi/v1/premiumIndex with no argument —
+    rather than one per candidate. At a 3s interval that is roughly 200 weight
+    a minute against a 2400 limit.
+
+    Returns {} on any failure. The caller treats an empty result as "no quote",
+    which falls back to the scan figure, so a REST outage costs accuracy and
+    never entries.
+    """
+    def _fetch() -> dict:
+        try:
+            fn = getattr(exchange, "fapiPublicGetPremiumIndex", None)
+            if fn is None:
+                return {}
+            rows = fn()
+            if isinstance(rows, dict):
+                rows = [rows]
+            out = {}
+            for r in rows or []:
+                sym = str(r.get("symbol") or "").lower()
+                px = r.get("markPrice")
+                if not sym or px is None:
+                    continue
+                try:
+                    val = float(px)
+                except (TypeError, ValueError):
+                    continue
+                if val > 0:
+                    out[sym] = val
+            return out
+        except Exception:
+            return {}
+    return _fetch

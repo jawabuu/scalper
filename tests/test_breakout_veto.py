@@ -3696,3 +3696,101 @@ def test_a_persistently_degraded_stream_does_not_spam():
     src = inspect.getsource(AutoTrader)
     i = src.index("falling back to the scan")
     assert "_stream_log_n % 20 == 0" in src[max(0, i - 600):i]
+
+
+# ── REST fallback ──────────────────────────────────────────────────────────
+#
+# The LIVE websocket host does not deliver to this address — direct or
+# proxied, one well-known symbol, silent. REST on the same network works.
+
+def test_rest_fills_quotes_when_the_socket_cannot():
+    import time
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False, rest_interval_s=0.05,
+                        rest_fetcher=lambda: {"btcusdt": 64000.0,
+                                              "ethusdt": 3200.0})
+    s.track(["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    s.start()
+    try:
+        time.sleep(0.3)
+        assert s.price("BTC/USDT:USDT") == pytest.approx(64000.0)
+        assert s.status()["source"] == "rest"
+        assert s.healthy() is True
+    finally:
+        s.stop()
+
+
+def test_rest_only_fills_tracked_symbols():
+    """One call returns every symbol; the candidate set is a local filter."""
+    import time
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False, rest_interval_s=0.05,
+                        rest_fetcher=lambda: {"btcusdt": 1.0, "dogeusdt": 2.0})
+    s.track(["BTC/USDT:USDT"])
+    s.start()
+    try:
+        time.sleep(0.25)
+        assert s.price("BTC/USDT:USDT") == pytest.approx(1.0)
+        assert s.price("DOGE/USDT:USDT") is None
+    finally:
+        s.stop()
+
+
+def test_a_failing_rest_poll_never_raises():
+    import time
+    from bot.candidate_stream import CandidateStream
+
+    def _boom():
+        raise RuntimeError("network down")
+    s = CandidateStream(demo=False, rest_interval_s=0.05, rest_fetcher=_boom)
+    s.track(["BTC/USDT:USDT"])
+    s.start()
+    try:
+        time.sleep(0.25)
+        assert s.price("BTC/USDT:USDT") is None      # falls back to the scan
+        assert s.status()["rest_errors"] > 0
+    finally:
+        s.stop()
+
+
+def test_websocket_wins_on_recency_when_both_are_live():
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False, rest_fetcher=lambda: {"btcusdt": 1.0})
+    s.track(["BTC/USDT:USDT"])
+    s._ingest('{"data":{"s":"BTCUSDT","p":"64000"}}')
+    assert s.status()["source"] == "websocket"
+    assert s.price("BTC/USDT:USDT") == pytest.approx(64000.0)
+
+
+def test_the_fetcher_returns_empty_rather_than_raising():
+    from bot.candidate_stream import make_rest_fetcher
+
+    class Broken:
+        def fapiPublicGetPremiumIndex(self):
+            raise RuntimeError("nope")
+    assert make_rest_fetcher(Broken())() == {}
+    assert make_rest_fetcher(object())() == {}
+
+
+def test_the_fetcher_parses_a_premium_index_payload():
+    from bot.candidate_stream import make_rest_fetcher
+
+    class Ex:
+        def fapiPublicGetPremiumIndex(self):
+            return [{"symbol": "BTCUSDT", "markPrice": "64000.10"},
+                    {"symbol": "ETHUSDT", "markPrice": "3200.5"},
+                    {"symbol": "BADUSDT", "markPrice": None},
+                    {"symbol": "ZEROUSDT", "markPrice": "0"}]
+    out = make_rest_fetcher(Ex())()
+    assert out == {"btcusdt": pytest.approx(64000.10),
+                   "ethusdt": pytest.approx(3200.5)}
+
+
+def test_the_skip_warning_only_fires_when_the_set_changes(caplog):
+    """The candidate list is rebuilt every cycle; it was warning every 30s."""
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT"])
+    assert len([r for r in caplog.records if "cannot subscribe" in r.message]) == 1

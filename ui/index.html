@@ -2983,7 +2983,8 @@ function sessionToggles(label) {
 function streamBadge(st) {
   if (!st || !st.enabled) return '';
   const ok = st.connected && st.fresh > 0;
-  const label = ok ? `live ${st.fresh}/${st.tracking}` : 'LIVE FEED DOWN';
+  const via = st.source === 'rest' ? ' (rest)' : '';
+  const label = ok ? `live ${st.fresh}/${st.tracking}${via}` : 'LIVE FEED DOWN';
   const colour = ok ? 'var(--pos)' : 'var(--neg)';
   const tip = ok
     ? `${st.messages} ticks, ${st.reconnects} reconnect(s), last `
