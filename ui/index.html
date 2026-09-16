@@ -246,23 +246,43 @@
        short integers, so they get narrower columns; the money and percentage
        cards keep the full width they need. Adding the fees card had pushed
        the row onto a second line. */
-    grid-template-columns:
-      1.1fr    /* futures wallet     */
-      1.1fr    /* wallet balance     */
-      0.6fr    /* positions          */
-      0.6fr    /* trades             */
-      0.75fr   /* win rate           */
-      0.95fr   /* total P&L          */
-      0.95fr   /* fees paid          */
-      1.25fr   /* account return     */
-      1.05fr;  /* return on capital  */
+    /* Nine cards on futures, seven on spot — set per view below, because a
+       fixed template plus a card that appears in only one view is what pushed
+       the row onto a second line. */
+    grid-template-columns: repeat(9, minmax(0, 1fr));
     gap: 1px;
     background: var(--border);
+  }
+  /* FUTURES: no Available-USDT tile; the guardian cards are meaningful. */
+  body[data-view="futures"] #stat-avail-card { display: none; }
+  body[data-view="futures"] .stats-row {
+    grid-template-columns:
+      1.15fr   /* futures wallet     */
+      0.55fr   /* positions          */
+      0.55fr   /* trades             */
+      0.7fr    /* win rate           */
+      0.95fr   /* total P&L          */
+      0.9fr    /* fees paid          */
+      1.3fr    /* account return     */
+      1.3fr    /* today              */
+      1.0fr;   /* return on capital  */
+  }
+  /* SPOT: no auto-trader and no guardian, so there is no daily baseline, no
+     since-start baseline, and no margin to divide by. Those three cards can
+     only ever read "—" here, so they are hidden rather than left as dashes. */
+  body[data-view="spot"] #stat-acct-card,
+  body[data-view="spot"] #stat-day-card,
+  body[data-view="spot"] #stat-roc-card { display: none; }
+  body[data-view="spot"] .stats-row {
+    grid-template-columns:
+      1.2fr 1.2fr 0.6fr 0.6fr 0.8fr 1.1fr 1.1fr;
   }
   /* The two narrow cards must not be forced wide by their own labels. */
   .stats-row .stat { min-width: 0; }
   .stats-row .stat-label { white-space: nowrap; overflow: hidden;
                            text-overflow: ellipsis; }
+  /* A long subtitle must not widen its column — the row is fixed-ratio. */
+  .stats-row .stat-sub { overflow: hidden; line-height: 1.25; }
   /* Between the mobile breakpoint and ~1100px the row still fits, but the
      labels need a touch less size to avoid ellipsis. */
   /* Nine cards on one row needs the labels to shrink over a wider band than
@@ -950,8 +970,14 @@
     <!-- Stat strip -->
     <div class="stats-row" id="stats-row">
       <div class="stat"><div class="stat-label">Portfolio</div><div class="stat-value neu" id="s-portfolio">—</div><div class="stat-sub" id="s-portfolio-sub"></div></div>
-      <div class="stat"><div class="stat-label">Available USDT</div><div class="stat-value neu" id="s-balance">—</div></div>
-      <div class="stat"><div class="stat-label">Positions</div><div class="stat-value" id="s-open">—</div></div>
+      <!-- SPOT ONLY. On futures this tile was relabelled "Wallet balance" and
+           fed the SAME g.wallet_balance as the one before it, so the row
+           carried the same figure twice and burned a column doing it. On spot
+           portfolio value and available USDT are genuinely different. -->
+      <div class="stat" id="stat-avail-card"><div class="stat-label">Available USDT</div>
+        <div class="stat-value neu" id="s-balance">—</div></div>
+      <div class="stat"><div class="stat-label">Positions</div><div class="stat-value" id="s-open">—</div>
+        <div class="stat-sub" id="s-open-sub"></div></div>
       <div class="stat"><div class="stat-label">Trades</div><div class="stat-value" id="s-total">—</div></div>
       <div class="stat"><div class="stat-label">Win rate</div><div class="stat-value" id="s-winrate">—</div></div>
       <div class="stat"><div class="stat-label">Total P&L</div><div class="stat-value" id="s-pnl">—</div><div class="stat-sub" id="s-pnl-usdt"></div></div>
@@ -2649,7 +2675,9 @@ function renderFuturesStats(g, hist) {
 
   const bal = (g && g.wallet_balance) || 0;
   setEl('s-portfolio', `$${bal.toFixed(2)}`);
-  setEl('s-portfolio-sub', openCount ? `${openCount} open` : 'no open positions');
+  // "no open positions" belongs on the Positions card, not under the wallet.
+  setEl('s-portfolio-sub', '');
+  setEl('s-open-sub', openCount ? 'open' : 'none open');
   setEl('s-balance', `$${bal.toFixed(2)}`);
   setEl('s-open', String(openCount));
   setEl('s-total', String(trades.length));
@@ -2660,10 +2688,7 @@ function renderFuturesStats(g, hist) {
 
   // Relabel the two tiles whose meaning differs on futures.
   const lbls = document.querySelectorAll('#stats-row .stat-label');
-  if (lbls.length >= 2) {
-    lbls[0].textContent = 'Futures wallet';
-    lbls[1].textContent = 'Wallet balance';
-  }
+  if (lbls.length >= 1) lbls[0].textContent = 'Futures wallet';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -2872,9 +2897,11 @@ async function refreshAnalysis() {
         // The trade record and the wallet disagree — usually excluded trades
         // or an open position. Say so rather than showing a figure that
         // quietly contradicts the balance above.
-        sub = `<span style="color:var(--warn)">wallet says ${
-          ar.wallet_pct >= 0 ? '+' : ''}${Number(ar.wallet_pct).toFixed(2)}% — `
-          + `gap $${Math.abs(ar.wallet_gap).toFixed(2)}</span>`;
+        sub = `<span style="color:var(--warn)" title="the trade record and the `
+          + `wallet disagree — usually excluded trades or an open position">`
+          + `wallet ${ar.wallet_pct >= 0 ? '+' : ''}`
+          + `${Number(ar.wallet_pct).toFixed(2)}%`
+          + `<br>gap $${Math.abs(ar.wallet_gap).toFixed(2)}</span>`;
       }
       setEl('s-acct-sub', sub);
     }
@@ -2895,11 +2922,12 @@ async function refreshAnalysis() {
         + (dy.pct > 0 ? 'pos' : (dy.pct < 0 ? 'neg' : 'neu'));
       const tz = dy.tz_offset_h ? `UTC${dy.tz_offset_h >= 0 ? '+' : ''}${dy.tz_offset_h}` : 'UTC';
       const hrs = dy.hours_elapsed != null ? ` · ${Number(dy.hours_elapsed).toFixed(1)}h in` : '';
+      // Kept to two short clauses: the long form wrapped to three lines and
+      // stretched the whole row.
       setEl('s-day-sub',
-        `$${Number(dy.baseline || 0).toFixed(2)} at 00:00 ${tz}`
-        + ` · ${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`
-        + ` · ${dy.trades} trade${dy.trades === 1 ? '' : 's'}`
-        + (dy.trades ? ` (${dy.wins}W)` : '') + hrs);
+        `${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`
+        + ` · ${dy.trades}t${dy.trades ? ` ${dy.wins}W` : ''}`
+        + `<br>from $${Number(dy.baseline || 0).toFixed(0)} · ${tz}`);
     }
 
     // Return on the capital actually committed, not a mean of ROI percentages

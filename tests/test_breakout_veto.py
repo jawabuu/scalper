@@ -2791,3 +2791,57 @@ def test_the_card_never_yields_its_subtitle_to_a_warning():
     i = ui.index("const dy = a.day || {};")
     block = ui[i:i + 1400]
     assert "disagrees_with_wallet" not in block
+
+
+# ── Stat strip layout ───────────────────────────────────────────────────────
+
+def _ui():
+    from pathlib import Path
+    return Path("ui/index.html").read_text()
+
+
+def test_the_duplicate_wallet_tile_is_hidden_on_futures():
+    """
+    Both tiles were fed the same g.wallet_balance and the futures view just
+    relabelled the second one, so the row showed $5307.53 twice and spent a
+    column on it. On spot the two figures genuinely differ, so it is hidden
+    rather than deleted.
+    """
+    ui = _ui()
+    assert 'body[data-view="futures"] #stat-avail-card { display: none; }' in ui
+    assert 'id="stat-avail-card"' in ui
+
+
+def test_the_guardian_cards_are_hidden_on_spot():
+    """
+    Account return and Today need a daily baseline from the auto-trader;
+    Return on capital divides by margin. Spot has no auto-trader, no guardian
+    and no margin, so all three can only read "—".
+    """
+    ui = _ui()
+    for card in ("stat-acct-card", "stat-day-card", "stat-roc-card"):
+        assert f'body[data-view="spot"] #{card}' in ui
+
+
+def test_fees_stays_visible_on_spot():
+    """Spot trades do pay commission — it reads "—" because the spot path does
+    not populate it, which is a gap to fix rather than a card to hide."""
+    ui = _ui()
+    assert 'body[data-view="spot"] #stat-fees-card' not in ui
+
+
+def test_each_view_declares_its_own_column_count():
+    ui = _ui()
+    import re
+    fut = re.search(r'body\[data-view="futures"\] \.stats-row \{(.*?)\}', ui, re.S)
+    spot = re.search(r'body\[data-view="spot"\] \.stats-row \{(.*?)\}', ui, re.S)
+    assert fut and spot
+    assert fut.group(1).count("fr") == 9      # nine cards on futures
+    assert spot.group(1).count("fr") == 7     # seven on spot
+
+
+def test_the_open_positions_subtitle_moved_to_the_positions_card():
+    ui = _ui()
+    assert 'id="s-open-sub"' in ui
+    assert "setEl('s-open-sub'" in ui
+    assert "setEl('s-portfolio-sub', '');" in ui
