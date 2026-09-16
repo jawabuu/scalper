@@ -4207,3 +4207,66 @@ def test_a_missing_peak_flag_does_not_defer():
                           defer_vol_trend=2.0, defer_vol_late_trend=1.5)
     assert evaluate_candidate(_bulla(1.605, None), streak=2, cfg=cfg,
                               atr_pct=5.49).enter
+
+
+# ── Mobile layout ──────────────────────────────────────────────────────────
+#
+# v3.25.1 added per-view column templates as `body[data-view="futures"]
+# .stats-row`. That is a TWO-selector rule, so it outranked the single-class
+# `.stats-row { grid-template-columns: 1fr 1fr }` in the mobile media queries
+# at EVERY width — specificity ignores media queries and source order. A phone
+# got nine columns and printed each figure one character per line.
+
+def test_the_per_view_templates_are_desktop_scoped():
+    import re
+    ui = _ui()
+    for view in ("futures", "spot"):
+        i = ui.index(f'body[data-view="{view}"] .stats-row {{')
+        before = ui[:i]
+        # the nearest preceding @media must be a min-width desktop query
+        last = None
+        for m in re.finditer(r"@media \(([^)]+)\)", before):
+            last = m.group(1)
+        assert last and "min-width" in last, (view, last)
+
+
+def test_the_breakpoints_meet_without_a_gap():
+    """
+    769 meets the existing max-width:768 tablet query exactly. A gap would let
+    the base nine-column fallback leak through on mid-size screens.
+    """
+    ui = _ui()
+    assert "@media (min-width: 769px)" in ui
+    assert "@media (max-width: 768px)" in ui
+
+
+def test_hiding_a_card_still_applies_at_every_width():
+    """Which cards exist is width-independent; only the COLUMNS are scoped."""
+    import re
+    ui = _ui()
+    i = ui.index('body[data-view="futures"] #stat-avail-card')
+    before = ui[:i]
+    opens = len(re.findall(r"@media", before))
+    # the hide rules sit above the first media query in the sheet
+    assert opens == 0, "card-hiding rules must not be inside a media query"
+
+
+def test_the_oversold_end_is_split_at_45():
+    """
+    Lowering AUTO_LONG_RSI_MIN to 38 opens a band no long has ever been taken
+    in. A single "<50" bucket would bury it with the 45-50 group that returned
+    -$9.58/trade, so the new band would be unreadable against a known-bad one.
+    """
+    from bot.analysis import RSI_BUCKETS
+    labels = [b.label for b in RSI_BUCKETS]
+    assert "38-45" in labels and "45-50" in labels
+    assert "<50" not in labels
+
+
+def test_the_split_does_not_overlap_or_leave_a_hole():
+    from bot.analysis import RSI_BUCKETS
+    lows = [b.lo for b in RSI_BUCKETS]
+    highs = [b.hi for b in RSI_BUCKETS]
+    for i in range(len(RSI_BUCKETS) - 1):
+        assert highs[i] == lows[i + 1], (RSI_BUCKETS[i].label,
+                                         RSI_BUCKETS[i + 1].label)

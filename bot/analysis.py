@@ -166,7 +166,12 @@ def _stamp(t: dict, key: str):
         return None
 
 
-RSI_BUCKETS = [Bucket("<50", -1, 50), Bucket("50-60", 50, 60),
+# The oversold end is split at 45 because that is where AUTO_LONG_RSI_MIN sat
+# for the first 42 longs. Lowering it to 38 opens a band no long has ever been
+# taken in, and a single "<50" bucket would bury it with the 45-50 group that
+# returned -$9.58/trade — making a new band unreadable against a known-bad one.
+RSI_BUCKETS = [Bucket("<38", -1, 38), Bucket("38-45", 38, 45),
+               Bucket("45-50", 45, 50), Bucket("50-60", 50, 60),
                Bucket("60-70", 60, 70), Bucket("70-78", 70, 78),
                Bucket("78-85", 78, 85), Bucket("85+", 85, 999)]
 

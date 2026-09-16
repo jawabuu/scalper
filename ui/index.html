@@ -242,46 +242,60 @@
   .stats-row {
     grid-column: 1 / -1;
     display: grid;
-    /* Eight cards on one desktop row. Open positions and Total trades hold
-       short integers, so they get narrower columns; the money and percentage
-       cards keep the full width they need. Adding the fees card had pushed
-       the row onto a second line. */
-    /* Nine cards on futures, seven on spot — set per view below, because a
-       fixed template plus a card that appears in only one view is what pushed
-       the row onto a second line. */
+    /* Fallback only. The real templates are per-view and desktop-scoped
+       below; tablets get two columns at <=768px and phones two at <=480px. */
     grid-template-columns: repeat(9, minmax(0, 1fr));
     gap: 1px;
     background: var(--border);
   }
+  /* Hiding a card is width-independent and applies everywhere. */
   /* FUTURES: no Available-USDT tile; the guardian cards are meaningful. */
   body[data-view="futures"] #stat-avail-card { display: none; }
-  body[data-view="futures"] .stats-row {
-    grid-template-columns:
-      1.15fr   /* futures wallet     */
-      0.55fr   /* positions          */
-      0.55fr   /* trades             */
-      0.7fr    /* win rate           */
-      0.95fr   /* total P&L          */
-      0.9fr    /* fees paid          */
-      1.3fr    /* account return     */
-      1.3fr    /* today              */
-      1.0fr;   /* return on capital  */
-  }
   /* SPOT: no auto-trader and no guardian, so there is no daily baseline, no
      since-start baseline, and no margin to divide by. Those three cards can
      only ever read "—" here, so they are hidden rather than left as dashes. */
   body[data-view="spot"] #stat-acct-card,
   body[data-view="spot"] #stat-day-card,
   body[data-view="spot"] #stat-roc-card { display: none; }
-  body[data-view="spot"] .stats-row {
-    grid-template-columns:
-      1.2fr 1.2fr 0.6fr 0.6fr 0.8fr 1.1fr 1.1fr;
+
+  /* DESKTOP ONLY. These are two-selector rules, so they outrank the
+     single-class `.stats-row { grid-template-columns: 1fr 1fr }` in the
+     mobile media queries no matter how narrow the viewport — which put nine
+     columns on a phone and printed each number one character per line.
+     Specificity does not care about source order or media queries, so the
+     width has to be part of the rule itself.
+
+     769px meets the existing `max-width: 768px` tablet query exactly, so
+     there is no band where neither applies and the base nine-column rule
+     leaks through. */
+  @media (min-width: 769px) {
+    body[data-view="futures"] .stats-row {
+      grid-template-columns:
+        1.15fr   /* futures wallet     */
+        0.55fr   /* positions          */
+        0.55fr   /* trades             */
+        0.7fr    /* win rate           */
+        0.95fr   /* total P&L          */
+        0.9fr    /* fees paid          */
+        1.3fr    /* account return     */
+        1.3fr    /* today              */
+        1.0fr;   /* return on capital  */
+    }
+    body[data-view="spot"] .stats-row {
+      grid-template-columns:
+        1.2fr 1.2fr 0.6fr 0.6fr 0.8fr 1.1fr 1.1fr;
+    }
   }
   /* The two narrow cards must not be forced wide by their own labels. */
   /* The history panel shares its row on desktop and takes a full row on
      mobile, rather than stretching to whatever the widest cell needs. */
-  #guard-history { width: 100%; }
-  #guard-history table { width: 100%; table-layout: fixed; }
+  #guard-history { width: 100%; overflow-x: auto; }
+  /* Fixed layout only where there is room for it. On a phone the columns
+     have to size to their content and scroll, or entry prices with fifteen
+     decimals get crushed into unreadable slivers. */
+  @media (min-width: 769px) {
+    #guard-history table { width: 100%; table-layout: fixed; }
+  }
   #guard-history td, #guard-history th { overflow: hidden;
       text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 900px) {
