@@ -3475,3 +3475,56 @@ def test_the_dashboard_shows_stream_health():
     ui = _ui()
     assert "function streamBadge(" in ui
     assert "LIVE FEED DOWN" in ui
+
+
+def test_masking_does_not_wait_on_the_network():
+    """
+    The toggle called refresh(), so four cards waited on /api/analysis — which
+    runs analyse() over EVERY trade. A ~30s lag that would only grow.
+    Masking is a pure display transform; the numbers are already in the page.
+    """
+    ui = _ui()
+    assert "let _lastAnalysis = null;" in ui
+    assert "function renderAnalysis(a)" in ui
+    assert "function renderFuturesHistoryFrom(d)" in ui
+    i = ui.index("function toggleHideAmounts()")
+    block = ui[i:i + 700]
+    assert "rerenderAnalysis()" in block
+    assert "renderFuturesHistoryFrom(_lastFuturesHist)" in block
+
+
+def test_stream_health_is_delivery_not_the_socket_flag():
+    """
+    `connected` flickers False on every resubscribe, and the candidate set
+    turns over every couple of minutes. A stream sending 1,016 messages with
+    seven fresh quotes reported DEGRADED.
+    """
+    import time
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=True, stale_after_s=20.0)
+    s.track(["BTC/USDT:USDT"])
+    s._ingest('{"data":{"s":"BTCUSDT","p":"64000"}}')
+    assert s._connected is False        # a resubscribe is pending
+    assert s.healthy() is True          # but data is arriving
+    assert s.status()["healthy"] is True
+    assert s.healthy(now=time.time() + 30) is False
+
+
+def test_a_resubscribe_is_not_counted_as_a_reconnect():
+    """The tracked set changes every cycle; counting those made a healthy
+    stream look like it was flapping."""
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=True)
+    for syms in (["A/USDT:USDT"], ["B/USDT:USDT"], ["C/USDT:USDT"]):
+        s.track(syms)
+    st = s.status()
+    assert st["resubscribes"] == 3
+    assert st["reconnects"] == 0
+
+
+def test_a_stream_with_no_data_is_not_healthy():
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=True)
+    s.track(["BTC/USDT:USDT"])
+    assert s.healthy() is False
+    assert s.status()["healthy"] is False

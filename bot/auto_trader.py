@@ -1326,9 +1326,11 @@ class AutoTrader:
         if st is not None:
             try:
                 h = st.status()
-                healthy = h.get("connected") and h.get("fresh")
+                # Delivery, not the socket flag — see CandidateStream.healthy
+                healthy = h.get("healthy")
                 msg = (f"STREAM {'ok' if healthy else 'DEGRADED'}: "
                        f"connected={h.get('connected')} "
+                       f"resubs={h.get('resubscribes')} "
                        f"tracking={h.get('tracking')} fresh={h.get('fresh')}/"
                        f"{h.get('quotes')} msgs={h.get('messages')} "
                        f"reconnects={h.get('reconnects')} "

@@ -2060,7 +2060,13 @@ function applyHideAmounts() {
 function toggleHideAmounts() {
   _hideAmounts = !_hideAmounts;
   applyHideAmounts();
-  try { refresh(); } catch (e) { location.reload(); }
+  // Re-render from what is already in the browser. Calling refresh() made
+  // four cards wait on /api/analysis, which runs analyse() over every trade —
+  // a visible lag that would only grow with history.
+  let done = false;
+  try { done = rerenderAnalysis(); } catch (e) {}
+  try { if (_lastFuturesHist) renderFuturesHistoryFrom(_lastFuturesHist); } catch (e) {}
+  if (!done) { try { refresh(); } catch (e) {} }
 }
 
 function stamp(secs) {
@@ -2642,6 +2648,12 @@ async function refreshFuturesHistory() {
   try {
     const d = await api('/api/futures/trades');
     _lastFuturesHist = d;
+    renderFuturesHistoryFrom(d);
+  } catch (e) {}
+}
+
+function renderFuturesHistoryFrom(d) {
+  try {
     const el = document.getElementById('guard-history');
     if (!el) return;
     if (!d.enabled || !d.trades || !d.trades.length) {
@@ -3086,11 +3098,35 @@ async function maybeRefreshAnalysis(trades) {
   await refreshAnalysis();
 }
 
+// Last analysis payload. Masking is a pure DISPLAY transform — the numbers
+// are already here — but the toggle used to call refresh(), so four cards
+// waited on /api/analysis, which runs analyse() over every trade. That is the
+// 30s lag, and it would only grow with history.
+let _lastAnalysis = null;
+
+function rerenderAnalysis() {
+  if (_lastAnalysis) {
+    try { renderAnalysis(_lastAnalysis); return true; } catch (e) {}
+  }
+  return false;
+}
+
 async function refreshAnalysis() {
   const panel = document.getElementById('analysis-panel');
   if (!panel) return;
   try {
     const a = await api('/api/analysis');
+    _lastAnalysis = a;
+    renderAnalysis(a);
+  } catch (e) { panel.style.display = 'none'; }
+}
+
+// Split out so the hide toggle can re-render from the cached payload without
+// a network round trip.
+function renderAnalysis(a) {
+  const panel = document.getElementById('analysis-panel');
+  if (!panel) return;
+  try {
     if (!a || !a.enabled) { panel.style.display = 'none'; return; }
     if (!viewAllows('analysis-panel')) return;
     panel.style.display = '';

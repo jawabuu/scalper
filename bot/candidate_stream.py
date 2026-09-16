@@ -72,6 +72,11 @@ class CandidateStream:
         self._connected = False
         self._connected_at = 0.0
         self._reconnects = 0
+        # A deliberate resubscribe is not a fault. The candidate set turns
+        # over every couple of minutes, so counting those as reconnects made
+        # a healthy stream look like it was flapping.
+        self._resubscribing = False
+        self._resubscribes = 0
         self._messages = 0
         self._last_msg_at = 0.0
         self._last_error = ""
@@ -123,6 +128,9 @@ class CandidateStream:
         self._stop.set()
 
     def _reconnect(self):
+        """Rebuild the subscription because the tracked set changed."""
+        self._resubscribing = True
+        self._resubscribes += 1
         self._connected = False   # the run loop notices and rebuilds
 
     def _run(self):
@@ -135,6 +143,10 @@ class CandidateStream:
                 log.warning(f"candidate stream session ended: {e}")
             if self._stop.is_set():
                 break
+            if self._resubscribing:
+                # Expected: reconnect at once, do not count it as a failure.
+                self._resubscribing = False
+                continue
             self._reconnects += 1
             # Backoff, capped: a stream that cannot connect must not become a
             # request storm against the same endpoint the guardian uses.
@@ -218,13 +230,33 @@ class CandidateStream:
                 return None
             return q.price
 
+    def healthy(self, now: float | None = None) -> bool:
+        """
+        Is the stream DELIVERING? Not "is the socket flag set".
+
+        `connected` flickers False on every resubscribe, and the tracked set
+        changes every couple of minutes — so a stream sending 1,016 messages a
+        minute with seven fresh quotes was reporting DEGRADED. What matters to
+        a caller is whether a usable quote exists, which is what this asks.
+        """
+        now = now or time.time()
+        with self._lock:
+            if not self._last_msg_at:
+                return False
+            if now - self._last_msg_at > self.stale_after_s:
+                return False
+            return any(q.age(now) <= self.stale_after_s
+                       for q in self._quotes.values())
+
     def status(self) -> dict:
         now = time.time()
         with self._lock:
             fresh = sum(1 for q in self._quotes.values()
                         if q.age(now) <= self.stale_after_s)
             return {
+                "healthy": self.healthy(now),
                 "connected": self._connected,
+                "resubscribes": self._resubscribes,
                 "tracking": len(self._want),
                 "quotes": len(self._quotes),
                 "fresh": fresh,
