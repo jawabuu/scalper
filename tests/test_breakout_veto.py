@@ -3051,3 +3051,53 @@ def test_the_count_shows_both_figures():
     """So it is obvious the table is a view, not the whole record."""
     ui = _ui()
     assert "of ${d.trades.length} · last ${_histDays}d" in ui
+
+
+# ── No stale config references ─────────────────────────────────────────────
+#
+# v3.26.0 renamed auto_trading_window to auto_sessions and left ONE reference
+# in main.py. AutoTrader raised at construction, the except logged one line,
+# and the bot ran for hours with the scanner and guardian healthy and NO
+# entries taken. Nothing on the dashboard said so.
+
+def test_no_module_references_a_config_field_that_does_not_exist():
+    """
+    Catches the whole class: every cfg.<attr> in main.py must resolve on a
+    real BotConfig. A rename that misses a call site fails HERE, not at
+    startup in production.
+    """
+    import re
+    from pathlib import Path
+    from bot.config import BotConfig
+    cfg = BotConfig()
+    src = Path("main.py").read_text()
+    refs = sorted(set(re.findall(r"\bcfg\.([a-zA-Z_][a-zA-Z0-9_]*)", src)))
+    missing = [r for r in refs if not hasattr(cfg, r)]
+    assert not missing, f"main.py references non-existent config: {missing}"
+
+
+def test_the_ui_does_not_reference_the_removed_window():
+    ui = _ui()
+    assert "trading_window" not in ui
+
+
+def test_an_auto_trade_start_failure_is_loud():
+    from pathlib import Path
+    main = Path("main.py").read_text()
+    assert "AUTO-TRADE IS NOT RUNNING" in main
+    assert "set_auto_trader_error" in main
+    from bot import api
+    assert hasattr(api, "set_auto_trader_error")
+
+
+def test_the_dashboard_shows_the_start_failure():
+    ui = _ui()
+    assert "AUTO-TRADE IS NOT `" in ui or "AUTO-TRADE IS NOT " in ui
+    assert "a.start_error" in ui
+
+
+def test_export_is_one_control_with_two_choices():
+    ui = _ui()
+    assert 'id="ft-export"' in ui
+    assert "onExportPick(this)" in ui
+    assert "downloadTradesCsv(true)" in ui and "downloadTradesCsv(false)" in ui

@@ -237,7 +237,7 @@ if __name__ == "__main__":
                     long_rsi_max=cfg.auto_long_rsi_max,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
-                    trading_window=cfg.auto_trading_window,
+                    sessions=cfg.auto_sessions,
                     min_atr_pct=cfg.auto_min_atr_pct,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
@@ -276,7 +276,21 @@ if __name__ == "__main__":
                 log.info("Auto-trade not wired: needs both the scanner and "
                          "futures entry to be enabled")
         except Exception as e:
+            # LOUD. v3.26.0 renamed a config field and left one reference
+            # behind; auto-trade raised at construction and the bot ran for
+            # hours with the scanner and guardian working normally and NO
+            # entries being taken. Nothing in the dashboard said so — it was
+            # one ERROR line in a startup log nobody re-reads.
             log.error(f"Auto-trade failed to start: {e}", exc_info=True)
+            log.error(
+                "AUTO-TRADE IS NOT RUNNING. The scanner and guardian are "
+                "unaffected, so the bot will look healthy and open NOTHING. "
+                "Fix the error above and restart.")
+            try:
+                from bot.api import set_auto_trader_error
+                set_auto_trader_error(str(e))
+            except Exception:
+                pass
 
     run_api(engine, host="0.0.0.0", port=8000)
 

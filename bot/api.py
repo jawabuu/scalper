@@ -47,10 +47,24 @@ def _instance_identity() -> dict:
     }
 
 
+_auto_error: str = ""
+
+
 def set_auto_trader(auto):
     """Attach the auto-trader so the dashboard can toggle and inspect it."""
     global _auto
     _auto = auto
+
+
+def set_auto_trader_error(msg: str):
+    """
+    Record why the auto-trader is absent, so the dashboard can SAY so.
+
+    Without this the failure is one ERROR line in a startup log: the scanner
+    scans, the guardian guards, the dashboard looks healthy, and nothing opens.
+    """
+    global _auto_error
+    _auto_error = str(msg or "")
 _entry = None
 
 
@@ -317,7 +331,10 @@ def create_app(engine) -> FastAPI:
     def auto_trade_status(user: dict = Depends(_require_auth)):
         if _auto is None:
             return {"available": False, "enabled": False,
-                    "message": "Auto-trade not configured on this instance"}
+                    "start_error": _auto_error,
+                    "message": (f"AUTO-TRADE FAILED TO START: {_auto_error}"
+                                if _auto_error
+                                else "Auto-trade not configured on this instance")}
         snap = _auto.snapshot()
         snap["available"] = True
         return snap

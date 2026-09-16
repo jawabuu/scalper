@@ -1080,10 +1080,13 @@
               <option value="30">30 days</option>
               <option value="0">all</option>
             </select>
-            <button class="btn" onclick="downloadTradesCsv(true)"
-                    title="only the trades currently shown">Export view</button>
-            <button class="btn" onclick="downloadTradesCsv(false)"
-                    title="every trade held, with every recorded field">Export all</button>
+            <select id="ft-export" onchange="onExportPick(this)" class="btn"
+                    title="export the visible window, or the whole record"
+                    style="padding:3px 6px">
+              <option value="" selected>Export…</option>
+              <option value="view">Export view</option>
+              <option value="all">Export all</option>
+            </select>
           </div>
         </div>
         <!-- Scrolls rather than growing the page: a full run is hundreds of
@@ -1127,10 +1130,6 @@
             <input type="number" class="pb-input" id="ar-atr" step="0.25" onchange="onAutoRule('callback_atr_mult','ar-atr')"><span class="k">x ATR</span></span>
           <span class="pb-setting" style="border:none"><span class="k">re-entry if RSI +&nbsp;</span>
             <input type="number" class="pb-input" id="ar-cd" step="0.5" onchange="onAutoRule('cooldown_override_rsi_delta','ar-cd')"></span>
-          <span class="pb-setting" style="border:none"><span class="k">window&nbsp;</span>
-            <input type="text" class="pb-input" id="ar-window" style="width:96px"
-                   placeholder="all day" title="UTC entry window, e.g. 05:00-11:00. Exits are never restricted."
-                   onchange="onAutoRuleValue('trading_window', this.value)"></span>
           <span class="pb-setting" style="border:none"><span class="k">daily halt&nbsp;</span>
             <select class="pb-input" id="ar-halt" style="width:64px"
                     title="the only automatic brake on a bad day"
@@ -2565,6 +2564,16 @@ async function doFuturesClose(sym) {
 // setting, so "Export view" means exactly what is on screen.
 let _histDays = 2;
 
+// A select rather than two buttons: the row is narrow and "Export all" is
+// rarely what is wanted, so it should not occupy equal space with the window
+// control. Resets to the placeholder so the same choice can be picked twice.
+function onExportPick(el) {
+  const v = el.value;
+  el.value = '';
+  if (v === 'view') downloadTradesCsv(true);
+  else if (v === 'all') downloadTradesCsv(false);
+}
+
 function onHistWindow() {
   const el = document.getElementById('ft-window');
   _histDays = el ? Number(el.value) : 2;
@@ -2882,8 +2891,6 @@ function fillAutoRules(c) {
   set('ar-tph', c.max_trades_per_hour);
   const dirs = document.getElementById('ar-dirs');
   if (dirs && c.directions) dirs.value = c.directions;
-  const win = document.getElementById('ar-window');
-  if (win && document.activeElement !== win) win.value = c.trading_window || '';
   const halt = document.getElementById('ar-halt');
   if (halt && c.daily_halt_enabled !== undefined) {
     halt.value = c.daily_halt_enabled ? 'true' : 'false';
@@ -2943,6 +2950,17 @@ function sessionToggles(label) {
       + `in this session (UTC hours)">${d}${isOn ? '1' : '0'}</button>`;
   };
   return `<td class="num">${btn('L')} ${btn('S')}</td>`;
+}
+
+// One line for the auto-trade bar: only the sessions that are not fully open
+// are worth naming, so the common case stays short.
+function sessionSummary(sessions) {
+  const ss = sessions || {};
+  const keys = ['AS', 'EU', 'OV', 'US'];
+  const off = keys.filter(k => (ss[k] || 'L1S1') !== 'L1S1')
+                  .map(k => `${k}:${ss[k]}`);
+  if (!Object.keys(ss).length) return 'all sessions';
+  return off.length ? off.join(' ') : 'all sessions';
 }
 
 function toggleSession(key, dir) {
@@ -3419,12 +3437,21 @@ async function refreshAuto() {
         : '<span class="auto-flag af-off">OFF</span>';
     }
 
+    // A start failure must be visible on the page, not only in a log line.
+    if (a.available === false && a.start_error) {
+      setEl('auto-meta',
+        `<span style="color:var(--neg);font-weight:600">AUTO-TRADE IS NOT `
+        + `RUNNING — ${a.start_error}. The scanner and guardian are `
+        + `unaffected, so nothing here looks wrong and nothing will open.`
+        + `</span>`);
+      return;
+    }
     const c = a.config || {};
     if (c.sessions) _autoSessions = c.sessions;
     const cool = Object.keys(a.cooldowns || {}).length;
     setEl('auto-meta',
       (a.halted_reason ? a.halted_reason + ' · ' : '')
-      + `${c.trading_window ? c.trading_window + ' UTC' : 'all day'} · `
+      + `${sessionSummary(c.sessions)} · `
       + `${c.directions && c.directions !== 'all' ? c.directions + ' only' : 'both sides'} · `
       + `within ${c.max_dist_to_extreme_pct}% of extreme · `
       + `${c.required_strength_sweeps} sweeps · long RSI>${c.long_rsi_min} · `
