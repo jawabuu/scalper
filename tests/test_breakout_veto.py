@@ -3854,9 +3854,15 @@ class _LevEx:
 
 
 def _lev_service(ex):
+    """
+    EntryService reaches the exchange through `self.guardian.exchange`. The
+    first version of this helper set `svc.exchange = ex`, so the test passed
+    against an attribute the real class does not have — and the code raised on
+    every cycle in production the moment ENTRY_TARGET_LEVERAGE was set.
+    """
     from bot.futures_entry import EntryService
     svc = EntryService.__new__(EntryService)
-    svc.exchange = ex
+    svc.guardian = type("G", (), {"exchange": ex})()
     svc.symbol_leverage_detail = lambda sym: (ex.lev, "positionRisk")
     return svc
 
@@ -4270,3 +4276,24 @@ def test_the_split_does_not_overlap_or_leave_a_hole():
     for i in range(len(RSI_BUCKETS) - 1):
         assert highs[i] == lows[i + 1], (RSI_BUCKETS[i].label,
                                          RSI_BUCKETS[i + 1].label)
+
+
+
+def test_ensure_leverage_uses_the_attribute_the_class_actually_has():
+    """
+    Guard against the mock shaping the code. EntryService has no `exchange`;
+    it has `guardian.exchange`, and every other method in the class uses that.
+    """
+    import inspect
+    from bot.futures_entry import EntryService
+    src = inspect.getsource(EntryService.ensure_leverage)
+    assert "self.exchange" not in src
+    assert 'getattr(self, "guardian", None), "exchange"' in src
+
+
+def test_a_missing_exchange_handle_does_not_raise():
+    from bot.futures_entry import EntryService
+    svc = EntryService.__new__(EntryService)
+    svc.symbol_leverage_detail = lambda sym: (20.0, "positionRisk")
+    lev, src = svc.ensure_leverage("LSK/USDT:USDT", 10)
+    assert lev == 20.0 and src == "positionRisk"

@@ -314,7 +314,18 @@ if __name__ == "__main__":
                         try:
                             auto.run_once()
                         except Exception as e:
-                            log.warning(f"auto-trade cycle error: {e}")
+                            # A raise here abandons the WHOLE cycle, so one bad
+                            # symbol stops every other candidate being
+                            # considered. It logged at WARNING with no stack
+                            # and repeated silently every 30s — an
+                            # AttributeError from ENTRY_TARGET_LEVERAGE blocked
+                            # entries entirely and looked like a quiet market.
+                            log.error(f"auto-trade cycle error: {e}",
+                                      exc_info=True)
+                            log.error(
+                                "NO ENTRIES WILL BE TAKEN until this is fixed. "
+                                "The scanner and guardian are unaffected, so "
+                                "the bot will look healthy.")
                         _t.sleep(cfg.auto_interval)
 
                 threading.Thread(target=_auto_loop, daemon=True,

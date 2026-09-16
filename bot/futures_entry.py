@@ -303,7 +303,15 @@ class EntryService:
         """
         if not target or target <= 0:
             return self.symbol_leverage_detail(symbol)
-        ex = self.exchange
+        # EntryService reaches the exchange THROUGH the guardian — it has no
+        # `exchange` of its own. Getting this wrong raised on every cycle
+        # ("'EntryService' object has no attribute 'exchange'") the moment
+        # ENTRY_TARGET_LEVERAGE was set, which stopped entries entirely.
+        ex = getattr(getattr(self, "guardian", None), "exchange", None)
+        if ex is None:
+            log.warning(f"{symbol}: no exchange handle to set leverage — "
+                        f"continuing at the reported leverage")
+            return self.symbol_leverage_detail(symbol)
         try:
             current, source = self.symbol_leverage_detail(symbol)
             if current and abs(current - float(target)) < 0.01:
