@@ -163,6 +163,7 @@ if __name__ == "__main__":
                 default_margin_pct=cfg.entry_default_margin_pct,
                 default_callback_pct=cfg.entry_default_callback_pct,
                 assumed_leverage=cfg.entry_assumed_leverage,
+                target_leverage=cfg.entry_target_leverage,
                 atr_stop_mult=cfg.atr_stop_mult,
                 atr_stop_min_roi=cfg.atr_stop_min_roi,
                 atr_stop_max_roi=cfg.atr_stop_max_roi,

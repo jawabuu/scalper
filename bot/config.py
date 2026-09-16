@@ -472,6 +472,12 @@ class BotConfig:
     # configured on Binance, so the preview labels the value as ASSUMED to make
     # a mismatch visible before confirming.
     entry_assumed_leverage: float = field(default_factory=lambda: _env_float("ENTRY_ASSUMED_LEVERAGE", 10.0))
+    # Leverage the bot SETS per symbol before entry. Binance stores it per
+    # symbol, so an account "set to 10x" is only 10x on pairs set by hand —
+    # LSK ran at 20x on live an hour after BR ran at 10x. 0 disables, leaving
+    # the exchange's own setting. Failure NEVER blocks a trade.
+    entry_target_leverage: float = field(default_factory=lambda: _env_float(
+        "ENTRY_TARGET_LEVERAGE", 0.0))
     # How long an unfilled entry order may rest before the bot cancels it. A
     # GTC order that never fills blocks its symbol and, if it eventually
     # triggers, opens a position sized for conditions long past.

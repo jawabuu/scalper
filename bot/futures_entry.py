@@ -46,6 +46,10 @@ class EntryLimits:
     # (seen on demo for symbols with no open position). Zero means "not
     # declared" and the entry is refused rather than sized on a guess.
     assumed_leverage: float = 0.0
+    # Leverage to SET on the exchange before sizing. 0 leaves whatever the
+    # symbol already has, which is Binance's per-symbol default for any pair
+    # the account has not traded — usually 20x.
+    target_leverage: float = 0.0
     # ── Volatility-scaled sizing ────────────────────────────────────────
     # 0 disables (margin stays a flat % of wallet). When set, the stop sits
     # atr_stop_mult x ATR away and the position is sized so the loss at that
@@ -280,6 +284,66 @@ class EntryService:
             f"({'demo' if getattr(self.guardian, 'demo', False) else 'live'}). "
             f"The scanner screens the live market, whose symbol list can differ."
         ), symbol
+
+    def ensure_leverage(self, symbol: str, target: float) -> tuple[float, str]:
+        """
+        Set the symbol's leverage on the exchange, then report what it is.
+
+        Binance stores leverage PER SYMBOL. A pair the account has never
+        traded keeps whatever default it has — usually 20x — so an account
+        "set to 10x" is only 10x on the symbols that were set by hand. LSK ran
+        at 20x on live within an hour of BR running at 10x, which halves every
+        distance the guard thresholds describe: a 30% ROI stop is 3.0% of
+        price at 10x and 1.5% at 20x.
+
+        A FAILURE HERE NEVER BLOCKS THE TRADE. The entry proceeds at whatever
+        leverage the exchange reports, sized correctly for that figure — which
+        is exactly the behaviour before this existed. Wrong-but-known leverage
+        is safe; it is unknown leverage that is not.
+        """
+        if not target or target <= 0:
+            return self.symbol_leverage_detail(symbol)
+        ex = self.exchange
+        try:
+            current, source = self.symbol_leverage_detail(symbol)
+            if current and abs(current - float(target)) < 0.01:
+                return current, source
+            market_id = None
+            try:
+                market_id = ex.market_id(symbol)
+            except Exception:
+                market_id = symbol.split("/")[0] + "USDT"
+            fn = getattr(ex, "fapiPrivatePostLeverage", None)
+            if fn is None:
+                log.warning(f"{symbol}: cannot set leverage on this client; "
+                            f"continuing at {current:g}x")
+                return current, source
+            fn({"symbol": market_id, "leverage": int(target)})
+            log.warning(
+                f"{symbol}: leverage CHANGED {current:g}x -> {int(target)}x on "
+                f"the exchange. Binance stores this per symbol, so a pair the "
+                f"account has not traded keeps its default.")
+            # Re-read rather than assume the write took: an exchange that
+            # refuses silently, or caps leverage by notional tier, would
+            # otherwise leave sizing computed against a number that is wrong.
+            after, src2 = self.symbol_leverage_detail(symbol)
+            if after and abs(after - float(target)) >= 0.01:
+                log.warning(
+                    f"{symbol}: asked for {int(target)}x but the exchange "
+                    f"reports {after:g}x — sizing will use {after:g}x. Binance "
+                    f"caps leverage by notional tier.")
+            return (after or current), (src2 or source)
+        except Exception as e:
+            # Deliberately not fatal. Proceeding at the reported leverage is
+            # the pre-existing behaviour and is correctly sized for it.
+            log.warning(
+                f"{symbol}: could not set leverage to {int(target)}x "
+                f"({_safe_err(e)}) — continuing at the leverage the exchange "
+                f"reports. The trade is NOT blocked.")
+            try:
+                return self.symbol_leverage_detail(symbol)
+            except Exception:
+                return 0.0, ""
 
     def symbol_leverage_detail(self, symbol: str) -> tuple[float, str]:
         """
@@ -664,7 +728,15 @@ class EntryService:
             return {"ok": False, "errors": [
                 f"{symbol} returned no usable price (ticker had no last/close)"]}
 
-        leverage, lev_source = self.symbol_leverage_detail(symbol)
+        # Set the leverage we intend BEFORE sizing, so the figure the plan is
+        # built on is the one the position will actually use. Non-fatal: if it
+        # cannot be set, this returns whatever the exchange reports and the
+        # trade proceeds, sized for that.
+        target_lev = getattr(self.limits, "target_leverage", 0) or 0
+        if target_lev:
+            leverage, lev_source = self.ensure_leverage(symbol, target_lev)
+        else:
+            leverage, lev_source = self.symbol_leverage_detail(symbol)
         if leverage <= 0:
             return {"ok": False, "errors": [
                 "could not read this symbol's leverage from Binance — refusing "

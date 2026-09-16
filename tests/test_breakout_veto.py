@@ -3826,3 +3826,157 @@ def test_a_stream_status_failure_is_visible():
     src = inspect.getsource(AutoTrader)
     i = src.index("stream status failed")
     assert "_log.warning" in src[max(0, i - 120):i]
+
+
+# ── set_leverage ───────────────────────────────────────────────────────────
+#
+# Binance stores leverage PER SYMBOL. LSK ran at 20x on live within an hour of
+# BR running at 10x, so an account "set to 10x" is only 10x on the pairs that
+# were set by hand — and every guard threshold halves in price terms on the
+# rest.
+
+class _LevEx:
+    def __init__(self, start=20.0, fail=False, caps_at=None):
+        self.lev, self.fail, self.caps_at = start, fail, caps_at
+        self.calls = []
+
+    def market_id(self, symbol):
+        return symbol.split("/")[0] + "USDT"
+
+    def fapiPrivatePostLeverage(self, params):
+        self.calls.append(params)
+        if self.fail:
+            raise RuntimeError("-4028 invalid leverage")
+        want = float(params["leverage"])
+        self.lev = min(want, self.caps_at) if self.caps_at else want
+        return {}
+
+
+def _lev_service(ex):
+    from bot.futures_entry import EntryService
+    svc = EntryService.__new__(EntryService)
+    svc.exchange = ex
+    svc.symbol_leverage_detail = lambda sym: (ex.lev, "positionRisk")
+    return svc
+
+
+def test_leverage_is_set_when_it_differs():
+    ex = _LevEx(start=20.0)
+    svc = _lev_service(ex)
+    lev, _ = svc.ensure_leverage("LSK/USDT:USDT", 10)
+    assert ex.calls == [{"symbol": "LSKUSDT", "leverage": 10}]
+    assert lev == 10.0
+
+
+def test_no_call_is_made_when_it_already_matches():
+    ex = _LevEx(start=10.0)
+    lev, _ = _lev_service(ex).ensure_leverage("BR/USDT:USDT", 10)
+    assert ex.calls == []
+    assert lev == 10.0
+
+
+def test_a_failure_does_NOT_block_the_trade():
+    """
+    The operator's requirement. Proceeding at the reported leverage is the
+    pre-existing behaviour and is correctly sized for it — wrong-but-known
+    leverage is safe; unknown leverage is not.
+    """
+    ex = _LevEx(start=20.0, fail=True)
+    lev, src = _lev_service(ex).ensure_leverage("LSK/USDT:USDT", 10)
+    assert lev == 20.0            # the real figure, not the wish
+    assert src == "positionRisk"
+
+
+def test_the_result_is_re_read_rather_than_assumed():
+    """Binance caps leverage by notional tier and can refuse quietly."""
+    ex = _LevEx(start=20.0, caps_at=5.0)
+    lev, _ = _lev_service(ex).ensure_leverage("LSK/USDT:USDT", 10)
+    assert lev == 5.0             # what the exchange actually holds
+
+
+def test_target_zero_leaves_the_exchange_alone():
+    ex = _LevEx(start=20.0)
+    lev, _ = _lev_service(ex).ensure_leverage("LSK/USDT:USDT", 0)
+    assert ex.calls == []
+    assert lev == 20.0
+
+
+def test_it_is_off_by_default():
+    from bot.config import BotConfig
+    assert BotConfig().entry_target_leverage == 0.0
+
+
+def test_the_entry_path_sets_leverage_before_sizing():
+    """The plan must be built on the leverage the position will actually use."""
+    import inspect
+    from bot.futures_entry import EntryService
+    src = inspect.getsource(EntryService)
+    i = src.index("target_lev = getattr(self.limits")
+    j = src.index("leverage, lev_source = self.symbol_leverage_detail(symbol)", i)
+    assert "self.ensure_leverage(symbol, target_lev)" in src[i:j]
+
+
+# ── The cooldown override was invisible ────────────────────────────────────
+#
+# LSK re-entered 4 minutes after a -$27.38 loss. The logs showed neither a
+# cooldown nor an override, because check_safety returns a REASON on SUCCESS
+# too — "cooldown overridden" — and the caller only logged `why` when it
+# REFUSED. The mechanism worked; nothing said so.
+
+def test_the_override_produces_a_reason_on_success():
+    import logging
+    from bot.auto_trader import (AutoTrader, AutoTradeConfig, SafetyState,
+                                 check_safety)
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(symbol_cooldown_s=1800.0,
+                                cooldown_override_rsi_delta=3.0,
+                                max_reentries_per_symbol=2)
+        a.state = SafetyState(); a._log = []
+        a.entry = type("E", (), {"clear_pending": lambda self, s: None})()
+        sym = "LSK/USDT:USDT"
+        a.note_closed_trade(sym, -27.379, entry_rsi=84.0)
+        assert a.state.symbol_blocked_until.get(sym)
+        ok, why = check_safety(a.state, a.cfg, balance=5000.0,
+                               open_positions=0, symbol=sym,
+                               current_rsi=87.1, side="short")
+        assert ok is True
+        assert "cooldown overridden" in why      # the reason existed all along
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_a_successful_override_is_now_logged():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.run_once)
+    assert "if ok and why:" in src
+    i = src.index("if ok and why:")
+    block = src[i:i + 900]
+    assert "_log.warning" in block
+    assert "cooldown_override" in block
+
+
+def test_applying_the_cooldown_reaches_the_container_log():
+    """It only went to the event feed, so logs could not answer 'did it fire?'"""
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.note_closed_trade)
+    assert "cooldown applied to" in src
+    assert "_log.info" in src
+
+
+def test_a_winner_still_sets_no_cooldown():
+    import logging
+    from bot.auto_trader import AutoTrader, AutoTradeConfig, SafetyState
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(symbol_cooldown_s=1800.0)
+        a.state = SafetyState(); a._log = []
+        a.entry = type("E", (), {"clear_pending": lambda self, s: None})()
+        a.note_closed_trade("BR/USDT:USDT", +46.55, entry_rsi=80.0)
+        assert not a.state.symbol_blocked_until.get("BR/USDT:USDT")
+    finally:
+        logging.disable(logging.NOTSET)

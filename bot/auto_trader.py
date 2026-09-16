@@ -1213,6 +1213,14 @@ class AutoTrader:
             ok, why = check_safety(self.state, self.cfg, balance=balance,
                                    open_positions=len(positions), symbol=symbol,
                                    current_rsi=row.get("rsi"), side=side)
+            if ok and why:
+                # check_safety returns a REASON on success too, and the only
+                # one it produces is "cooldown overridden". That was discarded,
+                # so a symbol re-entered minutes after a loss left no trace at
+                # all: LSK re-entered 4 minutes after a -$27.38 loss and the
+                # logs showed neither a cooldown nor an override.
+                _log.warning(f"auto-trade: {symbol} — {why}")
+                self._record("cooldown_override", why, symbol)
             if not ok:
                 self._skip_reasons[symbol] = why
                 _log.info(f"auto-trade: {symbol} qualified but blocked — {why}")
@@ -1405,3 +1413,12 @@ class AutoTrader:
                         entry_rsi=entry_rsi or self.state.failed_entry_rsi.get(symbol))
             self._record("cooldown", f"loss on {symbol}; blocked for "
                                      f"{int(self.cfg.symbol_cooldown_s)}s", symbol)
+            # Also to the container log. This only reached the event feed, so
+            # "did the cooldown apply?" was unanswerable from logs.
+            _log.info(
+                f"auto-trade: cooldown applied to {symbol} after a "
+                f"{realised:+.2f} loss — blocked for "
+                f"{int(self.cfg.symbol_cooldown_s)}s"
+                + (f", unless RSI rises "
+                   f"{self.cfg.cooldown_override_rsi_delta:g} points"
+                   if self.cfg.cooldown_override_rsi_delta else ""))
