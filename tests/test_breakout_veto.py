@@ -3794,3 +3794,35 @@ def test_the_skip_warning_only_fires_when_the_set_changes(caplog):
         for _ in range(3):
             s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT"])
     assert len([r for r in caplog.records if "cannot subscribe" in r.message]) == 1
+
+
+def test_every_attribute_run_once_uses_is_initialised():
+    """
+    `self._stream_log_n` was never set in __init__ — my edit targeted a string
+    that did not exist and failed silently. The modulo raised AttributeError
+    on the first cycle, the surrounding `except` logged at DEBUG, and DEBUG is
+    invisible at INFO. Stream health never printed while the stream worked.
+
+    This catches the class: every `self.<attr>` that run_once READS must be
+    assigned somewhere in the class.
+    """
+    import inspect, re
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    run = inspect.getsource(AutoTrader.run_once)
+    read = set(re.findall(r"self\.(_[a-zA-Z0-9_]+)\b", run))
+    assigned = set(re.findall(r"self\.(_[a-zA-Z0-9_]+)\s*(?::[^=]+)?=", src))
+    methods = {n for n, _ in inspect.getmembers(AutoTrader)}
+    # getattr(self, "x", default) is a deliberate optional read
+    guarded = set(re.findall(r'getattr\(self,\s*"(_[a-zA-Z0-9_]+)"', run))
+    missing = read - assigned - methods - guarded
+    assert not missing, f"read in run_once but never assigned: {sorted(missing)}"
+
+
+def test_a_stream_status_failure_is_visible():
+    """DEBUG hid the bug for an entire deploy."""
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    i = src.index("stream status failed")
+    assert "_log.warning" in src[max(0, i - 120):i]

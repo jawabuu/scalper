@@ -805,6 +805,16 @@ class AutoTrader:
         self.state = SafetyState()
         self._log: list[dict] = []
         self._last_run: float = 0.0
+        # Which RULE refused candidates last cycle, for the dashboard.
+        self._last_refusals: dict[str, int] = {}
+        # Optional live-price feed, set by main.py. None means every decision
+        # uses the scan snapshot, which is the behaviour this replaced.
+        self.stream = None
+        # Throttle for the stream health line. It was NEVER INITIALISED: the
+        # modulo raised AttributeError on the first cycle, the surrounding
+        # `except` logged at DEBUG, and DEBUG is invisible at INFO — so stream
+        # health silently never printed while the stream itself worked.
+        self._stream_log_n: int = 0
 
     # -- reporting -------------------------------------------------------
     def _record(self, action: str, detail: str, symbol: str = ""):
@@ -1355,7 +1365,9 @@ class AutoTrader:
                                if h.get("probe") else ""))
                 self._stream_log_n += 1
             except Exception as e:
-                _log.debug(f"stream status failed: {e}")
+                # WARNING, not DEBUG. A failure here means stream health is
+                # unreportable, which is exactly the state that hid this bug.
+                _log.warning(f"stream status failed: {e}")
 
     def _check_daily_drawdown(self, balance: float):
         """
