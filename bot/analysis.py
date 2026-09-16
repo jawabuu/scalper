@@ -290,6 +290,49 @@ def _verified(t: dict) -> bool:
     return not t.get("exit_is_estimate")
 
 
+def day_report(trades: list[dict], day_baseline: float | None,
+               day_start_ts: float | None, wallet_now: float | None = None,
+               tz_offset_h: float = 0.0) -> dict:
+    """
+    The trading day on its own terms: what the account started the day with,
+    what it has done since, and how many trades it took to get there.
+
+    Separate from account_return because that card has to choose what to show
+    in its one subtitle line, and when the trade record disagrees with the
+    wallet it shows the disagreement INSTEAD of the daily figure. On demo that
+    warning is nearly permanent, so the daily number simply vanished — the one
+    an operator looks at every morning.
+
+    The day boundary is LOCAL (tz_offset_h hours east of UTC), so an operator
+    in UTC+3 sees a day running 00:00-23:59 their time.
+    """
+    out = {
+        "baseline": round(float(day_baseline), 2) if day_baseline else None,
+        "started_at": day_start_ts,
+        "tz_offset_h": tz_offset_h,
+        "trades": 0, "net_pnl": 0.0, "pct": None, "wins": 0,
+        "wallet_now": round(float(wallet_now), 2) if wallet_now else None,
+        "hours_elapsed": None,
+    }
+    try:
+        if day_start_ts:
+            import time as _t
+            out["hours_elapsed"] = round((_t.time() - float(day_start_ts)) / 3600.0, 1)
+        today = [t for t in trades
+                 if day_start_ts and (t.get("closed_at") or 0) >= float(day_start_ts)
+                 and _verified(t) and t.get("realised_pnl_usdt") is not None]
+        net = sum((_realised(t) or 0.0) for t in today)
+        out["trades"] = len(today)
+        out["wins"] = sum(1 for t in today if (_realised(t) or 0) > 0)
+        out["net_pnl"] = round(net, 4)
+        if day_baseline and float(day_baseline) > 0:
+            out["pct"] = round(net / float(day_baseline) * 100, 3)
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+
+
 def account_return(trades: list[dict], baseline: float | None,
                    wallet_now: float | None = None,
                    day_baseline: float | None = None,

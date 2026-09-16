@@ -323,6 +323,10 @@ class BotConfig:
     # us and rising off it. Default TRUE.
     auto_long_require_turn: bool = field(default_factory=lambda: _env_bool(
         "AUTO_LONG_REQUIRE_TURN", True))
+    # Hours east of UTC the trading day rolls over on. The daily baseline, the
+    # halt reset and the day card all use it.
+    day_tz_offset_h: float = field(default_factory=lambda: _env_float(
+        "DAY_TZ_OFFSET_H", 0.0))
     auto_er_lookback: int = field(default_factory=lambda: _env_int(
         "AUTO_ER_LOOKBACK", 20))
     auto_taper_window: int = field(default_factory=lambda: _env_int(

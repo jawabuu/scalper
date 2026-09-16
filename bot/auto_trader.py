@@ -452,6 +452,7 @@ import time as _time
 class SafetyState:
     """Running state the safety limits are evaluated against."""
     day_start_balance: float = 0.0
+    day_started_at: float = 0.0
     day_key: str = ""
     recent_entry_times: list[float] = field(default_factory=list)
     symbol_blocked_until: dict[str, float] = field(default_factory=dict)
@@ -461,17 +462,33 @@ class SafetyState:
     halted_reason: str | None = None
 
 
-def _day_key(now: float) -> str:
-    return _time.strftime("%Y-%m-%d", _time.gmtime(now))
+# Hours east of UTC that the trading "day" rolls over on. The daily baseline
+# and the halt reset on this boundary, so an operator in UTC+3 sees a day that
+# starts at their midnight rather than at 03:00.
+DAY_TZ_OFFSET_H: float = 0.0
+
+
+def _day_key(now: float, offset_h: float | None = None) -> str:
+    off = DAY_TZ_OFFSET_H if offset_h is None else offset_h
+    return _time.strftime("%Y-%m-%d", _time.gmtime(now + off * 3600.0))
+
+
+def day_start_ts(now: float, offset_h: float | None = None) -> float:
+    """Unix time of the most recent local midnight."""
+    off = (DAY_TZ_OFFSET_H if offset_h is None else offset_h) * 3600.0
+    shifted = now + off
+    midnight = shifted - (shifted % 86400.0)
+    return midnight - off
 
 
 def roll_day(state: SafetyState, balance: float, now: float | None = None) -> SafetyState:
-    """Reset the daily baseline (and any halt) when the UTC day changes."""
+    """Reset the daily baseline (and any halt) when the LOCAL day changes."""
     now = now or _time.time()
     key = _day_key(now)
     if state.day_key != key:
         state.day_key = key
         state.day_start_balance = balance
+        state.day_started_at = day_start_ts(now)
         state.halted_reason = None
         state.reentries_today = {}
     if state.day_start_balance <= 0:
@@ -660,11 +677,14 @@ class AutoTrader:
         """SafetyState in a persistable form — the daily halt must survive a restart."""
         return {
             "day_start_balance": self.state.day_start_balance,
+            "day_started_at": getattr(self.state, "day_started_at", 0.0),
             "day_key": self.state.day_key,
             "recent_entry_times": list(self.state.recent_entry_times),
             "symbol_blocked_until": dict(self.state.symbol_blocked_until),
             "failed_entry_rsi": dict(self.state.failed_entry_rsi),
             "reentries_today": dict(self.state.reentries_today),
+            "day_start_balance": self.state.day_start_balance,
+            "day_started_at": getattr(self.state, "day_started_at", 0.0),
             "halted_reason": self.state.halted_reason,
         }
 
@@ -677,6 +697,7 @@ class AutoTrader:
             return
         s = self.state
         s.day_start_balance = float(data.get("day_start_balance") or 0.0)
+        s.day_started_at = float(data.get("day_started_at") or 0.0)
         s.day_key = data.get("day_key") or ""
         s.recent_entry_times = list(data.get("recent_entry_times") or [])
         s.symbol_blocked_until = dict(data.get("symbol_blocked_until") or {})
@@ -738,6 +759,8 @@ class AutoTrader:
             },
             # Re-entries used today, so the cap is visible before it bites.
             "reentries_today": dict(self.state.reentries_today),
+            "day_start_balance": self.state.day_start_balance,
+            "day_started_at": getattr(self.state, "day_started_at", 0.0),
         }
 
     def set_enabled(self, on: bool) -> dict:

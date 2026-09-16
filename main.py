@@ -35,6 +35,14 @@ if __name__ == "__main__":
 
     try:
         cfg = BotConfig().validate()
+        # The trading day rolls over on the operator's local midnight, not
+        # UTC's. Set before anything reads a day key.
+        import bot.auto_trader as _at
+        _at.DAY_TZ_OFFSET_H = float(cfg.day_tz_offset_h or 0.0)
+        if cfg.day_tz_offset_h:
+            log.info(f"Trading day rolls over at 00:00 UTC"
+                     f"{cfg.day_tz_offset_h:+g} "
+                     f"({-cfg.day_tz_offset_h % 24:02.0f}:00 UTC)")
     except AssertionError as e:
         log.error(f"Config error: {e}")
         sys.exit(1)

@@ -961,6 +961,14 @@
       <div class="stat" id="stat-acct-card"><div class="stat-label">Account return</div>
         <div class="stat-value neu" id="s-acct">—</div>
         <div class="stat-sub" id="s-acct-sub">since history cleared</div></div>
+      <!-- The trading day on its own terms. Separate from Account return
+           because that card gives its one subtitle line to the wallet-gap
+           warning when the trade record and the balance disagree, which on
+           demo is nearly permanent — so the daily figure vanished exactly
+           where it was most wanted. -->
+      <div class="stat" id="stat-day-card"><div class="stat-label">Today</div>
+        <div class="stat-value neu" id="s-day">—</div>
+        <div class="stat-sub" id="s-day-sub">no baseline yet</div></div>
       <div class="stat" id="stat-roc-card"><div class="stat-label">Return on capital</div>
         <div class="stat-value neu" id="s-roc">—</div>
         <div class="stat-sub" id="s-roc-sub">net of fees</div></div>
@@ -2869,6 +2877,29 @@ async function refreshAnalysis() {
           + `gap $${Math.abs(ar.wallet_gap).toFixed(2)}</span>`;
       }
       setEl('s-acct-sub', sub);
+    }
+
+    // The day card. Always rendered: it never yields its subtitle to a
+    // warning, so the daily figure is present whatever the wallet says.
+    const dy = a.day || {};
+    const dyEl = document.getElementById('s-day');
+    if (dy.pct === null || dy.pct === undefined) {
+      setEl('s-day', '\u2014');
+      setEl('s-day-sub', dy.error ? 'unavailable'
+        : (dy.baseline ? `$${Number(dy.baseline).toFixed(2)} start · no closed trades`
+                       : 'no baseline yet'));
+      if (dyEl) dyEl.className = 'stat-value neu';
+    } else {
+      setEl('s-day', (dy.pct >= 0 ? '+' : '') + Number(dy.pct).toFixed(2) + '%');
+      if (dyEl) dyEl.className = 'stat-value '
+        + (dy.pct > 0 ? 'pos' : (dy.pct < 0 ? 'neg' : 'neu'));
+      const tz = dy.tz_offset_h ? `UTC${dy.tz_offset_h >= 0 ? '+' : ''}${dy.tz_offset_h}` : 'UTC';
+      const hrs = dy.hours_elapsed != null ? ` · ${Number(dy.hours_elapsed).toFixed(1)}h in` : '';
+      setEl('s-day-sub',
+        `$${Number(dy.baseline || 0).toFixed(2)} at 00:00 ${tz}`
+        + ` · ${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`
+        + ` · ${dy.trades} trade${dy.trades === 1 ? '' : 's'}`
+        + (dy.trades ? ` (${dy.wins}W)` : '') + hrs);
     }
 
     // Return on the capital actually committed, not a mean of ROI percentages

@@ -191,7 +191,8 @@ def create_app(engine) -> FastAPI:
         if _guardian is None:
             return {"enabled": False, "message": "Guardian not enabled"}
         try:
-            from bot.analysis import analyse, reconcile, account_return
+            from bot.analysis import (analyse, reconcile, account_return,
+                                      day_report)
             trades = _guardian.closed_trades()
             report = analyse(trades)
             try:
@@ -199,19 +200,33 @@ def create_app(engine) -> FastAPI:
                 day_base = None
                 if _auto is not None:
                     day_base = getattr(_auto.state, "day_start_balance", None)
-                # Start of the current UTC day, matching the daily-loss window.
-                from datetime import datetime, timezone
-                now = datetime.now(timezone.utc)
-                day_start = now.replace(hour=0, minute=0, second=0,
-                                        microsecond=0).timestamp()
+                # Start of the current LOCAL day, matching the daily-loss
+                # window. The boundary is DAY_TZ_OFFSET_H hours east of UTC so
+                # the day an operator sees is their own.
+                import time as _t
+                from bot.auto_trader import day_start_ts as _day_start
+                day_start = _day_start(_t.time())
                 report["account_return"] = account_return(
                     trades,
                     baseline=getattr(_guardian, "wallet_start", None),
                     wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
                     day_baseline=day_base,
                     day_start_ts=day_start)
+                # Its own card: account_return has one subtitle line and gives
+                # it to the wallet-gap warning when the two disagree, which on
+                # demo is nearly permanent — so the daily figure disappeared
+                # exactly where it was wanted.
+                from bot.auto_trader import DAY_TZ_OFFSET_H
+                report["day"] = day_report(
+                    trades,
+                    day_baseline=day_base,
+                    day_start_ts=(getattr(_auto.state, "day_started_at", 0.0)
+                                  if _auto is not None else 0.0) or day_start,
+                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    tz_offset_h=DAY_TZ_OFFSET_H)
             except Exception as e:
                 report["account_return"] = {"error": str(e)}
+                report["day"] = {"error": str(e)}
             try:
                 report["reconciliation"] = reconcile(
                     trades,

@@ -2713,3 +2713,81 @@ def test_both_directions_carry_the_reading():
     from bot import scanner
     src = inspect.getsource(scanner.evaluate_symbol)
     assert src.count("efficiency=eff,") == 2
+
+
+# ── Day card ────────────────────────────────────────────────────────────────
+
+def test_the_day_boundary_is_local_not_utc():
+    import time as _t
+    import bot.auto_trader as at
+    old = at.DAY_TZ_OFFSET_H
+    try:
+        at.DAY_TZ_OFFSET_H = 3.0
+        now = _t.time()
+        ds = at.day_start_ts(now)
+        # local midnight: 00:00 in UTC+3 is 21:00 UTC the day before
+        assert _t.gmtime(ds + 3 * 3600).tm_hour == 0
+        assert _t.gmtime(ds + 3 * 3600).tm_min == 0
+        assert 0 <= (now - ds) < 86400
+    finally:
+        at.DAY_TZ_OFFSET_H = old
+
+
+def test_utc_offset_zero_still_gives_utc_midnight():
+    import time as _t
+    import bot.auto_trader as at
+    old = at.DAY_TZ_OFFSET_H
+    try:
+        at.DAY_TZ_OFFSET_H = 0.0
+        ds = at.day_start_ts(_t.time())
+        assert _t.gmtime(ds).tm_hour == 0
+    finally:
+        at.DAY_TZ_OFFSET_H = old
+
+
+def _dtrade(closed_at, pnl):
+    return {"symbol": "X/USDT:USDT", "side": "short", "final_roi": 5.0,
+            "realised_pnl_usdt": pnl, "fees_usdt": 1.7, "margin_usdt": 88.0,
+            "exit_is_estimate": False, "closed_at": closed_at,
+            "entry_context": {"sized_stop_roi": 30.0}}
+
+
+def test_the_day_report_counts_only_todays_trades():
+    from bot.analysis import day_report
+    start = 1_000_000.0
+    out = day_report([_dtrade(start - 3600, 50.0),      # yesterday
+                      _dtrade(start + 60, 20.0),
+                      _dtrade(start + 120, -5.0)],
+                     day_baseline=5000.0, day_start_ts=start, tz_offset_h=3.0)
+    assert out["trades"] == 2
+    assert out["wins"] == 1
+    assert out["net_pnl"] == pytest.approx(15.0)
+    assert out["pct"] == pytest.approx(0.3, abs=0.01)
+    assert out["tz_offset_h"] == 3.0
+
+
+def test_it_reports_a_baseline_with_no_trades_yet():
+    from bot.analysis import day_report
+    out = day_report([], day_baseline=5000.0, day_start_ts=1_000_000.0)
+    assert out["trades"] == 0 and out["baseline"] == 5000.0
+    assert out["pct"] == pytest.approx(0.0)
+
+
+def test_it_survives_a_missing_baseline():
+    from bot.analysis import day_report
+    out = day_report([_dtrade(2.0, 10.0)], day_baseline=None, day_start_ts=1.0)
+    assert out["pct"] is None
+    assert out["trades"] == 1
+
+
+def test_the_card_never_yields_its_subtitle_to_a_warning():
+    """
+    account_return replaces the daily line with the wallet-gap warning, which
+    on demo is nearly permanent. This card has its own.
+    """
+    from pathlib import Path
+    ui = Path("ui/index.html").read_text()
+    assert 'id="s-day"' in ui and 'id="s-day-sub"' in ui
+    i = ui.index("const dy = a.day || {};")
+    block = ui[i:i + 1400]
+    assert "disagrees_with_wallet" not in block
