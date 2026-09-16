@@ -77,6 +77,10 @@ class CandidateStream:
         # a healthy stream look like it was flapping.
         self._resubscribing = False
         self._resubscribes = 0
+        # Sessions that opened and delivered nothing. A subscription that is
+        # structurally wrong fails the same way every time, so reconnecting
+        # at full speed is a pointless request loop.
+        self._silent_sessions = 0
         self._messages = 0
         self._last_msg_at = 0.0
         self._last_error = ""
@@ -97,6 +101,16 @@ class CandidateStream:
             base = str(symbol or "").split(":")[0].replace("/", "").upper()
             if not base.endswith("USDT"):
                 return None
+            # MUST BE ASCII. `.isalnum()` is True for CJK under Unicode, so a
+            # symbol like 龙虾USDT passed the previous check, went into the
+            # stream URL percent-encoded as %E9%BE%99%E8%99%BEusdt, and
+            # silenced the ENTIRE subscription — Binance accepted the socket
+            # and sent nothing for any symbol. These are real, tradeable
+            # pairs: 我踏马来了/USDT traded on 2026-09-13. They are excluded
+            # from the STREAM only, and still scanned, entered and guarded
+            # normally on the scan snapshot.
+            if not base.isascii():
+                return None
             stem = base[:-4]
             if not stem or not stem.replace("_", "").isalnum():
                 return None
@@ -114,8 +128,9 @@ class CandidateStream:
         skipped = [s for s, w in wired.items() if not w]
         if skipped:
             log.warning(
-                f"stream skipping {len(skipped)} symbol(s) that are not "
-                f"USDT-margined futures: {', '.join(skipped[:6])}"
+                f"stream skipping {len(skipped)} symbol(s) it cannot "
+                f"subscribe to (non-ASCII or not USDT-M): "
+                f"{', '.join(skipped[:6])}"
                 f"{'...' if len(skipped) > 6 else ''}. One unrecognised name "
                 f"silences the ENTIRE subscription, so they are left out.")
         with self._lock:
@@ -168,9 +183,24 @@ class CandidateStream:
                 log.warning(f"candidate stream session ended: {e}")
             if self._stop.is_set():
                 break
-            if self._resubscribing:
+            if self._resubscribing and not self._silent_sessions:
                 # Expected: reconnect at once, do not count it as a failure.
                 self._resubscribing = False
+                continue
+            if self._silent_sessions >= 3:
+                # Three silent sessions is a broken subscription, not bad
+                # luck. Back off hard rather than reconnecting every few
+                # seconds against an endpoint the guardian also uses.
+                self._resubscribing = False
+                log.error(
+                    f"candidate stream silent {self._silent_sessions} "
+                    f"session(s) in a row — backing off 5 minutes. Entries "
+                    f"continue on the scan snapshot.")
+                for _ in range(300):
+                    if self._stop.is_set():
+                        return
+                    time.sleep(1.0)
+                self._silent_sessions = 0
                 continue
             self._reconnects += 1
             # Backoff, capped: a stream that cannot connect must not become a
@@ -226,6 +256,7 @@ class CandidateStream:
                 self._connected = False
         got = self._messages - before
         if got == 0:
+            self._silent_sessions += 1
             # Distinct from a connection failure and diagnosed differently.
             self._last_error = (
                 f"connected to {base} but received NO messages")
@@ -236,6 +267,7 @@ class CandidateStream:
                 f"nothing. Streams: {', '.join(want[:8])}"
                 f"{'...' if len(want) > 8 else ''}")
         else:
+            self._silent_sessions = 0
             log.info(f"candidate stream session ended after {got} message(s)")
 
     async def _idle(self):
@@ -319,6 +351,7 @@ class CandidateStream:
                 "healthy": self.healthy(now),
                 "connected": self._connected,
                 "resubscribes": self._resubscribes,
+                "silent_sessions": self._silent_sessions,
                 "tracking": len(self._want),
                 "quotes": len(self._quotes),
                 "fresh": fresh,

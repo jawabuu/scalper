@@ -3553,7 +3553,8 @@ def test_unsubscribable_symbols_are_dropped_not_passed_through(caplog):
     with caplog.at_level("WARNING"):
         s.track(["BTC/USDT:USDT", "BTC/USD:BTC", "ETH/USDT:USDT"])
     assert s.status()["tracking"] == 2
-    assert any("not USDT-margined" in r.message for r in caplog.records)
+    assert any("cannot" in r.message and "subscribe" in r.message
+               for r in caplog.records)
 
 
 def test_price_on_an_unsubscribable_symbol_is_none():
@@ -3584,3 +3585,49 @@ def test_a_resubscribe_is_not_blocked_by_silence():
     src = inspect.getsource(candidate_stream.CandidateStream._session)
     assert "ws.receive(timeout=5)" in src
     assert "async for msg in ws" not in src
+
+
+def test_non_ascii_symbols_cannot_reach_the_subscription():
+    """
+    龙虾USDT silenced the ENTIRE live subscription: `.isalnum()` is True for
+    CJK under Unicode, so it passed the filter, went into the URL as
+    %E9%BE%99%E8%99%BEusdt, and Binance accepted the socket and sent nothing
+    for ANY symbol.
+
+    These are real tradeable pairs — 我踏马来了/USDT traded on 2026-09-13 — so
+    they are excluded from the STREAM only, and still scanned, entered and
+    guarded on the scan snapshot.
+    """
+    from bot.candidate_stream import CandidateStream as C
+    assert C._wire("龙虾/USDT:USDT") is None
+    assert C._wire("我踏马来了/USDT:USDT") is None
+    assert C._wire("ARB/USDT:USDT") == "arbusdt"
+    assert C._wire("1000PEPE/USDT:USDT") == "1000pepeusdt"
+
+
+def test_one_bad_symbol_does_not_drop_the_good_ones():
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False)
+    s.track(["ARB/USDT:USDT", "龙虾/USDT:USDT", "FIL/USDT:USDT"])
+    assert s.status()["tracking"] == 2
+
+
+def test_repeated_silence_backs_off_rather_than_looping():
+    """
+    A structurally broken subscription fails identically every time.
+    Reconnecting at full speed is a request loop against the same endpoint the
+    guardian uses.
+    """
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._run)
+    assert "_silent_sessions >= 3" in src
+    assert "backing off 5 minutes" in src
+
+
+def test_a_good_session_clears_the_silence_counter():
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._session)
+    i = src.index("session ended after")
+    assert "_silent_sessions = 0" in src[max(0, i - 200):i]
