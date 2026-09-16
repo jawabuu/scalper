@@ -14,6 +14,20 @@ from bot import BotConfig, ScalpingEngine, __version__
 from bot.api import run_api
 
 
+def _stream_proxy(cfg):
+    """
+    Proxy for the candidate stream.
+
+    Unset inherits SOCKS_PROXY. The literal "none" goes DIRECT — worth trying,
+    because the live websocket host was silent through the VPN exit while REST
+    on the same proxy worked fine.
+    """
+    v = (getattr(cfg, "stream_proxy", "") or "").strip()
+    if v.lower() in ("none", "direct", "off"):
+        return None
+    return v or (cfg.socks_proxy or None)
+
+
 def setup_logging():
     level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
@@ -264,7 +278,8 @@ if __name__ == "__main__":
                         auto.stream = CandidateStream(
                             demo=cfg.guardian_demo,
                             stale_after_s=cfg.stream_stale_after_s,
-                            proxy=cfg.socks_proxy or None)
+                            proxy=_stream_proxy(cfg),
+                            base_url=cfg.stream_url or None)
                         auto.stream.start()
                     except Exception as e:
                         log.error(f"candidate stream unavailable ({e}) — "

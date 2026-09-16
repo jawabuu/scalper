@@ -60,10 +60,22 @@ class CandidateStream:
 
     def __init__(self, demo: bool = True,
                  stale_after_s: float = DEFAULT_STALE_AFTER_S,
-                 proxy: str | None = None):
+                 proxy: str | None = None,
+                 base_url: str | None = None):
         self.demo = demo
         self.stale_after_s = float(stale_after_s)
+        # The live host accepted the socket and delivered nothing, on a clean
+        # ASCII subscription, while demo worked through the SAME proxy — and a
+        # single-symbol probe on /ws/ was silent too. That points at the exit
+        # IP rather than at anything here: Binance blocks datacenter and VPN
+        # ranges on the live market-data hosts more readily than on testnet,
+        # while leaving REST permitted.
+        #
+        # Both variables are therefore settable without a rebuild, so the
+        # alternatives can be tried directly: a different endpoint, or no
+        # proxy at all.
         self.proxy = proxy
+        self.base_url = (base_url or "").strip() or None
         self._quotes: dict[str, Quote] = {}
         self._want: set[str] = set()
         self._lock = threading.RLock()
@@ -217,7 +229,7 @@ class CandidateStream:
             await self._idle()
             return
         streams = "/".join(f"{s}@markPrice@1s" for s in want)
-        base = WS_BASE_DEMO if self.demo else WS_BASE
+        base = self.base_url or (WS_BASE_DEMO if self.demo else WS_BASE)
         url = f"{base}?streams={streams}"
         timeout = aiohttp.ClientTimeout(total=None, sock_read=60)
         # The endpoint and the first few stream names, because "connected but
@@ -291,7 +303,7 @@ class CandidateStream:
             handshake fails  -> the proxy cannot reach this host at all
         """
         import aiohttp
-        base = (WS_BASE_DEMO if self.demo else WS_BASE).replace("/stream", "/ws")
+        base = (self.base_url or (WS_BASE_DEMO if self.demo else WS_BASE)).replace("/stream", "/ws")
         url = f"{base}/btcusdt@markPrice@1s"
         log.warning(f"candidate stream PROBE: {url}")
         try:

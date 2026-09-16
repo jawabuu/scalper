@@ -1339,11 +1339,19 @@ class AutoTrader:
                     if self._stream_log_n % 20 == 0:
                         _log.info(msg)
                 else:
-                    _log.warning(
-                        msg + " — entries are falling back to the scan "
-                        "snapshot, which can be up to one scanner interval old"
-                        + (f". last error: {h['last_error']}"
-                           if h.get("last_error") else ""))
+                    # Throttled. A stream that is environmentally blocked
+                    # stays degraded, and a warning every 30s buries
+                    # everything else in the log. First occurrence, then
+                    # roughly every ten minutes.
+                    if self._stream_log_n % 20 == 0:
+                        _log.warning(
+                            msg + " — entries are falling back to the scan "
+                            "snapshot, which can be up to one scanner interval "
+                            "old"
+                            + (f". last error: {h['last_error']}"
+                               if h.get("last_error") else "")
+                            + (f" | probe: {h['probe']}"
+                               if h.get("probe") else ""))
                 self._stream_log_n += 1
             except Exception as e:
                 _log.debug(f"stream status failed: {e}")

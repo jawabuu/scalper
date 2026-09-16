@@ -347,6 +347,14 @@ class BotConfig:
         "CANDIDATE_STREAM_ENABLED", True))
     stream_stale_after_s: float = field(default_factory=lambda: _env_float(
         "CANDIDATE_STREAM_STALE_S", 20.0))
+    # Override the websocket endpoint, e.g. to try an alternate live host.
+    stream_url: str = field(default_factory=lambda: _env(
+        "CANDIDATE_STREAM_URL", "").strip())
+    # Proxy for the STREAM only. Unset inherits SOCKS_PROXY; the literal
+    # string "none" goes direct. The live host was silent through the VPN exit
+    # while REST on the same proxy worked, so going direct is worth trying.
+    stream_proxy: str = field(default_factory=lambda: _env(
+        "CANDIDATE_STREAM_PROXY", "").strip())
     auto_defer_rising_volume: bool = field(default_factory=lambda: _env_bool(
         "AUTO_DEFER_RISING_VOLUME", True))
     auto_defer_vol_trend: float = field(default_factory=lambda: _env_float(

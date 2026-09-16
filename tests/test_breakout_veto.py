@@ -3661,3 +3661,38 @@ def test_the_probe_result_reaches_the_dashboard():
     from bot.candidate_stream import CandidateStream
     s = CandidateStream(demo=False)
     assert "probe" in s.status()
+
+
+def test_the_stream_endpoint_and_proxy_are_overridable():
+    """
+    PROBE SILENT on the live host through the VPN exit, while demo worked on
+    the same proxy and REST worked too. That is environmental, so both
+    variables must be testable without a rebuild.
+    """
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=False, base_url="wss://alt.example/stream")
+    assert s.base_url == "wss://alt.example/stream"
+    assert CandidateStream(demo=False).base_url is None
+
+
+def test_the_stream_proxy_can_be_disabled_independently():
+    import main
+    class C:
+        stream_proxy = ""
+        socks_proxy = "http://gluetun:8888"
+    assert main._stream_proxy(C()) == "http://gluetun:8888"
+    C.stream_proxy = "none"
+    assert main._stream_proxy(C()) is None
+    C.stream_proxy = "direct"
+    assert main._stream_proxy(C()) is None
+    C.stream_proxy = "http://other:3128"
+    assert main._stream_proxy(C()) == "http://other:3128"
+
+
+def test_a_persistently_degraded_stream_does_not_spam():
+    """It stays degraded by definition; a warning every 30s buries the log."""
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    i = src.index("falling back to the scan")
+    assert "_stream_log_n % 20 == 0" in src[max(0, i - 600):i]
