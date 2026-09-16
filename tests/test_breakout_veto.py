@@ -3528,3 +3528,59 @@ def test_a_stream_with_no_data_is_not_healthy():
     s.track(["BTC/USDT:USDT"])
     assert s.healthy() is False
     assert s.status()["healthy"] is False
+
+
+# ── Stream: one bad name silences everything ───────────────────────────────
+#
+# Live reported connected=True with msgs=0. Binance ACCEPTS a socket whose
+# subscription contains an unrecognised stream name and then sends nothing —
+# the whole subscription goes silent, not just that symbol. The live universe
+# is 718 symbols against demo's 574 and is not all USDT-margined.
+
+def test_only_usdt_margined_pairs_are_subscribed():
+    from bot.candidate_stream import CandidateStream as C
+    assert C._wire("BTC/USDT:USDT") == "btcusdt"
+    assert C._wire("1000PEPE/USDT:USDT") == "1000pepeusdt"
+    assert C._wire("SYN/USDT") == "synusdt"
+    for bad in ("BTC/USD:BTC", "ETHUSD_PERP", "BTC/BUSD:BUSD", "", None,
+                "WEIRD-THING"):
+        assert C._wire(bad) is None, bad
+
+
+def test_unsubscribable_symbols_are_dropped_not_passed_through(caplog):
+    from bot.candidate_stream import CandidateStream
+    s = CandidateStream(demo=True)
+    with caplog.at_level("WARNING"):
+        s.track(["BTC/USDT:USDT", "BTC/USD:BTC", "ETH/USDT:USDT"])
+    assert s.status()["tracking"] == 2
+    assert any("not USDT-margined" in r.message for r in caplog.records)
+
+
+def test_price_on_an_unsubscribable_symbol_is_none():
+    from bot.candidate_stream import CandidateStream
+    assert CandidateStream(demo=True).price("BTC/USD:BTC") is None
+
+
+def test_a_silent_connection_is_reported_distinctly():
+    """
+    Distinct from a connection failure, because it is diagnosed differently:
+    the socket opened, so the proxy and endpoint are fine.
+    """
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._session)
+    assert "CONNECTED BUT SILENT" in src
+    assert "unrecognised symbol" in src
+
+
+def test_a_resubscribe_is_not_blocked_by_silence():
+    """
+    `async for msg in ws` blocks until the next frame or the 60s read timeout,
+    so a resubscribe could not take effect on a stream delivering nothing —
+    precisely the case that needed one.
+    """
+    import inspect
+    from bot import candidate_stream
+    src = inspect.getsource(candidate_stream.CandidateStream._session)
+    assert "ws.receive(timeout=5)" in src
+    assert "async for msg in ws" not in src

@@ -83,16 +83,41 @@ class CandidateStream:
 
     # ── symbols ────────────────────────────────────────────────────────────
     @staticmethod
-    def _wire(symbol: str) -> str:
-        """BTC/USDT:USDT -> btcusdt, the form Binance's stream expects."""
-        return symbol.split(":")[0].replace("/", "").lower()
+    def _wire(symbol: str) -> str | None:
+        """
+        BTC/USDT:USDT -> btcusdt, the form Binance's stream expects.
+
+        Returns None for anything that is not a USDT-margined futures pair.
+        One unrecognised name makes Binance ACCEPT the socket and send
+        NOTHING — the whole subscription goes silent, not just that symbol —
+        so a name that cannot be trusted must never reach the URL. The live
+        universe is 718 symbols against demo's 574 and is not all USDT-M.
+        """
+        try:
+            base = str(symbol or "").split(":")[0].replace("/", "").upper()
+            if not base.endswith("USDT"):
+                return None
+            stem = base[:-4]
+            if not stem or not stem.replace("_", "").isalnum():
+                return None
+            return base.lower()
+        except Exception:
+            return None
 
     def track(self, symbols: list[str]):
         """
         Replace the tracked set. Called each time the scanner publishes, so
         the stream follows eligibility rather than accumulating symbols.
         """
-        want = {self._wire(s) for s in symbols if s}
+        wired = {s: self._wire(s) for s in symbols if s}
+        want = {w for w in wired.values() if w}
+        skipped = [s for s, w in wired.items() if not w]
+        if skipped:
+            log.warning(
+                f"stream skipping {len(skipped)} symbol(s) that are not "
+                f"USDT-margined futures: {', '.join(skipped[:6])}"
+                f"{'...' if len(skipped) > 6 else ''}. One unrecognised name "
+                f"silences the ENTIRE subscription, so they are left out.")
         with self._lock:
             if want == self._want:
                 return
@@ -164,19 +189,54 @@ class CandidateStream:
         base = WS_BASE_DEMO if self.demo else WS_BASE
         url = f"{base}?streams={streams}"
         timeout = aiohttp.ClientTimeout(total=None, sock_read=60)
+        # The endpoint and the first few stream names, because "connected but
+        # no messages" is otherwise undiagnosable: a single unrecognised
+        # stream name makes Binance accept the socket and send nothing.
+        log.info(f"candidate stream connecting to {base} "
+                 f"({len(want)} stream(s): {', '.join(want[:4])}"
+                 f"{'...' if len(want) > 4 else ''})"
+                 + (f" via proxy {self.proxy}" if self.proxy else ""))
+        before = self._messages
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.ws_connect(url, proxy=self.proxy,
                                        heartbeat=30) as ws:
                 self._connected = True
                 self._connected_at = time.time()
                 log.info(f"candidate stream connected: {len(want)} symbol(s)")
-                async for msg in ws:
-                    if self._stop.is_set() or not self._connected:
-                        break
-                    if msg.type != aiohttp.WSMsgType.TEXT:
+                while not self._stop.is_set() and self._connected:
+                    # receive() with a timeout rather than `async for`: a
+                    # resubscribe request could not take effect while no
+                    # messages were arriving, because the iterator blocks
+                    # until the next frame or the 60s read timeout — exactly
+                    # the case on a stream that is delivering nothing.
+                    try:
+                        msg = await ws.receive(timeout=5)
+                    except Exception:
                         continue
-                    self._ingest(msg.data)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        self._ingest(msg.data)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,
+                                      aiohttp.WSMsgType.CLOSING,
+                                      aiohttp.WSMsgType.ERROR):
+                        self._last_error = (
+                            f"socket closed: code={ws.close_code} "
+                            f"{str(msg.data)[:120]}")
+                        log.warning(f"candidate stream {self._last_error}")
+                        break
                 self._connected = False
+        got = self._messages - before
+        if got == 0:
+            # Distinct from a connection failure and diagnosed differently.
+            self._last_error = (
+                f"connected to {base} but received NO messages")
+            log.error(
+                f"candidate stream CONNECTED BUT SILENT: {len(want)} stream(s) "
+                f"on {base}, zero messages. Usually an unrecognised symbol in "
+                f"the subscription — Binance accepts the socket and sends "
+                f"nothing. Streams: {', '.join(want[:8])}"
+                f"{'...' if len(want) > 8 else ''}")
+        else:
+            log.info(f"candidate stream session ended after {got} message(s)")
 
     async def _idle(self):
         """Nothing eligible: wait rather than hammering a connect."""
@@ -221,6 +281,8 @@ class CandidateStream:
         fall back to the scan figure.
         """
         key = self._wire(symbol)
+        if not key:
+            return None
         now = now or time.time()
         with self._lock:
             q = self._quotes.get(key)
