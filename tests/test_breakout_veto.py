@@ -3101,3 +3101,112 @@ def test_export_is_one_control_with_two_choices():
     assert 'id="ft-export"' in ui
     assert "onExportPick(this)" in ui
     assert "downloadTradesCsv(true)" in ui and "downloadTradesCsv(false)" in ui
+
+
+def test_session_toggles_actually_apply():
+    """
+    They rendered and did nothing: `sessions` is declared (dict, None, None),
+    so `typ is str` was False and the value fell into the numeric branch.
+    """
+    import logging
+    from bot.auto_trader import AutoTrader, AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(); a.state = None; a._log = []
+        applied, errors = a.update_rules({"sessions": {"US": "L0S1"}})
+        assert not errors and applied
+        assert a.cfg.sessions["US"] == "L0S1"
+        assert a.cfg.sessions["AS"] == "L1S1"      # others untouched
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_a_bad_session_key_is_rejected_not_applied():
+    import logging
+    from bot.auto_trader import AutoTrader, AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(); a.state = None; a._log = []
+        applied, errors = a.update_rules({"sessions": {"ZZ": "L1S1"}})
+        assert errors and not applied
+        applied, errors = a.update_rules({"sessions": "L1S1"})
+        assert errors and not applied
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_an_unreadable_spec_switches_nothing_off():
+    import logging
+    from bot.auto_trader import AutoTrader, AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(); a.state = None; a._log = []
+        a.update_rules({"sessions": {"AS": "garbage"}})
+        assert a.cfg.sessions["AS"] == "L1S1"
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_the_hide_control_is_legible():
+    """A 12px emoji at 0.55 opacity on a dark card was invisible in practice."""
+    ui = _ui()
+    assert "'SHOW' : 'HIDE'" in ui
+    assert ">HIDE</button>" in ui
+
+
+def test_the_exact_dashboard_payload_does_not_raise():
+    """
+    Regression for the 500 seen in production on v3.27.1:
+
+        File "bot/auto_trader.py", line 934, in update_rules
+          elif not (lo <= val <= hi):
+        TypeError: '<=' not supported between instances of 'NoneType' and 'dict'
+
+    The toggle POSTs the WHOLE map, not one key, and it reached the numeric
+    branch. update_rules must never raise on a well-formed payload — an
+    exception there is a 500 that tells the operator nothing.
+    """
+    import logging
+    from bot.auto_trader import AutoTrader, AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        a = AutoTrader.__new__(AutoTrader)
+        a.cfg = AutoTradeConfig(); a.state = None; a._log = []
+        payload = {"sessions": {"AS": "L1S1", "EU": "L1S1",
+                                "OV": "L1S1", "US": "L0S1"}}
+        applied, errors = a.update_rules(payload)
+        assert not errors
+        assert a.cfg.sessions["US"] == "L0S1"
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_no_tunable_type_can_reach_the_numeric_comparison_unguarded():
+    """
+    The root cause was a TUNABLE type with no branch of its own falling
+    through to `lo <= val <= hi`. Every declared type must be handled before
+    that line.
+    """
+    from bot.auto_trader import AutoTrader
+    handled = {bool, str, dict, int, float}
+    declared = {typ for typ, _, _ in AutoTrader.TUNABLE.values()}
+    assert declared <= handled, f"unhandled TUNABLE type(s): {declared - handled}"
+
+
+def test_a_rule_update_failure_is_a_400_not_a_500():
+    """
+    The TypeError escaped as an ASGI 500: a stack trace in the log and nothing
+    useful on the page. Whatever the cause, a bad rule is a client error
+    carrying its reason.
+    """
+    import inspect
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("applied, errors = _auto.update_rules(rules)")
+    block = src[max(0, i - 200):i + 700]
+    assert "except Exception as e:" in block
+    assert "status_code=400" in block
+    assert "except HTTPException:" in block      # real 400s pass through

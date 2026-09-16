@@ -985,11 +985,15 @@
     <!-- Stat strip -->
     <div class="stats-row" id="stats-row">
       <div class="stat" style="position:relative">
+        <!-- Was a 12px emoji at 0.55 opacity on a dark card: present, but
+             effectively invisible. Now a labelled control with a border. -->
         <button id="hide-amounts" onclick="toggleHideAmounts()"
                 title="Hide amounts"
-                style="position:absolute;top:4px;right:5px;background:none;
-                       border:none;cursor:pointer;font-size:12px;padding:0;
-                       line-height:1;opacity:0.55">&#128065;</button>
+                style="position:absolute;top:5px;right:6px;cursor:pointer;
+                       font:inherit;font-size:9px;letter-spacing:0.5px;
+                       padding:1px 5px;border-radius:3px;
+                       border:1px solid var(--border);background:transparent;
+                       color:var(--muted)">HIDE</button>
         <div class="stat-label">Portfolio</div>
         <div class="stat-value neu" id="s-portfolio">—</div>
         <div class="stat-sub" id="s-portfolio-sub"></div></div>
@@ -2039,8 +2043,11 @@ function money(text) {
 function applyHideAmounts() {
   const btn = document.getElementById('hide-amounts');
   if (btn) {
-    btn.textContent = _hideAmounts ? '\u{1F648}' : '\u{1F441}';
-    btn.title = _hideAmounts ? 'Show amounts' : 'Hide amounts';
+    btn.textContent = _hideAmounts ? 'SHOW' : 'HIDE';
+    btn.title = _hideAmounts
+      ? 'Show dollar amounts' : 'Replace every dollar amount with ***';
+    btn.style.color = _hideAmounts ? 'var(--warn)' : 'var(--muted)';
+    btn.style.borderColor = _hideAmounts ? 'var(--warn)' : 'var(--border)';
   }
   document.body.dataset.hideAmounts = _hideAmounts ? '1' : '0';
   try { localStorage.setItem('hideAmounts', _hideAmounts ? '1' : '0'); } catch (e) {}

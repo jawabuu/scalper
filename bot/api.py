@@ -346,7 +346,19 @@ def create_app(engine) -> FastAPI:
             raise HTTPException(status_code=400, detail="Auto-trade not configured")
         rules = payload.get("rules")
         if rules:
-            applied, errors = _auto.update_rules(rules)
+            try:
+                applied, errors = _auto.update_rules(rules)
+            except HTTPException:
+                raise
+            except Exception as e:
+                # A rule the validator cannot handle used to escape as a 500
+                # with a stack trace in the log and nothing useful on the
+                # page. A bad value is a 400 carrying its reason.
+                log.error(f"rule update failed for {list(rules)}: {e}",
+                          exc_info=True)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"could not apply {', '.join(map(str, rules))}: {e}")
             if errors:
                 raise HTTPException(status_code=400, detail="; ".join(errors))
             log.warning(f"Auto-trade rules changed by {user['username']}: {applied}")

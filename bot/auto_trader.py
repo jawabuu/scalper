@@ -885,11 +885,37 @@ class AutoTrader:
             # any typo as enabled too.
             # Free-text settings (no allowed-value set and no bounds) are
             # validated by their own parser, not by a numeric range.
+            # Session switches arrive as a dict, so they cannot go through the
+            # string or numeric paths. Declared as (dict, None, None), `typ is
+            # str` was False and the value fell into the numeric branch, where
+            # it failed — the toggles rendered and did nothing.
+            if typ is dict:
+                if not isinstance(raw, dict):
+                    errors.append(f"{key} must be an object like "
+                                  f'{{"AS": "L1S1", "EU": "L0S1"}}')
+                    continue
+                cleaned, bad = {}, []
+                for k, v in raw.items():
+                    kk = str(k).strip().upper()
+                    vv = str(v).strip().upper()
+                    if kk not in ("AS", "EU", "OV", "US"):
+                        bad.append(kk)
+                        continue
+                    # Anything unreadable resolves to BOTH ON rather than
+                    # silently switching a session off.
+                    lg, sh = parse_session(vv)
+                    cleaned[kk] = f"L{1 if lg else 0}S{1 if sh else 0}"
+                if bad:
+                    errors.append(f"unknown session key(s): {', '.join(bad)}")
+                    continue
+                merged = dict(getattr(self.cfg, key, {}) or {})
+                merged.update(cleaned)
+                setattr(self.cfg, key, merged)
+                applied[key] = merged
+                continue
+
             if typ is str and lo is None and hi is None:
                 val = str(raw).strip()
-                if key == "sessions" and val and not isinstance(val, dict):
-                    errors.append(f"{key} must look like 05:00-11:00")
-                    continue
                 setattr(self.cfg, key, val)
                 applied[key] = val
                 continue
