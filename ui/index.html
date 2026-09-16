@@ -278,6 +278,21 @@
       1.2fr 1.2fr 0.6fr 0.6fr 0.8fr 1.1fr 1.1fr;
   }
   /* The two narrow cards must not be forced wide by their own labels. */
+  /* The history panel shares its row on desktop and takes a full row on
+     mobile, rather than stretching to whatever the widest cell needs. */
+  #guard-history { width: 100%; }
+  #guard-history table { width: 100%; table-layout: fixed; }
+  #guard-history td, #guard-history th { overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 900px) {
+    #guard-history { overflow-x: auto; }
+    #guard-history table { table-layout: auto; min-width: 640px; }
+  }
+  .sess-btn { font: inherit; font-size: 10px; padding: 1px 5px; cursor: pointer;
+              border-radius: 3px; border: 1px solid var(--border);
+              background: transparent; }
+  .sess-on  { color: var(--pos); border-color: var(--pos); }
+  .sess-off { color: var(--muted); opacity: 0.6; }
   .stats-row .stat { min-width: 0; }
   .stats-row .stat-label { white-space: nowrap; overflow: hidden;
                            text-overflow: ellipsis; }
@@ -969,7 +984,15 @@
   <main>
     <!-- Stat strip -->
     <div class="stats-row" id="stats-row">
-      <div class="stat"><div class="stat-label">Portfolio</div><div class="stat-value neu" id="s-portfolio">—</div><div class="stat-sub" id="s-portfolio-sub"></div></div>
+      <div class="stat" style="position:relative">
+        <button id="hide-amounts" onclick="toggleHideAmounts()"
+                title="Hide amounts"
+                style="position:absolute;top:4px;right:5px;background:none;
+                       border:none;cursor:pointer;font-size:12px;padding:0;
+                       line-height:1;opacity:0.55">&#128065;</button>
+        <div class="stat-label">Portfolio</div>
+        <div class="stat-value neu" id="s-portfolio">—</div>
+        <div class="stat-sub" id="s-portfolio-sub"></div></div>
       <!-- SPOT ONLY. On futures this tile was relabelled "Wallet balance" and
            fed the SAME g.wallet_balance as the one before it, so the row
            carried the same figure twice and burned a column doing it. On spot
@@ -1044,8 +1067,24 @@
           <div class="panel-label" style="margin-bottom:0">Futures trade history
             <span id="ft-count" style="color:var(--muted);font-weight:normal;font-size:10px"></span>
           </div>
-          <button class="btn" id="ft-csv" onclick="downloadTradesCsv()"
-                  title="every recorded field, not just the columns shown">CSV</button>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <!-- The table used to render EVERY closed trade. At 60 trades a
+                 day that is thousands of DOM rows for a view whose whole
+                 purpose is the last day or two. -->
+            <select id="ft-window" onchange="onHistWindow()" class="btn"
+                    title="how much history to show in the table"
+                    style="padding:3px 6px">
+              <option value="1">1 day</option>
+              <option value="2" selected>2 days</option>
+              <option value="7">7 days</option>
+              <option value="30">30 days</option>
+              <option value="0">all</option>
+            </select>
+            <button class="btn" onclick="downloadTradesCsv(true)"
+                    title="only the trades currently shown">Export view</button>
+            <button class="btn" onclick="downloadTradesCsv(false)"
+                    title="every trade held, with every recorded field">Export all</button>
+          </div>
         </div>
         <!-- Scrolls rather than growing the page: a full run is hundreds of
              rows, and the analysis below it becomes unreachable otherwise.
@@ -1988,6 +2027,32 @@ function timeAgo(iso) {
 // Timestamps carried only a time, so a row from yesterday looked like one
 // from an hour ago — and reading a trade history across a 24h cycle boundary
 // meant guessing. Show the date whenever it is not today.
+// ── Amount masking ─────────────────────────────────────────────────────────
+// Every dollar figure on the page can be replaced with asterisks, so a
+// screenshot can show percentages and behaviour without showing balances.
+// Percentages stay visible — they are the part worth sharing.
+let _hideAmounts = false;
+
+function money(text) {
+  return _hideAmounts ? '***' : text;
+}
+
+function applyHideAmounts() {
+  const btn = document.getElementById('hide-amounts');
+  if (btn) {
+    btn.textContent = _hideAmounts ? '\u{1F648}' : '\u{1F441}';
+    btn.title = _hideAmounts ? 'Show amounts' : 'Hide amounts';
+  }
+  document.body.dataset.hideAmounts = _hideAmounts ? '1' : '0';
+  try { localStorage.setItem('hideAmounts', _hideAmounts ? '1' : '0'); } catch (e) {}
+}
+
+function toggleHideAmounts() {
+  _hideAmounts = !_hideAmounts;
+  applyHideAmounts();
+  try { refresh(); } catch (e) { location.reload(); }
+}
+
 function stamp(secs) {
   if (!secs) return '';
   const d = new Date(secs * 1000);
@@ -2496,8 +2561,26 @@ async function doFuturesClose(sym) {
 // Export every recorded field, not only the columns on screen — the useful
 // ones for analysis (trough, fees, pnl_source, timing, breakout components)
 // are not all displayed, and a spreadsheet is where slicing actually happens.
-function downloadTradesCsv() {
-  const trades = (_lastFuturesHist && _lastFuturesHist.trades) || [];
+// How many days of history the table shows. The export buttons read the same
+// setting, so "Export view" means exactly what is on screen.
+let _histDays = 2;
+
+function onHistWindow() {
+  const el = document.getElementById('ft-window');
+  _histDays = el ? Number(el.value) : 2;
+  try { localStorage.setItem('histDays', String(_histDays)); } catch (e) {}
+  try { refresh(); } catch (e) {}
+}
+
+function withinWindow(trades) {
+  if (!_histDays) return trades;
+  const cut = (Date.now() / 1000) - _histDays * 86400;
+  return trades.filter(t => (t.closed_at || 0) >= cut);
+}
+
+function downloadTradesCsv(viewOnly) {
+  const all = (_lastFuturesHist && _lastFuturesHist.trades) || [];
+  const trades = viewOnly ? withinWindow(all) : all;
   if (!trades.length) { alert('No closed trades to export yet.'); return; }
 
   // Union of keys across all rows: later trades carry fields older ones lack.
@@ -2528,7 +2611,7 @@ function downloadTradesCsv() {
   const a = document.createElement('a');
   const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
   a.href = url;
-  a.download = `futures-trades-${stamp}.csv`;
+  a.download = `futures-trades-${viewOnly ? `${_histDays || 'all'}d-` : 'all-'}${stamp}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -2545,12 +2628,24 @@ async function refreshFuturesHistory() {
       el.innerHTML = '<div class="empty">No closed futures trades yet</div>';
       return;
     }
-    setEl('ft-count', `· ${d.trades.length} trade${d.trades.length === 1 ? '' : 's'}`);
-    const rows = d.trades.map(t => {
+    // Render only the window. The count says both figures so it is obvious
+    // that the table is a view, not the whole record.
+    const shown = withinWindow(d.trades);
+    setEl('ft-count', _histDays
+      ? `· ${shown.length} of ${d.trades.length} · last ${_histDays}d`
+      : `· ${d.trades.length} trade${d.trades.length === 1 ? '' : 's'}`);
+    if (!shown.length) {
+      el.innerHTML = `<div class="empty">No trades closed in the last `
+        + `${_histDays} day${_histDays === 1 ? '' : 's'} — `
+        + `${d.trades.length} held in total</div>`;
+      return;
+    }
+    const rows = shown.map(t => {
       const pnl = t.realised_pnl_usdt;
       const pnlCell = (pnl === null || pnl === undefined)
         ? '<span style="color:var(--muted)">n/a</span>'
-        : `<span class="${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}$${pnl}</span>`;
+        : `<span class="${pnl >= 0 ? 'pos' : 'neg'}">` +
+          money(`${pnl >= 0 ? '+' : ''}$${pnl}`) + `</span>`;
       const fin = t.final_roi;
       const finCell = (fin === null || fin === undefined) ? '—'
         : `<span class="${fin >= 0 ? 'pos' : 'neg'}">${fin >= 0 ? '+' : ''}${fin}%</span>`;
@@ -2674,15 +2769,15 @@ function renderFuturesStats(g, hist) {
     ? scored.reduce((a, t) => a + t.final_roi, 0) / scored.length : null;
 
   const bal = (g && g.wallet_balance) || 0;
-  setEl('s-portfolio', `$${bal.toFixed(2)}`);
+  setEl('s-portfolio', money(`$${bal.toFixed(2)}`));
   // "no open positions" belongs on the Positions card, not under the wallet.
   setEl('s-portfolio-sub', '');
   setEl('s-open-sub', openCount ? 'open' : 'none open');
-  setEl('s-balance', `$${bal.toFixed(2)}`);
+  setEl('s-balance', money(`$${bal.toFixed(2)}`));
   setEl('s-open', String(openCount));
   setEl('s-total', String(trades.length));
   setEl('s-winrate', scored.length ? `${Math.round(wins / scored.length * 100)}%` : '—');
-  setEl('s-pnl', realised ? `${realised >= 0 ? '+' : ''}$${realised.toFixed(2)}` : '—');
+  setEl('s-pnl', realised ? money(`${realised >= 0 ? '+' : ''}$${realised.toFixed(2)}`) : '—');
   setEl('s-pnl-usdt', 'realised');
   setEl('s-avg', avgRoi === null ? '—' : `${avgRoi >= 0 ? '+' : ''}${avgRoi.toFixed(1)}% ROI`);
 
@@ -2693,6 +2788,23 @@ function renderFuturesStats(g, hist) {
 
 document.addEventListener('DOMContentLoaded', () => {
   try { _view = localStorage.getItem('dashView') || 'futures'; } catch (e) {}
+  // HIDE_CARD_AMOUNTS sets the default; the eye toggle overrides it and the
+  // choice sticks per browser.
+  try {
+    const saved = localStorage.getItem('hideAmounts');
+    _hideAmounts = saved === null
+      ? (document.body.dataset.hideAmountsDefault === '1')
+      : saved === '1';
+  } catch (e) {}
+  try {
+    const hd = localStorage.getItem('histDays');
+    if (hd !== null) {
+      _histDays = Number(hd);
+      const el = document.getElementById('ft-window');
+      if (el) el.value = String(_histDays);
+    }
+  } catch (e) {}
+  applyHideAmounts();
   applyView();
 });
 
@@ -2808,7 +2920,44 @@ function statRow(s) {
 // Time buckets get their own renderer: the point is comparing LONG against
 // SHORT within the same hours, so both directions sit side by side rather than
 // in separate tables where the regime differs between them.
-function timeTable(title, rows, note) {
+// Maps the session table's own row labels to the SESSION_* keys, so a toggle
+// sits beside the numbers that justify it rather than in a settings panel
+// three screens away.
+// Last known session switches, refreshed from /api/auto-trade.
+let _autoSessions = {};
+
+const SESSION_KEYS = {
+  'Asia': 'AS', 'Europe': 'EU', 'EU/US overlap': 'OV', 'US': 'US',
+};
+
+function sessionToggles(label) {
+  const key = SESSION_KEYS[label];
+  if (!key) return '';
+  const spec = (_autoSessions || {})[key] || 'L1S1';
+  const on = (d) => d === 'L' ? !/L0/.test(spec) : !/S0/.test(spec);
+  const btn = (d) => {
+    const isOn = on(d);
+    return `<button onclick="toggleSession('${key}','${d}')" `
+      + `class="sess-btn ${isOn ? 'sess-on' : 'sess-off'}" `
+      + `title="${d === 'L' ? 'longs' : 'shorts'} ${isOn ? 'on' : 'off'} `
+      + `in this session (UTC hours)">${d}${isOn ? '1' : '0'}</button>`;
+  };
+  return `<td class="num">${btn('L')} ${btn('S')}</td>`;
+}
+
+function toggleSession(key, dir) {
+  const cur = (_autoSessions || {})[key] || 'L1S1';
+  const lg = !/L0/.test(cur), sh = !/S0/.test(cur);
+  const next = dir === 'L'
+    ? `L${lg ? 0 : 1}S${sh ? 1 : 0}`
+    : `L${lg ? 1 : 0}S${sh ? 0 : 1}`;
+  const sessions = Object.assign({}, _autoSessions || {});
+  sessions[key] = next;
+  _autoSessions = sessions;          // optimistic, corrected on next refresh
+  onAutoRuleValue('sessions', sessions);
+}
+
+function timeTable(title, rows, note, withToggles) {
   const body = (rows || []).filter(r => r.n).map(r => {
     const cell = (d) => !d || !d.n
       ? '<td class="scan-note">—</td>'
@@ -2820,7 +2969,8 @@ function timeTable(title, rows, note) {
       <td class="num ${(r.expectancy_usdt ?? 0) >= 0 ? 'pos' : 'neg'}">${
         r.expectancy_usdt === null || r.expectancy_usdt === undefined
           ? '—' : (r.expectancy_usdt >= 0 ? '+$' : '-$') + Math.abs(r.expectancy_usdt).toFixed(2)}</td>
-      ${cell(r.long)}${cell(r.short)}</tr>`;
+      ${cell(r.long)}${cell(r.short)}`
+      + (withToggles ? sessionToggles(r.label) : '') + `</tr>`;
   }).join('');
   if (!body) return `<div><div class="panel-label">${title}</div>
     <div class="empty" style="padding:12px">no trades yet</div></div>`;
@@ -2828,6 +2978,7 @@ function timeTable(title, rows, note) {
     <table><thead><tr><th></th><th class="num">n</th><th class="num">avg ROI</th>
     <th class="num">expectancy</th>
     <th class="num">LONG n·win·ROI</th><th class="num">SHORT n·win·ROI</th>
+    ${withToggles ? '<th class="num">trade</th>' : ''}
     </tr></thead><tbody>${body}</tbody></table>
     ${note ? `<div class="scan-note" style="margin-top:6px">${note}</div>` : ''}</div>`;
 }
@@ -2879,9 +3030,36 @@ async function refreshAnalysis() {
     // return on capital, which divides by the SUM of margins across sequential
     // trades — the same money recycled, so that is return per unit of
     // turnover, not growth of the account.
+    // WALLET FIRST. The headline used to be the figure reconstructed from the
+    // trade record, with the actual balance relegated to a warning — so the
+    // card led with a number the account did not have. The wallet is the
+    // truth; the trade record excludes unverified trades and is the estimate.
     const ar = a.account_return || {};
     const arEl = document.getElementById('s-acct');
-    if (ar.pct === null || ar.pct === undefined) {
+    const walletPct = (ar.wallet_pct === null || ar.wallet_pct === undefined)
+      ? null : Number(ar.wallet_pct);
+    const botPct = (ar.pct === null || ar.pct === undefined)
+      ? null : Number(ar.pct);
+    if (walletPct !== null) {
+      setEl('s-acct', (walletPct >= 0 ? '+' : '') + walletPct.toFixed(2) + '%');
+      if (arEl) arEl.className = 'stat-value '
+        + (walletPct > 0 ? 'pos' : (walletPct < 0 ? 'neg' : 'neu'));
+      if (botPct === null) {
+        setEl('s-acct-sub', 'wallet');
+      } else {
+        // Gap is WALLET MINUS BOT, so a negative sign means the trade record
+        // is claiming more than the account holds.
+        const gap = (ar.wallet_gap === null || ar.wallet_gap === undefined)
+          ? null : -Math.abs(Number(ar.wallet_gap))
+              * (walletPct >= botPct ? -1 : 1);
+        setEl('s-acct-sub',
+          `<span style="color:var(--warn)">bot ${botPct >= 0 ? '+' : ''}`
+          + `${botPct.toFixed(2)}%`
+          + (gap === null ? '' :
+             `<br>gap ${gap >= 0 ? '+' : '-'}$${money(Math.abs(gap).toFixed(2))}`)
+          + `</span>`);
+      }
+    } else if (ar.pct === null || ar.pct === undefined) {
       setEl('s-acct', '\u2014');
       setEl('s-acct-sub', ar.error ? 'unavailable' : 'no baseline yet');
       if (arEl) arEl.className = 'stat-value neu';
@@ -2906,6 +3084,20 @@ async function refreshAnalysis() {
       setEl('s-acct-sub', sub);
     }
 
+    // HIDE_CARD_AMOUNTS arrives with the report, since the dashboard is
+    // served statically and cannot be templated. localStorage still wins once
+    // the operator has touched the toggle.
+    if (a.ui && a.ui.hide_amounts_default !== undefined) {
+      document.body.dataset.hideAmountsDefault =
+        a.ui.hide_amounts_default ? '1' : '0';
+      let touched = null;
+      try { touched = localStorage.getItem('hideAmounts'); } catch (e) {}
+      if (touched === null && a.ui.hide_amounts_default && !_hideAmounts) {
+        _hideAmounts = true;
+        applyHideAmounts();
+      }
+    }
+
     // The day card. Always rendered: it never yields its subtitle to a
     // warning, so the daily figure is present whatever the wallet says.
     const dy = a.day || {};
@@ -2913,7 +3105,7 @@ async function refreshAnalysis() {
     if (dy.pct === null || dy.pct === undefined) {
       setEl('s-day', '\u2014');
       setEl('s-day-sub', dy.error ? 'unavailable'
-        : (dy.baseline ? `$${Number(dy.baseline).toFixed(2)} start · no closed trades`
+        : (dy.baseline ? money(`$${Number(dy.baseline).toFixed(2)}`) + ' start · no closed trades'
                        : 'no baseline yet'));
       if (dyEl) dyEl.className = 'stat-value neu';
     } else {
@@ -2925,9 +3117,9 @@ async function refreshAnalysis() {
       // Kept to two short clauses: the long form wrapped to three lines and
       // stretched the whole row.
       setEl('s-day-sub',
-        `${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`
+        money(`${dy.net_pnl >= 0 ? '+' : ''}$${Number(dy.net_pnl).toFixed(2)}`)
         + ` · ${dy.trades}t${dy.trades ? ` ${dy.wins}W` : ''}`
-        + `<br>from $${Number(dy.baseline || 0).toFixed(0)} · ${tz}`);
+        + `<br>from ` + money(`$${Number(dy.baseline || 0).toFixed(0)}`) + ` · ${tz}`);
     }
 
     // Return on the capital actually committed, not a mean of ROI percentages
@@ -2943,7 +3135,7 @@ async function refreshAnalysis() {
       setEl('s-roc', (roc >= 0 ? '+' : '') + Number(roc).toFixed(2) + '%');
       if (rocEl) rocEl.className = 'stat-value ' + (roc > 0 ? 'pos' : (roc < 0 ? 'neg' : 'neu'));
       setEl('s-roc-sub', o.capital_deployed
-        ? `on $${Number(o.capital_deployed).toFixed(0)} deployed`
+        ? 'on ' + money(`$${Number(o.capital_deployed).toFixed(0)}`) + ' deployed'
         : 'net of fees');
     }
 
@@ -2956,9 +3148,9 @@ async function refreshAnalysis() {
         setEl('s-fees', '—');
         setEl('s-fees-sub', 'no fee data yet');
       } else {
-        setEl('s-fees', '-$' + Number(fees).toFixed(2));
+        setEl('s-fees', money('-$' + Number(fees).toFixed(2)));
         const per = o.n ? (fees / o.n) : 0;
-        setEl('s-fees-sub', `$${per.toFixed(2)} per trade`);
+        setEl('s-fees-sub', money(`$${per.toFixed(2)}`) + ' per trade');
       }
     }
 
@@ -3044,7 +3236,7 @@ async function refreshAnalysis() {
       timeTable('By session (entry time, UTC)', a.by_session || [],
                 'Comparing directions WITHIN the same hours controls for the '
                 + 'market regime — unlike comparing long against short across '
-                + 'a whole run, where one side may simply have matched the trend.'),
+                + 'a whole run, where one side may simply have matched the trend.', true),
       timeTable('By hour of entry (UTC)', a.by_hour || [],
                 'Twenty-four buckets stay insufficient for a long time. Read '
                 + 'the session table first.'),
@@ -3228,6 +3420,7 @@ async function refreshAuto() {
     }
 
     const c = a.config || {};
+    if (c.sessions) _autoSessions = c.sessions;
     const cool = Object.keys(a.cooldowns || {}).length;
     setEl('auto-meta',
       (a.halted_reason ? a.halted_reason + ' · ' : '')

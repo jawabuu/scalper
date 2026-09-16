@@ -217,6 +217,11 @@ def create_app(engine) -> FastAPI:
                 # demo is nearly permanent — so the daily figure disappeared
                 # exactly where it was wanted.
                 from bot.auto_trader import DAY_TZ_OFFSET_H
+                # The dashboard is a static nginx file, so a server-side
+                # default cannot be templated into it — it travels here.
+                from bot.config import BotConfig as _BC
+                report["ui"] = {
+                    "hide_amounts_default": bool(_BC().hide_card_amounts)}
                 report["day"] = day_report(
                     trades,
                     day_baseline=day_base,

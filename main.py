@@ -5,6 +5,7 @@ Starts the FastAPI dashboard in a background thread, then runs the bot loop.
 """
 
 import logging
+from pathlib import Path
 import threading
 import os
 import sys
@@ -125,6 +126,13 @@ if __name__ == "__main__":
                     "FUTURES_STATE_RESET is set — this runs on EVERY restart "
                     "while present. Remove it from the environment once the "
                     "cleanup has happened.")
+            # Attach BEFORE load_state so the restore path can migrate any
+            # trades still sitting in the state file.
+            guardian.attach_journal(
+                cfg.trade_journal_path
+                or str(Path(cfg.futures_state_path).with_name("trades.jsonl")),
+                max_bytes=cfg.trade_journal_max_mb * 1024 * 1024,
+                keep_archives=cfg.trade_journal_keep)
             guardian.load_state(cfg.futures_state_path)
             guardian.verify_state_path()
         set_guardian(guardian)

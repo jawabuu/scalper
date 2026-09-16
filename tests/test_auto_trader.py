@@ -839,44 +839,10 @@ def test_empty_or_bad_window_means_no_restriction():
     assert in_window(parse_window("99:00-11:00")) is True
 
 
-def test_entries_declined_outside_the_window():
-    a = _switch_trader(False)
-    a.cfg.trading_window = "05:00-11:00"
-    import bot.auto_trader as at
-    real = at.in_window
-    try:
-        at.in_window = lambda w, now=None: False
-        ok, why = check_safety(a.state, a.cfg, balance=5000.0,
-                               open_positions=0, symbol="X")
-        assert not ok and "trading window" in why
-    finally:
-        at.in_window = real
-
-
-def test_entries_allowed_inside_the_window():
-    a = _switch_trader(False)
-    a.cfg.trading_window = "05:00-11:00"
-    import bot.auto_trader as at
-    real = at.in_window
-    try:
-        at.in_window = lambda w, now=None: True
-        ok, _ = check_safety(a.state, a.cfg, balance=5000.0,
-                             open_positions=0, symbol="X")
-        assert ok
-    finally:
-        at.in_window = real
-
-
-def test_window_is_live_editable():
-    a = _trader()
-    applied, errors = a.update_rules({"trading_window": "05:00-11:00"})
-    assert not errors and a.cfg.trading_window == "05:00-11:00"
-
-
-# ── ATR floor ────────────────────────────────────────────────────────────────
-
-def _atr_cfg(floor):
-    return AutoTradeConfig(min_atr_pct=floor, long_rsi_min=45, long_rsi_max=52,
+def _atr_cfg(min_atr):
+    """Restored: my removal of the trading-window tests took this with it."""
+    return AutoTradeConfig(enabled=True, min_atr_pct=min_atr,
+                           long_rsi_min=45, long_rsi_max=52,
                            short_rsi_min=75, max_dist_to_extreme_pct=3.0,
                            required_strength_sweeps=2)
 
@@ -912,3 +878,63 @@ def test_atr_floor_is_live_editable():
     a = _trader()
     applied, errors = a.update_rules({"min_atr_pct": 0.5})
     assert not errors and a.cfg.min_atr_pct == 0.5
+
+
+# ── Session gate (replaces the single trading window) ──────────────────────
+
+def test_a_session_spec_parses_both_directions():
+    from bot.auto_trader import parse_session
+    assert parse_session("L1S1") == (True, True)
+    assert parse_session("L0S1") == (False, True)
+    assert parse_session("L1S0") == (True, False)
+    assert parse_session("L0S0") == (False, False)
+
+
+def test_an_unreadable_spec_leaves_trading_ON():
+    """
+    A typo must never silently stop trading — that is a failure discovered
+    hours later, having lost the data the run existed to collect.
+    """
+    from bot.auto_trader import parse_session
+    for junk in ("", None, "nonsense", "LS", "  "):
+        assert parse_session(junk) == (True, True)
+
+
+def test_sessions_map_to_the_UTC_hours_of_the_analysis_table():
+    import time as _t
+    from bot.auto_trader import session_key
+    def at_hour(h):
+        return _t.calendar.timegm((2026, 9, 16, h, 0, 0, 0, 0, 0)) \
+            if hasattr(_t, "calendar") else None
+    import calendar
+    for h, want in ((0, "AS"), (7, "AS"), (8, "EU"), (12, "EU"),
+                    (13, "OV"), (16, "OV"), (17, "US"), (23, "US")):
+        ts = calendar.timegm((2026, 9, 16, h, 30, 0, 0, 0, 0))
+        assert session_key(ts) == want, (h, session_key(ts))
+
+
+def test_a_direction_can_be_switched_off_for_one_session_only():
+    import calendar
+    from bot.auto_trader import AutoTradeConfig, session_allows
+    cfg = AutoTradeConfig(sessions={"AS": "L1S1", "EU": "L0S0",
+                                    "OV": "L1S1", "US": "L0S1"})
+    us = calendar.timegm((2026, 9, 16, 20, 0, 0, 0, 0, 0))
+    ok, why = session_allows(cfg, "short", us)
+    assert ok
+    ok, why = session_allows(cfg, "long", us)
+    assert not ok and "US session" in why
+
+    asia = calendar.timegm((2026, 9, 16, 3, 0, 0, 0, 0, 0))
+    assert session_allows(cfg, "long", asia)[0]
+    assert session_allows(cfg, "short", asia)[0]
+
+    eu = calendar.timegm((2026, 9, 16, 10, 0, 0, 0, 0, 0))
+    assert not session_allows(cfg, "long", eu)[0]
+    assert not session_allows(cfg, "short", eu)[0]
+
+
+def test_every_session_defaults_to_on():
+    from bot.auto_trader import AutoTradeConfig
+    cfg = AutoTradeConfig()
+    assert set(cfg.sessions) == {"AS", "EU", "OV", "US"}
+    assert all(v == "L1S1" for v in cfg.sessions.values())

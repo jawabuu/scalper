@@ -353,6 +353,7 @@ class FuturesGuardian:
         self._actions: list[dict] = []   # recent actions, for the dashboard
         self._pos_meta: dict[str, dict] = {}   # symbol -> sizing snapshot
         self._closed_trades: list[dict] = []   # futures trade history
+        self._journal = None                  # set by attach_journal()
         # symbol -> (high, low, fetched_at). Some ticker payloads omit high/low,
         # so the 24h range is derived from candles as a fallback and cached —
         # the guardian polls every few seconds and must not refetch 24h of
@@ -2003,7 +2004,19 @@ class FuturesGuardian:
                     if m.get(k) is not None:
                         meta[k] = m[k]
             if not self._closed_trades:
-                self._closed_trades = list(data.get("closed_trades") or [])
+                # The journal is the source of truth. The state file is read
+                # only to MIGRATE trades written before the journal existed —
+                # once, because import_existing refuses a non-empty journal.
+                jr = getattr(self, "_journal", None)
+                from_state = list(data.get("closed_trades") or [])
+                if jr is not None:
+                    if from_state:
+                        jr.import_existing(from_state)
+                    self._closed_trades = jr.load(limit=self.max_closed_trades)
+                    if not self._closed_trades and from_state:
+                        self._closed_trades = from_state
+                else:
+                    self._closed_trades = from_state
         self._restored_safety = data.get("safety") or {}
         self._restored_placed_orders = data.get("placed_orders") or {}
         if data.get("wallet_start") and self.wallet_start is None:
@@ -2063,6 +2076,34 @@ class FuturesGuardian:
                 f"Check the volume mount is writable.")
             return False
 
+    def attach_journal(self, path: str, max_bytes: int | None = None,
+                       keep_archives: int | None = None):
+        """
+        Give the guardian an append-only trade journal.
+
+        Without one it falls back to keeping trades in the state file, which
+        still works — it is just the arrangement that rewrites 11 MB every
+        2.5 seconds and drops history past the cap.
+        """
+        try:
+            from bot.trade_journal import (TradeJournal, DEFAULT_MAX_BYTES,
+                                           DEFAULT_KEEP_ARCHIVES)
+            self._journal = TradeJournal(
+                path,
+                max_bytes=max_bytes or DEFAULT_MAX_BYTES,
+                keep_archives=(DEFAULT_KEEP_ARCHIVES if keep_archives is None
+                               else keep_archives))
+            log.info(f"Trade journal at {path} — trades are appended once each "
+                     f"instead of rewritten with the state file every cycle.")
+        except Exception as e:
+            log.error(f"trade journal unavailable ({e}); falling back to the "
+                      f"state file")
+            self._journal = None
+
+    def journal_stats(self) -> dict:
+        jr = getattr(self, "_journal", None)
+        return jr.stats() if jr is not None else {}
+
     def save_state(self):
         if not self.state_path:
             return
@@ -2076,6 +2117,11 @@ class FuturesGuardian:
         with self._lock:
             stop_ids = {k: list(v) for k, v in self._all_stop_ids.items()}
             pending = {k: list(v) for k, v in self._pending_cancels.items()}
+        # Trades go to the journal, so they are NOT rewritten here. At the old
+        # 5000-trade cap this call serialised 11 MB every 2.5 seconds — 383 GB
+        # of disk writes a day to persist a few kilobytes of changed state.
+        if getattr(self, "_journal", None) is not None:
+            trades = []
         futures_state.save(self.state_path, states=states, pos_meta=meta,
                            closed_trades=trades, owner=self.state_owner,
                            placed_orders=placed, stop_ids=stop_ids,
@@ -2555,6 +2601,11 @@ class FuturesGuardian:
             "opened_at": meta.get("opened_seen_at"),
             "closed_at": time.time(),
         }
+        # The journal is the durable record. Appended ONCE per trade rather
+        # than rewritten with the whole state file every 2.5s cycle.
+        jr = getattr(self, "_journal", None)
+        if jr is not None:
+            jr.append(rec)
         with self._lock:
             self._closed_trades.append(rec)
             self._last_closed_rec = rec

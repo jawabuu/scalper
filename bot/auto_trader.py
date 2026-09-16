@@ -92,7 +92,11 @@ class AutoTradeConfig:
     # Restrict entries to a window of the UTC day, e.g. "05:00-11:00". Empty
     # means trade around the clock. Exits are NEVER restricted — a position
     # opened inside the window is managed normally until it closes.
-    trading_window: str = ""
+    # Per-session, per-direction switches. "L1S1" = longs and shorts both on.
+    # Keys are the SESSIONS defined in analysis.py, on UTC hours — independent
+    # of DAY_TZ_OFFSET_H, which only moves the daily accounting boundary.
+    sessions: dict = field(default_factory=lambda: {
+        "AS": "L1S1", "EU": "L1S1", "OV": "L1S1", "US": "L1S1"})
     # Minimum ATR to enter at all. A coin that barely moves cannot clear its
     # own round-trip fee: 68 entries below 0.3% ATR won 26.5% and lost 747
     # USDT, while 0.7-1.5% won 82.4% and made 285.
@@ -534,6 +538,51 @@ def in_window(window, now_utc=None) -> bool:
     return cur >= start or cur < end     # wraps past midnight
 
 
+# UTC hour ranges, matching analysis.SESSIONS so the toggles line up with the
+# table they are read from.
+SESSION_HOURS = (("AS", 0, 8), ("EU", 8, 13), ("OV", 13, 17), ("US", 17, 24))
+SESSION_NAMES = {"AS": "Asia", "EU": "Europe", "OV": "EU/US overlap", "US": "US"}
+
+
+def session_key(now: float | None = None) -> str:
+    """Which session a moment falls in, by UTC hour."""
+    h = _time.gmtime(now or _time.time()).tm_hour
+    for key, lo, hi in SESSION_HOURS:
+        if lo <= h < hi:
+            return key
+    return "US"
+
+
+def parse_session(spec) -> tuple[bool, bool]:
+    """
+    "L1S1" -> (long_on, short_on). Anything unreadable means BOTH ON.
+
+    Defaulting to on matters: a typo in an env var must not silently stop
+    trading, which is the failure an operator discovers hours later.
+    """
+    try:
+        t = str(spec or "").strip().upper()
+        if not t:
+            return True, True
+        lg = "L0" not in t
+        sh = "S0" not in t
+        return lg, sh
+    except Exception:
+        return True, True
+
+
+def session_allows(cfg, side: str, now: float | None = None) -> tuple[bool, str]:
+    key = session_key(now)
+    spec = (getattr(cfg, "sessions", None) or {}).get(key)
+    lg, sh = parse_session(spec)
+    on = lg if side == "long" else sh
+    if on:
+        return True, ""
+    return False, (f"{side}s are switched off for the "
+                   f"{SESSION_NAMES.get(key, key)} session "
+                   f"({spec or 'L1S1'}, UTC hours)")
+
+
 def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
                  open_positions: int, symbol: str,
                  current_rsi: float | None = None, side: str = "short",
@@ -555,10 +604,15 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
     # that only shows up when someone comes back and finds it stopped.
     # Outside the trading window nothing new is opened. Checked first because
     # it is the cheapest test and the most common reason to decline.
-    win = parse_window(getattr(cfg, "trading_window", ""))
-    if not in_window(win):
-        return False, (f"outside the trading window "
-                       f"{getattr(cfg, 'trading_window', '')} UTC")
+    # A session gate rather than one window. Both directions used to share a
+    # single time range, but the two behave differently within the same hours:
+    # across 329 trades, US shorts returned +7.91% avg ROI while US longs
+    # returned -2.72%, and Asia was the only session where both sides were
+    # positive. One window cannot express that; two overlapping time gates
+    # would be a second place for a coverage hole to open.
+    ok_session, session_why = session_allows(cfg, side, now)
+    if not ok_session:
+        return False, session_why
 
     halt_on = getattr(cfg, "daily_halt_enabled", True)
     if not halt_on and state.halted_reason:
@@ -745,7 +799,8 @@ class AutoTrader:
                 "long_rsi_max": self.cfg.long_rsi_max,
                 "directions": self.cfg.directions,
                 "daily_halt_enabled": self.cfg.daily_halt_enabled,
-                "trading_window": self.cfg.trading_window,
+                "sessions": dict(self.cfg.sessions or {}),
+                "session_now": session_key(),
                 "min_atr_pct": self.cfg.min_atr_pct,
                 "short_rsi_min": self.cfg.short_rsi_min,
                 "callback_ratio": self.cfg.callback_ratio,
@@ -790,7 +845,7 @@ class AutoTrader:
         # set of allowed values instead of an upper bound.
         "directions": (str, None, ("all", "long", "short")),
         "daily_halt_enabled": (bool, None, (True, False)),
-        "trading_window": (str, None, None),
+        "sessions": (dict, None, None),
         "min_atr_pct": (float, 0.0, 10.0),
         "short_rsi_min": (float, 0.0, 100.0),
         "callback_ratio": (float, 0.05, 2.0),
@@ -832,7 +887,7 @@ class AutoTrader:
             # validated by their own parser, not by a numeric range.
             if typ is str and lo is None and hi is None:
                 val = str(raw).strip()
-                if key == "trading_window" and val and parse_window(val) is None:
+                if key == "sessions" and val and not isinstance(val, dict):
                     errors.append(f"{key} must look like 05:00-11:00")
                     continue
                 setattr(self.cfg, key, val)

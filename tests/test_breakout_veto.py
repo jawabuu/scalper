@@ -2845,3 +2845,209 @@ def test_the_open_positions_subtitle_moved_to_the_positions_card():
     assert 'id="s-open-sub"' in ui
     assert "setEl('s-open-sub'" in ui
     assert "setEl('s-portfolio-sub', '');" in ui
+
+
+# ── Account return: wallet first ───────────────────────────────────────────
+
+def test_the_wallet_is_the_headline_not_the_trade_record():
+    """
+    The card led with the figure reconstructed from the trade record and
+    relegated the actual balance to a warning — showing +7.22% when the wallet
+    said +6.15%. The wallet is the truth; the record excludes unverified
+    trades.
+    """
+    ui = _ui()
+    i = ui.index("// WALLET FIRST.")
+    block = ui[i:i + 1800]
+    assert "setEl('s-acct', (walletPct" in block
+    assert "bot ${botPct" in block
+
+
+def test_the_gap_is_signed_wallet_minus_bot():
+    ui = _ui()
+    i = ui.index("// WALLET FIRST.")
+    block = ui[i:i + 1800]
+    assert "WALLET MINUS BOT" in block
+    assert "gap ${gap >= 0 ? '+' : '-'}" in block
+
+
+# ── Amount masking ─────────────────────────────────────────────────────────
+
+def test_every_card_dollar_figure_goes_through_the_mask():
+    ui = _ui()
+    for call in ("setEl('s-portfolio', money(",
+                 "setEl('s-balance', money(",
+                 "setEl('s-fees', money(",
+                 "setEl('s-pnl', realised ? money("):
+        assert call in ui, call
+
+
+def test_the_trade_history_column_is_masked_too():
+    """Cards alone would leave every row below showing the figures."""
+    ui = _ui()
+    i = ui.index("const pnl = t.realised_pnl_usdt") if "const pnl = t.realised_pnl_usdt" in ui else 0
+    assert "money(`${pnl >= 0 ? '+' : ''}$${pnl}`)" in ui
+
+
+def test_percentages_are_never_masked():
+    """They are the part worth sharing — the point is to hide balances."""
+    ui = _ui()
+    assert "setEl('s-winrate'" in ui
+    i = ui.index("setEl('s-winrate'")
+    assert "money(" not in ui[i:i + 120]
+
+
+def test_the_toggle_persists_and_has_a_server_default():
+    ui = _ui()
+    assert "localStorage.setItem('hideAmounts'" in ui
+    assert "hide_amounts_default" in ui
+    from bot.config import BotConfig
+    assert BotConfig().hide_card_amounts is False
+
+
+# ── Session toggles in the UI ──────────────────────────────────────────────
+
+def test_only_the_session_table_gets_toggles():
+    """
+    The toggle belongs beside the numbers that justify it. Every other
+    timeTable is read-only.
+    """
+    ui = _ui()
+    i = ui.index("timeTable('By session (entry time, UTC)'")
+    j = ui.index("timeTable('By hour of entry (UTC)'")
+    assert "trend.', true)" in ui[i:j]
+    k = ui.index("timeTable('By market breadth at entry'")
+    assert ", true)" not in ui[k:k + 400]
+
+
+def test_the_toggle_writes_through_the_existing_rules_endpoint():
+    from pathlib import Path
+    ui = _ui()
+    assert "onAutoRuleValue('sessions', sessions)" in ui
+    assert '"sessions": (dict, None, None),' in Path("bot/auto_trader.py").read_text()
+
+
+def test_the_labels_map_to_the_session_keys():
+    ui = _ui()
+    for label, key in (("Asia", "AS"), ("Europe", "EU"),
+                       ("EU/US overlap", "OV"), ("US", "US")):
+        assert f"'{label}': '{key}'" in ui
+
+
+# ── Trade journal ───────────────────────────────────────────────────────────
+#
+# Closed trades lived in futures_state.json, which save_state() rewrites in
+# FULL every guardian cycle — 34,560 times a day. At the 5000-trade cap that is
+# an 11 MB serialise every 2.5s, ~383 GB of disk writes a day, to persist a few
+# kilobytes of changed state. And the cap silently DROPPED trades past ~83 days.
+
+def _journal(tmp_path, **kw):
+    from bot.trade_journal import TradeJournal
+    return TradeJournal(str(tmp_path / "trades.jsonl"), **kw)
+
+
+def _rec(i):
+    return {"symbol": f"X{i}/USDT:USDT", "side": "short",
+            "realised_pnl_usdt": float(i), "closed_at": 1_000_000.0 + i}
+
+
+def test_trades_round_trip(tmp_path):
+    j = _journal(tmp_path)
+    for i in range(50):
+        assert j.append(_rec(i))
+    out = j.load()
+    assert len(out) == 50
+    assert out[0]["symbol"] == "X0/USDT:USDT"
+    assert out[-1]["symbol"] == "X49/USDT:USDT"
+
+
+def test_a_limit_returns_the_most_recent(tmp_path):
+    j = _journal(tmp_path)
+    for i in range(50):
+        j.append(_rec(i))
+    out = j.load(limit=5)
+    assert [t["symbol"] for t in out] == [f"X{i}/USDT:USDT" for i in range(45, 50)]
+
+
+def test_rotation_archives_rather_than_discards(tmp_path):
+    """
+    The old cap threw the oldest trades away. Rotation moves whole files aside
+    and load() reads back through them, so nothing is lost.
+    """
+    j = _journal(tmp_path, max_bytes=300, keep_archives=50)
+    for i in range(60):
+        j.append(_rec(i))
+    out = j.load()
+    assert len(out) == 60
+    assert [t["symbol"] for t in out] == [f"X{i}/USDT:USDT" for i in range(60)]
+    assert j.stats()["archives"] >= 1
+
+
+def test_two_rotations_in_one_second_do_not_collide(tmp_path):
+    j = _journal(tmp_path, max_bytes=120, keep_archives=50)
+    for i in range(40):
+        j.append(_rec(i))
+    assert len(j.load()) == 40          # nothing overwritten
+
+
+def test_a_corrupt_tail_line_does_not_lose_the_file(tmp_path):
+    """A partial write is the expected state after a hard kill."""
+    j = _journal(tmp_path)
+    for i in range(10):
+        j.append(_rec(i))
+    with open(j.path, "a", encoding="utf-8") as fh:
+        fh.write('{"symbol": "TRUNCA')
+    out = j.load()
+    assert len(out) == 10
+
+
+def test_migration_runs_once_and_only_once(tmp_path):
+    j = _journal(tmp_path)
+    old = [_rec(i) for i in range(5)]
+    assert j.import_existing(old) == 5
+    assert j.import_existing(old) == 0      # journal is no longer empty
+    assert len(j.load()) == 5
+
+
+def test_an_unwritable_journal_never_raises(tmp_path):
+    from bot.trade_journal import TradeJournal
+    j = TradeJournal("/proc/nope/trades.jsonl")
+    assert j.append(_rec(1)) is False       # logged, not raised
+    assert j.load() == []
+
+
+def test_the_state_file_no_longer_carries_trades():
+    """The whole point: save_state() must not serialise the history."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.save_state)
+    assert 'if getattr(self, "_journal", None) is not None:' in src
+    assert "trades = []" in src
+
+
+def test_the_guardian_appends_once_per_trade():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert "jr.append(rec)" in src
+
+
+# ── History view window ────────────────────────────────────────────────────
+
+def test_the_table_renders_a_window_not_the_whole_record():
+    ui = _ui()
+    assert "const shown = withinWindow(d.trades);" in ui
+    assert 'id="ft-window"' in ui
+
+
+def test_both_exports_exist_and_differ():
+    ui = _ui()
+    assert "downloadTradesCsv(true)" in ui       # view
+    assert "downloadTradesCsv(false)" in ui      # all
+    assert "const trades = viewOnly ? withinWindow(all) : all;" in ui
+
+
+def test_the_count_shows_both_figures():
+    """So it is obvious the table is a view, not the whole record."""
+    ui = _ui()
+    assert "of ${d.trades.length} · last ${_histDays}d" in ui

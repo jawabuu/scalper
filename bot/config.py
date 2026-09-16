@@ -254,6 +254,15 @@ class BotConfig:
         0.5, _env_float("GUARDIAN_PENDING_POLL_INTERVAL", 1.0)))
     # Persists restart-critical futures state: sized stops, position peaks, the
     # daily-loss baseline, cooldowns and trade history. Empty disables it.
+    # Closed trades live in their own append-only file, not in the state file
+    # that is rewritten every guardian cycle. Empty means "trades.jsonl beside
+    # the state file".
+    trade_journal_path: str = field(default_factory=lambda: _env(
+        "TRADE_JOURNAL_PATH", "").strip())
+    trade_journal_max_mb: int = field(default_factory=lambda: _env_int(
+        "TRADE_JOURNAL_MAX_MB", 32))
+    trade_journal_keep: int = field(default_factory=lambda: _env_int(
+        "TRADE_JOURNAL_KEEP", 12))
     futures_state_path: str = field(default_factory=lambda: _env(
         "FUTURES_STATE_PATH", "/app/logs/futures_state.json"))
     # One-shot cleanup on startup: "history" drops closed trades only (keeps
@@ -325,6 +334,10 @@ class BotConfig:
         "AUTO_LONG_REQUIRE_TURN", True))
     # Hours east of UTC the trading day rolls over on. The daily baseline, the
     # halt reset and the day card all use it.
+    # Replace every dollar figure on the dashboard with *** by default. The
+    # eye toggle on the wallet card overrides it per browser.
+    hide_card_amounts: bool = field(default_factory=lambda: _env_bool(
+        "HIDE_CARD_AMOUNTS", False))
     day_tz_offset_h: float = field(default_factory=lambda: _env_float(
         "DAY_TZ_OFFSET_H", 0.0))
     auto_er_lookback: int = field(default_factory=lambda: _env_int(
@@ -362,10 +375,20 @@ class BotConfig:
     # automatic brake on a bad day.
     auto_daily_halt_enabled: bool = field(default_factory=lambda: _env_bool(
         "AUTO_DAILY_HALT_ENABLED", True))
-    # Restrict ENTRIES to a UTC window, e.g. "05:00-11:00". Exits are never
-    # restricted. Empty trades around the clock.
-    auto_trading_window: str = field(default_factory=lambda: _env(
-        "AUTO_TRADING_WINDOW", "").strip())
+    # Per-session direction switches, UTC hours. Replaces AUTO_TRADING_WINDOW:
+    # one window applied to both directions, but across 329 trades US shorts
+    # returned +7.91% avg ROI while US longs returned -2.72% in the same hours.
+    #
+    #   "L1S1" both on   "L0S1" shorts only   "L0S0" session off
+    #   SESSION_AS 00-08   SESSION_EU 08-13
+    #   SESSION_OV 13-17   SESSION_US 17-24   (all UTC)
+    #
+    # ALL DEFAULT ON. A session is switched off once its own data says so, and
+    # an unreadable value falls back to on — a typo must not silently stop
+    # trading, which is a failure discovered hours later.
+    auto_sessions: dict = field(default_factory=lambda: {
+        k: (_env(f"SESSION_{k}", "L1S1") or "L1S1").strip().upper()
+        for k in ("AS", "EU", "OV", "US")})
     # Minimum ATR% to enter. 0 disables.
     auto_min_atr_pct: float = field(default_factory=lambda: _env_float(
         "AUTO_MIN_ATR_PCT", 0.0))
