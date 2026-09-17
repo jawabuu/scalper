@@ -229,8 +229,9 @@ class ScanRunner:
                 if h is None or l is None:
                     log.warning(f"{sym}: no 24h high/low available "
                                 f"(ticker high={hi!r} low={lo!r})")
+                why: list = []
                 c = evaluate_symbol(sym, df, qv, pct, self.cfg,
-                                    high_24h=h, low_24h=l)
+                                    high_24h=h, low_24h=l, why=why)
             except Exception as e:
                 log.debug(f"evaluate failed for {sym}: {e}")
                 rejected[sym] = f"evaluate failed: {type(e).__name__}"
@@ -238,11 +239,7 @@ class ScanRunner:
             if c is not None:
                 candidates.append(c)
             else:
-                # evaluate_symbol returns None on the RSI/EMA screen.
-                rejected[sym] = (
-                    f"passed volume and movement (24h {pct:+.1f}%, "
-                    f"vol {qv/1e6:.0f}M) but failed the scanner's RSI/EMA "
-                    f"screen")
+                rejected[sym] = (why[0] if why else "screened out")
 
         pairs = balance_directions(rank_with_deltas(self.tracker.annotate(candidates)))
         self.tracker.commit(candidates)

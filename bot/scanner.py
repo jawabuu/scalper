@@ -723,24 +723,37 @@ def range_position_24h(price: float, high_24h: float | None,
 def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                     change_24h_pct: float, cfg: ScanConfig,
                     high_24h: float | None = None,
-                    low_24h: float | None = None) -> Candidate | None:
+                    low_24h: float | None = None,
+                    why: list | None = None) -> Candidate | None:
     """
     Assess one symbol. Returns a Candidate if it shows POTENTIAL, else None.
 
+    `why` is an optional sink: on rejection, the reason is appended to it.
+    A dozen `return None` paths were indistinguishable from outside, so a
+    cross-instance comparison could only report "failed the RSI/EMA screen"
+    for all of them. Live converts 28% of movers to candidates against demo's
+    48%, and naming the gate is the only way to find out which one.
+
     This is a screening aid, not a trade signal.
     """
-    ok, _why = passes_market_filters(volume_24h_usdt, change_24h_pct, cfg)
-    if not ok:
+    def _no(reason: str):
+        if why is not None:
+            why.append(reason)
         return None
+
+    ok, mkt_why = passes_market_filters(volume_24h_usdt, change_24h_pct, cfg)
+    if not ok:
+        return _no(f"market filter: {mkt_why}")
 
     need = max(cfg.ema_slow, cfg.rsi_len, cfg.convergence_lookback + 1)
     if len(df) < need:
-        return None
+        return _no(f"only {len(df)} candles, needs {need} "
+                   f"(recently listed?)")
 
     df = prepare(df, cfg)
     row = df.iloc[-1]
     if pd.isna(row["rsi"]):
-        return None
+        return _no("RSI not computable on the latest candle")
 
     rsi = float(row["rsi"])
     gap = ema_gap_pct(row)
@@ -764,9 +777,11 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
     # pays; too wild and a fixed-ROI stop cannot survive normal swings.
     if atr_pct is not None:
         if cfg.min_atr_pct and atr_pct < cfg.min_atr_pct:
-            return None
+            return _no(f"ATR {atr_pct:.3f}% below SCAN_MIN_ATR_PCT "
+                       f"{cfg.min_atr_pct}")
         if cfg.max_atr_pct and atr_pct > cfg.max_atr_pct:
-            return None
+            return _no(f"ATR {atr_pct:.3f}% above SCAN_MAX_ATR_PCT "
+                       f"{cfg.max_atr_pct}")
     rpos = range_position_24h(close_px, high_24h, low_24h)
     above_low = below_high = None
     if high_24h and low_24h and float(high_24h) > float(low_24h):
@@ -821,7 +836,14 @@ def evaluate_symbol(symbol: str, df: pd.DataFrame, volume_24h_usdt: float,
                   + (" and converging" if narrowing else "")),
         )
 
-    return None
+    # Neither branch matched: name the band it missed, with the actual
+    # numbers, because this is the fallthrough that most rejections take.
+    return _no(
+        f"RSI {rsi:.1f} with EMA gap {gap:+.3f}% fits neither band — "
+        f"short needs RSI>={cfg.short_rsi_min:.0f} and gap>"
+        f"{-cfg.ema_tolerance_pct:+.2f}%; long needs "
+        f"{cfg.long_rsi_min:.0f}<=RSI<={cfg.long_rsi_max:.0f} and gap<"
+        f"{cfg.ema_tolerance_pct:+.2f}%")
 
 
 def rank(candidates: list[Candidate]) -> list[Candidate]:

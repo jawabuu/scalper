@@ -4681,3 +4681,67 @@ def test_the_scanner_records_why_a_mover_was_dropped():
     assert "rejected[sym]" in src
     assert '"rejected": dict(' in src
     assert '"movers": sorted(' in src
+
+
+# ── Which gate rejected a symbol ───────────────────────────────────────────
+#
+# Live converts 28% of movers to candidates (8 of 29); demo 48% (12 of 25).
+# With RSI identical between venues (ratio 0.998), the gate doing the work is
+# somewhere in evaluate_symbol — which had a dozen indistinguishable
+# `return None` paths.
+
+def _flat_df(n=120, lo=100.0, hi=101.0):
+    import numpy as np, pandas as pd
+    px = pd.Series(np.linspace(lo, hi, n))
+    return pd.DataFrame({"open": px, "high": px * 1.001, "low": px * 0.999,
+                         "close": px, "volume": np.full(n, 1e6)})
+
+
+def _screen_cfg():
+    from bot.scanner import ScanConfig
+    return ScanConfig(short_rsi_min=70, long_rsi_min=38, long_rsi_max=65,
+                      ema_tolerance_pct=0.15, min_24h_vol_usdt=0,
+                      min_abs_change_pct=8)
+
+
+def test_a_short_history_names_itself():
+    """Live screens 718 symbols against demo's 574 — the extra listings are
+    newer, and a recently listed pair has too few candles."""
+    from bot.scanner import evaluate_symbol
+    why = []
+    evaluate_symbol("Y/USDT:USDT", _flat_df(10), 5e8, 12.0, _screen_cfg(),
+                    high_24h=102, low_24h=99, why=why)
+    assert why and "candles" in why[0] and "recently listed" in why[0]
+
+
+def test_a_weak_mover_names_the_threshold_it_missed():
+    from bot.scanner import evaluate_symbol
+    why = []
+    evaluate_symbol("Z/USDT:USDT", _flat_df(), 5e8, 2.0, _screen_cfg(),
+                    high_24h=102, low_24h=99, why=why)
+    assert why and "market filter" in why[0] and "8" in why[0]
+
+
+def test_the_band_fallthrough_reports_the_actual_readings():
+    """The fallthrough is where most rejections land, so it must say which
+    band was missed and by how much."""
+    import inspect
+    from bot import scanner
+    src = inspect.getsource(scanner.evaluate_symbol)
+    assert "fits neither band" in src
+    assert "short needs RSI>=" in src and "long needs" in src
+
+
+def test_the_sink_is_optional():
+    """`why=None` must behave exactly as before for every existing caller."""
+    from bot.scanner import evaluate_symbol
+    assert evaluate_symbol("Y/USDT:USDT", _flat_df(10), 5e8, 12.0,
+                           _screen_cfg(), high_24h=102, low_24h=99) is None
+
+
+def test_the_runner_stores_the_specific_reason():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner)
+    assert "why: list = []" in src
+    assert "rejected[sym] = (why[0] if why else" in src
