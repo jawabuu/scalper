@@ -149,6 +149,16 @@ if __name__ == "__main__":
                 max_bytes=cfg.trade_journal_max_mb * 1024 * 1024,
                 keep_archives=cfg.trade_journal_keep)
             guardian.load_state(cfg.futures_state_path)
+            # An explicit start overrides whatever was restored. Applied AFTER
+            # load_state, or the persisted value would win and the setting
+            # would appear to do nothing.
+            if cfg.guard_wallet_start > 0:
+                prev = guardian.wallet_start
+                guardian.wallet_start = float(cfg.guard_wallet_start)
+                log.warning(
+                    f"GUARD_WALLET_START: account-return baseline set to "
+                    f"{cfg.guard_wallet_start:.2f}"
+                    + (f" (was {prev:.2f})" if prev else ""))
             guardian.verify_state_path()
         set_guardian(guardian)
         guardian.start_background()

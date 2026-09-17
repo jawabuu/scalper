@@ -350,6 +350,74 @@ def create_app(engine) -> FastAPI:
             return {"verdict": "disabled", "detail": "peer eval not configured"}
         return pe.evaluate(payload, _scanner, _auto)
 
+    @app.post("/api/baselines/reset")
+    def reset_baselines(payload: dict, user: dict = Depends(_require_auth)):
+        """
+        Re-base TODAY and/or ACCOUNT RETURN without clearing trade history.
+
+        Both baselines are sticky by design — today's is cached per day so it
+        stops drifting, and wallet_start is written once and persisted. That
+        stickiness is right until a figure is WRONG: a baseline reconstructed
+        at an unlucky moment, or a deposit that makes the old start
+        meaningless. Until now the only way out was wiping history, which
+        throws away the trades to fix a single number.
+
+        Nothing here touches trades, orders or positions.
+        """
+        done = {}
+        if payload.get("day", True):
+            try:
+                from bot.analysis import _DAY_BASELINE
+                _DAY_BASELINE.clear()
+                st = getattr(_auto, "state", None) if _auto else None
+                if st is not None:
+                    st.day_start_balance = 0.0
+                    st.day_key = ""       # forces roll_day to re-base
+                done["day"] = "cleared — recomputed on the next refresh"
+            except Exception as e:
+                done["day"] = f"failed: {e}"
+        if payload.get("account"):
+            try:
+                g = _guardian
+                if g is None:
+                    done["account"] = "no guardian"
+                else:
+                    # An EXPLICIT value wins. "Re-base to now" is only right
+                    # when the run genuinely starts now; after a deposit, or
+                    # when reconstructing a run whose true start is known, the
+                    # operator has the correct figure and the bot does not.
+                    given = payload.get("account_value")
+                    bal = None
+                    if given is not None:
+                        try:
+                            bal = float(given)
+                        except (TypeError, ValueError):
+                            bal = None
+                        if bal is None or bal <= 0:
+                            done["account"] = (
+                                f"rejected {given!r} — must be a positive "
+                                f"number")
+                            bal = None
+                        else:
+                            src = "set explicitly"
+                    if bal is None and given is None:
+                        # The guardian caches the balance each cycle; there is
+                        # no wallet_balance() method.
+                        bal = getattr(g, "_wallet_balance_cached", 0.0) or None
+                        src = "current wallet"
+                    if bal:
+                        prev = g.wallet_start
+                        g.wallet_start = float(bal)
+                        g.save_state()
+                        done["account"] = (
+                            f"{prev if prev else 'unset'} -> {bal:.2f} ({src})")
+                    elif "account" not in done:
+                        done["account"] = "wallet balance unavailable"
+            except Exception as e:
+                done["account"] = f"failed: {e}"
+        log.warning(f"Baselines reset by {user['username']}: {done}")
+        return {"ok": True, "result": done}
+
     @app.post("/api/peer/compare")
     def peer_compare(payload: dict):
         """Pair the peer's candidate readings with ours. Same guarantees as

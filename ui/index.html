@@ -1037,7 +1037,17 @@
            warning when the trade record and the balance disagree, which on
            demo is nearly permanent — so the daily figure vanished exactly
            where it was most wanted. -->
-      <div class="stat" id="stat-day-card"><div class="stat-label">Today</div>
+      <div class="stat" id="stat-day-card" style="position:relative">
+        <!-- Both baselines are sticky by design. That is right until one is
+             WRONG, and the only previous remedy was wiping trade history. -->
+        <button onclick="resetBaselines()" title="Re-base Today and Account
+return to the current wallet. Does not touch trades."
+                style="position:absolute;top:5px;right:6px;cursor:pointer;
+                       font:inherit;font-size:9px;letter-spacing:0.5px;
+                       padding:1px 5px;border-radius:3px;
+                       border:1px solid var(--border);background:transparent;
+                       color:var(--muted)">RE-BASE</button>
+        <div class="stat-label">Today</div>
         <div class="stat-value neu" id="s-day">—</div>
         <div class="stat-sub" id="s-day-sub">no baseline yet</div></div>
       <div class="stat" id="stat-roc-card"><div class="stat-label">Return on capital</div>
@@ -2602,6 +2612,46 @@ let _histDays = 2;
 // control. Resets to the placeholder so the same choice can be picked twice.
 // The cross-evaluation record: for each entry, what the other instance said
 // about the same symbol at the same moment.
+async function resetBaselines() {
+  const both = confirm(
+    'Re-base the baselines?\n\n'
+    + 'OK    = Today AND Account return\n'
+    + 'Cancel = Today only\n\n'
+    + 'Trades, orders and positions are not touched.');
+  let value = null;
+  if (both) {
+    // An explicit figure beats "re-base to now" whenever the operator knows
+    // the true start — after a deposit, or picking up a run in progress.
+    const v = prompt(
+      'Starting wallet for ACCOUNT RETURN.\n\n'
+      + 'Leave blank to use the current balance,\n'
+      + 'or type the figure the run actually started from.', '');
+    if (v === null) return;                 // cancelled the whole thing
+    if (v.trim() !== '') {
+      value = Number(v.trim());
+      if (!isFinite(value) || value <= 0) {
+        alert('That is not a positive number — nothing changed.');
+        return;
+      }
+    }
+  }
+  try {
+    const body = { day: true, account: both };
+    if (value !== null) body.account_value = value;
+    const r = await fetch(API + '/api/baselines/reset', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.status);
+    alert('Re-based:\n\n'
+          + Object.entries(d.result || {})
+              .map(([k, v]) => `${k}: ${v}`).join('\n'));
+    refresh();
+  } catch (e) { alert('Re-base failed: ' + e.message); }
+}
+
 async function downloadPeerReport() {
   try {
     const d = await api('/api/peer/report?limit=2000');

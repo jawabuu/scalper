@@ -4838,3 +4838,124 @@ def test_only_the_current_day_is_cached():
     day_report([_day_trade(start + 90_000, 10.0)], day_baseline=None,
                day_start_ts=start + 86_400, wallet_now=5020.0)
     assert len(_DAY_BASELINE) == 1
+
+
+# ── Re-basing without wiping history ───────────────────────────────────────
+#
+# Both baselines are sticky by design: today's is cached per day so it stops
+# drifting, and wallet_start is written once and persisted. That is right
+# until a figure is WRONG — a baseline reconstructed at an unlucky moment, or
+# a deposit that makes the old start meaningless. The only previous remedy was
+# clearing trade history, which throws away the trades to fix one number.
+
+def test_the_reset_endpoint_touches_no_trades():
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    for forbidden in ("closed_trades", "_journal", "cancel", "create_order",
+                      "close_position"):
+        assert forbidden not in block, forbidden
+
+
+def test_clearing_the_day_cache_forces_a_recompute():
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()
+    start = 1_000_000.0
+    a = day_report([_day_trade(start + 60, 100.0)], day_baseline=None,
+                   day_start_ts=start, wallet_now=5100.0)
+    assert a["baseline"] == pytest.approx(5000.0)
+    # a wrong first reconstruction would otherwise be held all day
+    _DAY_BASELINE.clear()
+    b = day_report([_day_trade(start + 60, 100.0),
+                    _day_trade(start + 120, 50.0)], day_baseline=None,
+                   day_start_ts=start, wallet_now=5150.0)
+    assert b["baseline"] == pytest.approx(5000.0)   # recomputed, still right
+
+
+def test_the_day_key_is_cleared_so_roll_day_re_bases():
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    assert "day_start_balance = 0.0" in block
+    assert 'day_key = ""' in block
+
+
+def test_the_account_reset_uses_the_cached_balance_attribute():
+    """There is no wallet_balance() method on the guardian."""
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    assert '_wallet_balance_cached' in block
+    assert "g.wallet_balance()" not in block
+
+
+def test_the_account_reset_is_opt_in():
+    """Today alone is the common case; re-basing account return discards the
+    whole run's reference point."""
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    assert 'payload.get("day", True)' in block       # defaults on
+    assert 'payload.get("account")' in block         # defaults OFF
+
+
+def test_the_ui_offers_both_scopes():
+    ui = _ui()
+    assert "function resetBaselines()" in ui
+    assert "Today only" in ui
+    assert "not touched" in ui
+
+
+def test_an_explicit_wallet_start_wins_over_the_current_balance():
+    """
+    "Re-base to now" is only right when the run genuinely starts now. After a
+    deposit, or when picking up a run already in progress, the operator has
+    the correct figure and the bot does not.
+    """
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    assert 'payload.get("account_value")' in block
+    j = block.index('payload.get("account_value")')
+    k = block.index("_wallet_balance_cached")
+    assert j < k, "the explicit value must be tried before the cached balance"
+
+
+def test_a_bad_explicit_value_changes_nothing():
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    block = src[i:i + 3200]
+    assert "must be a positive" in block
+    assert "bal = None" in block
+
+
+def test_the_env_override_is_applied_after_the_state_restore():
+    """Applied before load_state, the persisted value would win and
+    GUARD_WALLET_START would appear to do nothing."""
+    from pathlib import Path
+    src = Path("main.py").read_text()
+    a = src.index("guardian.load_state(cfg.futures_state_path)")
+    b = src.index("cfg.guard_wallet_start > 0")
+    assert a < b
+
+
+def test_the_env_default_leaves_the_restored_value_alone():
+    from bot.config import BotConfig
+    import os
+    os.environ.pop("GUARD_WALLET_START", None)
+    assert BotConfig().guard_wallet_start == 0.0
+
+
+def test_the_ui_asks_for_a_figure_and_validates_it():
+    ui = _ui()
+    i = ui.index("async function resetBaselines()")
+    block = ui[i:i + 1600]
+    assert "prompt(" in block
+    assert "account_value" in block
+    assert "not a positive number" in block

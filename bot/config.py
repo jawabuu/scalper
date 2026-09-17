@@ -449,6 +449,12 @@ class BotConfig:
     # a peak above GUARD_BREAKEVEN_AT_ROI must not become a loss.
     # Per-leg fee rate for the ESTIMATE fallback only; the ledger conversion
     # is preferred. 0.05% is standard futures taker.
+    # Starting wallet for ACCOUNT RETURN. 0 means "whatever the balance was
+    # when the guardian first saw it", which is only correct if the run began
+    # then. Set it when the true start is known — after a deposit, or when
+    # picking up a run already in progress.
+    guard_wallet_start: float = field(default_factory=lambda: _env_float(
+        "GUARD_WALLET_START", 0.0))
     guard_taker_fee_rate: float = field(default_factory=lambda: _env_float(
         "GUARD_TAKER_FEE_RATE", 0.0005))
     guard_profit_floor_enabled: bool = field(default_factory=lambda: _env_bool(
