@@ -1164,6 +1164,16 @@ class AutoTrader:
                           (snap.get("candidates") or [])])
             except Exception as e:
                 _log.debug(f"stream track failed: {e}")
+
+        # Send the candidate list for calibration. Entry notifications alone
+        # are far too sparse to measure a ratio from — a handful an hour
+        # against dozens of paired candidate readings per hour here.
+        pe = getattr(self, "peer_eval", None)
+        if pe is not None:
+            try:
+                pe.notify_scan(snap.get("candidates") or [])
+            except Exception:
+                pass
         rows = snap.get("candidates") or []
         # Pass the scan timestamp so a repeated read of the same snapshot does
         # not advance the streaks.

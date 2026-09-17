@@ -229,6 +229,35 @@ if __name__ == "__main__":
       except Exception as e:
         log.error(f"Scanner failed to start: {e}", exc_info=True)
 
+    # Cross-evaluation, wired INDEPENDENTLY of auto-trade.
+    #
+    # It used to live inside the auto-trade block, so it existed only if the
+    # scanner AND the entry service both came up — and RECEIVING is useful
+    # regardless: an instance with auto-trade off can still answer "would I
+    # have taken this?" and still pair readings for calibration.
+    _PEER_EVAL = None
+    try:
+        from bot.peer_eval import PeerEval
+        from bot.api import set_peer_eval
+        _label = (cfg.peer_eval_label
+                  or ("demo" if cfg.guardian_demo else "live"))
+        _PEER_EVAL = PeerEval(
+            mode=cfg.peer_eval_mode,
+            peer_url=cfg.peer_eval_url,
+            label=_label,
+            path=str(Path(cfg.futures_state_path).with_name(
+                "peer-eval.jsonl")))
+        set_peer_eval(_PEER_EVAL)
+        if _PEER_EVAL.sends or _PEER_EVAL.receives:
+            log.warning(
+                f"Peer eval: mode={_PEER_EVAL.mode} as '{_label}'"
+                + (f" -> {cfg.peer_eval_url}" if _PEER_EVAL.sends
+                   else " (receive only)"))
+        else:
+            log.info(f"Peer eval: off (PEER_EVAL_MODE={cfg.peer_eval_mode!r})")
+    except Exception as e:
+        log.error(f"peer eval failed to start: {e}", exc_info=True)
+
     # Unattended auto-trading. Requires BOTH the scanner (for candidates) and
     # the entry service (for guardrailed order placement); without either it
     # cannot run, so it is only started when both are present.
@@ -306,27 +335,7 @@ if __name__ == "__main__":
                         log.error(f"candidate stream unavailable ({e}) — "
                                   f"entries will use the scan snapshot")
                         auto.stream = None
-                # Cross-evaluation. Sends on entry, answers the peer from
-                # our own snapshot. Never blocks the trading loop.
-                try:
-                    from bot.peer_eval import PeerEval
-                    from bot.api import set_peer_eval
-                    label = (cfg.peer_eval_label
-                             or ("demo" if cfg.guardian_demo else "live"))
-                    pe = PeerEval(
-                        mode=cfg.peer_eval_mode,
-                        peer_url=cfg.peer_eval_url,
-                        label=label,
-                        path=str(Path(cfg.futures_state_path).with_name(
-                            "peer-eval.jsonl")))
-                    auto.peer_eval = pe
-                    set_peer_eval(pe)
-                    if pe.sends or pe.receives:
-                        log.warning(
-                            f"Peer eval: {pe.mode} as '{label}'"
-                            + (f" -> {cfg.peer_eval_url}" if pe.sends else ""))
-                except Exception as e:
-                    log.warning(f"peer eval unavailable: {e}")
+                auto.peer_eval = _PEER_EVAL
                 set_auto_trader(auto)
 
                 def _auto_loop():

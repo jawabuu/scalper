@@ -4450,3 +4450,112 @@ def test_both_sides_are_recorded_for_comparison(tmp_path):
     rows = pe.report()
     assert rows and rows[0]["kind"] == "received"
     assert "theirs" in rows[0] and "mine" in rows[0]
+
+
+# ── Calibration from paired readings ───────────────────────────────────────
+#
+# The "live ATR is 35% higher" figure came from THREE coins at ONE moment,
+# read off two screenshots. Scaling a live setting by 1.35 would bake that
+# guess into the config and then measure everything through it.
+
+def _paired(tmp_path):
+    from bot.peer_eval import PeerEval
+    return PeerEval(mode="both", peer_url="", label="live",
+                    path=str(tmp_path / "p.jsonl"))
+
+
+class _Snap:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def snapshot(self):
+        return {"candidates": self._rows}
+
+
+def test_only_shared_symbols_are_paired(tmp_path):
+    pe = _paired(tmp_path)
+    mine = _Snap([{"symbol": "SYN/USDT:USDT", "atr_pct": 2.463},
+                  {"symbol": "ONLYMINE/USDT:USDT", "atr_pct": 1.0}])
+    theirs = {"from": "demo", "kind": "scan", "rows": [
+        {"symbol": "SYN/USDT:USDT", "atr_pct": 1.784},
+        {"symbol": "ONLYTHEIRS/USDT:USDT", "atr_pct": 1.0}]}
+    out = pe.compare(theirs, mine)
+    assert out["paired"] == 1
+
+
+def test_the_calibration_reproduces_the_screenshot_figures(tmp_path):
+    """Same three coins, same moment: ATR ~1.365, RSI ~1.000."""
+    pe = _paired(tmp_path)
+    mine = _Snap([
+        {"symbol": "SYN/USDT:USDT", "atr_pct": 2.463, "rsi": 50.1},
+        {"symbol": "BR/USDT:USDT", "atr_pct": 3.011, "rsi": 48.0},
+        {"symbol": "AKE/USDT:USDT", "atr_pct": 4.357, "rsi": 41.8}])
+    theirs = {"from": "demo", "kind": "scan", "rows": [
+        {"symbol": "SYN/USDT:USDT", "atr_pct": 1.784, "rsi": 50.1},
+        {"symbol": "BR/USDT:USDT", "atr_pct": 2.279, "rsi": 48.8},
+        {"symbol": "AKE/USDT:USDT", "atr_pct": 3.193, "rsi": 40.4}]}
+    pe.compare(theirs, mine)
+    c = pe.calibration()
+    assert c["pairs"] == 3
+    assert c["fields"]["atr_pct"]["median"] == pytest.approx(1.365, abs=0.01)
+    assert c["fields"]["rsi"]["median"] == pytest.approx(1.000, abs=0.01)
+
+
+def test_the_spread_is_reported_not_just_the_median(tmp_path):
+    """A ratio is only usable if it is STABLE — the spread says whether it is."""
+    pe = _paired(tmp_path)
+    mine = _Snap([{"symbol": f"C{i}/USDT:USDT", "atr_pct": v}
+                  for i, v in enumerate((2.0, 3.0, 4.0))])
+    theirs = {"from": "demo", "kind": "scan",
+              "rows": [{"symbol": f"C{i}/USDT:USDT", "atr_pct": v}
+                       for i, v in enumerate((1.0, 3.0, 8.0))]}
+    pe.compare(theirs, mine)
+    f = pe.calibration()["fields"]["atr_pct"]
+    for key in ("n", "median", "mean", "stdev", "min", "max"):
+        assert key in f
+    assert f["max"] > f["min"]
+
+
+def test_a_field_with_too_few_points_is_omitted(tmp_path):
+    """Three points is the floor, and even that is thin."""
+    pe = _paired(tmp_path)
+    mine = _Snap([{"symbol": "A/USDT:USDT", "atr_pct": 2.0}])
+    pe.compare({"from": "demo", "kind": "scan",
+                "rows": [{"symbol": "A/USDT:USDT", "atr_pct": 1.0}]}, mine)
+    assert "atr_pct" not in pe.calibration()["fields"]
+
+
+def test_comparison_makes_no_exchange_calls():
+    import inspect
+    from bot import peer_eval
+    src = inspect.getsource(peer_eval.PeerEval.compare)
+    for forbidden in ("fetch_ohlcv", "fetch_ticker", "exchange", "requests"):
+        assert forbidden not in src, forbidden
+
+
+def test_peer_eval_is_wired_independently_of_auto_trade():
+    """
+    It lived inside the auto-trade block, so it existed only if the scanner
+    AND entry service both came up — and RECEIVING is useful regardless: an
+    instance with auto-trade off can still answer "would I have taken this?"
+    and still pair readings for calibration.
+    """
+    from pathlib import Path
+    src = Path("main.py").read_text()
+    i = src.index("_PEER_EVAL = None")
+    j = src.index("auto.peer_eval = _PEER_EVAL")
+    assert i < j, "peer eval must be constructed before the auto-trade block"
+    # and not nested inside it
+    line = [ln for ln in src.split("\n") if "_PEER_EVAL = None" in ln][0]
+    assert len(line) - len(line.lstrip()) <= 4, "should be at function level"
+
+
+def test_a_disabled_peer_eval_says_which_kind_of_disabled():
+    """"not enabled" covered both "never constructed" and "mode=off", which
+    are diagnosed completely differently."""
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def peer_report")
+    block = src[i:i + 1200]
+    assert "was not constructed at startup" in block
+    assert "PEER_EVAL_MODE=" in block

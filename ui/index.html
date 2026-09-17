@@ -2605,7 +2605,22 @@ let _histDays = 2;
 async function downloadPeerReport() {
   try {
     const d = await api('/api/peer/report?limit=2000');
-    if (!d || !d.enabled) { alert('Peer evaluation is not enabled'); return; }
+    if (!d || !d.enabled) {
+      alert('Peer evaluation is not active.\n\n'
+            + ((d && d.detail) || 'No detail returned.')
+            + (d && d.status ? '\n\nmode=' + d.status.mode
+               + '  peer=' + (d.status.peer || 'unset') : ''));
+      return;
+    }
+    if (!d.rows || !d.rows.length) {
+      alert('Peer evaluation is running but has recorded nothing yet.\n\n'
+            + 'mode=' + d.status.mode + '  sent=' + d.status.sent
+            + '  received=' + d.status.received
+            + '  errors=' + d.status.errors
+            + '\n\nPairs are written when both instances hold the same '
+            + 'candidate in the same scan.');
+      return;
+    }
     const blob = new Blob([JSON.stringify(d, null, 2)],
                           {type: 'application/json'});
     const a = document.createElement('a');

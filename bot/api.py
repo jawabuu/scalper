@@ -350,13 +350,40 @@ def create_app(engine) -> FastAPI:
             return {"verdict": "disabled", "detail": "peer eval not configured"}
         return pe.evaluate(payload, _scanner, _auto)
 
+    @app.post("/api/peer/compare")
+    def peer_compare(payload: dict):
+        """Pair the peer's candidate readings with ours. Same guarantees as
+        /evaluate: no orders, no config change, no exchange calls."""
+        pe = _peer_eval
+        if pe is None:
+            return {"paired": 0, "detail": "disabled"}
+        return pe.compare(payload, _scanner)
+
+    @app.get("/api/peer/calibration")
+    def peer_calibration(limit: int = 5000,
+                         user: dict = Depends(_require_auth)):
+        pe = _peer_eval
+        if pe is None:
+            return {"enabled": False}
+        return {"enabled": True, "label": pe.label,
+                "calibration": pe.calibration(limit=limit)}
+
     @app.get("/api/peer/report")
     def peer_report(limit: int = 500, user: dict = Depends(_require_auth)):
         pe = _peer_eval
         if pe is None:
-            return {"enabled": False, "rows": []}
-        return {"enabled": True, "status": pe.status(),
-                "rows": pe.report(limit=limit)}
+            # "not enabled" covered both "never constructed" and "mode=off",
+            # which are diagnosed completely differently.
+            return {"enabled": False, "rows": [],
+                    "detail": ("peer eval was not constructed at startup — "
+                               "check the log for 'peer eval failed to start'")}
+        st = pe.status()
+        if not (pe.sends or pe.receives):
+            return {"enabled": False, "status": st, "rows": [],
+                    "detail": (f"PEER_EVAL_MODE={st['mode']!r}"
+                               + ("; PEER_EVAL_URL is empty so it cannot send"
+                                  if not st.get("peer") else ""))}
+        return {"enabled": True, "status": st, "rows": pe.report(limit=limit)}
 
     @app.get("/api/auto-trade")
     def auto_trade_status(user: dict = Depends(_require_auth)):
