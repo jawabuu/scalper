@@ -65,6 +65,7 @@ class ScanRunner:
         self._last_error: str | None = None
         self._universe_size: int = 0
         self._last_rejected: dict = {}
+        self._abs_floor_noted: bool = False
         self._last_movers: set = set()
         self._effective_vol_floor: float = 0.0
         # Regime measures, derived from the ticker set already fetched.
@@ -102,6 +103,30 @@ class ScanRunner:
                 k = (len(vols) - 1) * self.cfg.vol_percentile / 100.0
                 lo, hi = int(k), min(int(k) + 1, len(vols) - 1)
                 vol_floor = vols[lo] + (vols[hi] - vols[lo]) * (k - lo)
+                # NEUTRALISE the absolute floor for the rest of the scan.
+                #
+                # There are TWO volume checks. This prefilter uses the
+                # percentile; evaluate_symbol -> passes_market_filters then
+                # applies cfg.min_24h_vol_usdt AGAIN to every mover. In
+                # percentile mode that second check is a hidden hard floor.
+                #
+                # It hit only live: demo's quote volumes read ~21x higher, so
+                # its p85 floor was 850M and every mover cleared 50M by a wide
+                # margin. Live's p80 floor was 17.9M, and 14 of 34 movers died
+                # against the 50M — the entire selection divergence, from a
+                # setting both of us believed the percentile had overridden.
+                #
+                # Percentile mode means the percentile decides. Full stop.
+                if self.cfg.min_24h_vol_usdt:
+                    if not getattr(self, "_abs_floor_noted", False):
+                        log.warning(
+                            f"percentile mode: ignoring "
+                            f"SCAN_MIN_VOL_USDT="
+                            f"{self.cfg.min_24h_vol_usdt/1e6:.0f}M — the p"
+                            f"{self.cfg.vol_percentile:.0f} floor "
+                            f"({vol_floor/1e6:.1f}M) is the only volume gate.")
+                        self._abs_floor_noted = True
+                    self.cfg.min_24h_vol_usdt = 0.0
                 log.info(f"Volume floor (p{self.cfg.vol_percentile:.0f}) = "
                          f"{vol_floor/1e6:.1f}M across {len(vols)} symbols")
         self._effective_vol_floor = vol_floor

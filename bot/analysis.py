@@ -295,6 +295,11 @@ def _verified(t: dict) -> bool:
     return not t.get("exit_is_estimate")
 
 
+# Today's reconstructed baseline, cached against the day key so it is computed
+# ONCE per day rather than on every dashboard refresh.
+_DAY_BASELINE: dict = {}
+
+
 def day_report(trades: list[dict], day_baseline: float | None,
                day_start_ts: float | None, wallet_now: float | None = None,
                tz_offset_h: float = 0.0) -> dict:
@@ -349,12 +354,31 @@ def day_report(trades: list[dict], day_baseline: float | None,
         # It cannot see a deposit, withdrawal or funding payment made since
         # midnight; those would surface as a baseline error. The stored value
         # is the fallback when there is nothing to reconstruct from.
+        # RECONSTRUCT ONCE, THEN HOLD IT.
+        #
+        # wallet_now - net_pnl_since_midnight is exact at any instant, but it
+        # is recomputed on every dashboard refresh — so the displayed "from"
+        # figure drifts all day as trades close, and reads as "24h ago" rather
+        # than a fixed 00:00. The baseline is a property of the DAY, not of
+        # the moment it is asked for.
+        #
+        # The first reconstruction of the day is cached against the day key
+        # and reused until the key changes.
         base = None
-        if wallet_now and float(wallet_now) > 0 and today:
-            base = float(wallet_now) - net
-            if base > 0:
+        if wallet_now and float(wallet_now) > 0 and today and day_start_ts:
+            key = int(day_start_ts)
+            cached = _DAY_BASELINE.get(key)
+            if cached is not None:
+                base = cached
                 out["baseline"] = round(base, 2)
                 out["baseline_source"] = "reconstructed"
+            else:
+                base = float(wallet_now) - net
+                if base > 0:
+                    _DAY_BASELINE.clear()      # only today's key is useful
+                    _DAY_BASELINE[key] = base
+                    out["baseline"] = round(base, 2)
+                    out["baseline_source"] = "reconstructed"
         if base is None or base <= 0:
             base = float(day_baseline) if day_baseline else None
         if base and base > 0:

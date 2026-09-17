@@ -3230,7 +3230,8 @@ def test_the_baseline_is_reconstructed_from_the_wallet():
     stores the balance at THAT moment. The card read "from $5308" when the
     real 00:00 figure was $5063.54, and the percentage inherited the error.
     """
-    from bot.analysis import day_report
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()   # process-global cache
     start = 1_000_000.0
     out = day_report([_dt(start + 60, 228.65)], day_baseline=5308.0,
                      day_start_ts=start, wallet_now=5292.19)
@@ -3240,7 +3241,8 @@ def test_the_baseline_is_reconstructed_from_the_wallet():
 
 
 def test_it_falls_back_to_the_stored_value_with_no_trades():
-    from bot.analysis import day_report
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()   # process-global cache
     out = day_report([], day_baseline=5308.0, day_start_ts=1_000_000.0,
                      wallet_now=5292.19)
     assert out["baseline"] == 5308.0
@@ -3248,7 +3250,8 @@ def test_it_falls_back_to_the_stored_value_with_no_trades():
 
 
 def test_yesterdays_trades_do_not_move_todays_baseline():
-    from bot.analysis import day_report
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()   # process-global cache
     start = 1_000_000.0
     out = day_report([_dt(start - 3600, 500.0), _dt(start + 60, 100.0)],
                      day_baseline=9999.0, day_start_ts=start, wallet_now=5100.0)
@@ -3258,7 +3261,8 @@ def test_yesterdays_trades_do_not_move_todays_baseline():
 
 def test_a_losing_day_reconstructs_upward():
     """Net negative means the day STARTED higher than the wallet is now."""
-    from bot.analysis import day_report
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()   # process-global cache
     start = 1_000_000.0
     out = day_report([_dt(start + 60, -150.0)], day_baseline=None,
                      day_start_ts=start, wallet_now=4850.0)
@@ -3267,7 +3271,8 @@ def test_a_losing_day_reconstructs_upward():
 
 
 def test_a_missing_wallet_does_not_invent_a_baseline():
-    from bot.analysis import day_report
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()   # process-global cache
     out = day_report([_dt(1_000_060.0, 10.0)], day_baseline=5000.0,
                      day_start_ts=1_000_000.0, wallet_now=None)
     assert out["baseline"] == 5000.0
@@ -4745,3 +4750,91 @@ def test_the_runner_stores_the_specific_reason():
     src = inspect.getsource(ScanRunner)
     assert "why: list = []" in src
     assert "rejected[sym] = (why[0] if why else" in src
+
+
+# ── The hidden second volume floor ─────────────────────────────────────────
+#
+# There are TWO volume checks. _prefilter uses the percentile; evaluate_symbol
+# -> passes_market_filters then applies cfg.min_24h_vol_usdt AGAIN to every
+# mover. In percentile mode that second check is a hidden hard floor.
+#
+# Live: p80 floor 17.9M, then 14 of 34 movers died against SCAN_MIN_VOL_USDT
+# 50M. Demo: p85 floor 850M (volumes read ~21x higher), so the 50M never
+# fired. The entire selection divergence, from identical config.
+
+def test_percentile_mode_neutralises_the_absolute_floor():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner)
+    assert "self.cfg.min_24h_vol_usdt = 0.0" in src
+    i = src.index("self.cfg.min_24h_vol_usdt = 0.0")
+    assert "percentile" in src[max(0, i - 1400):i].lower()
+
+
+def test_it_says_so_once_rather_than_every_scan():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner)
+    assert "_abs_floor_noted" in src
+    assert "ignoring" in src
+
+
+def test_the_screen_passes_a_low_volume_mover_once_neutralised():
+    from bot.scanner import ScanConfig, passes_market_filters
+    cfg = ScanConfig(min_24h_vol_usdt=50e6, min_abs_change_pct=8)
+    assert passes_market_filters(20.6e6, 18.0, cfg)[0] is False
+    cfg.min_24h_vol_usdt = 0.0
+    assert passes_market_filters(20.6e6, 18.0, cfg)[0] is True
+    # the movement filter must still bite
+    assert passes_market_filters(20.6e6, 2.0, cfg)[0] is False
+
+
+# ── Today's baseline must not drift ────────────────────────────────────────
+
+def _day_trade(ts, pnl):
+    return {"symbol": "X/USDT:USDT", "side": "short", "final_roi": 5.0,
+            "realised_pnl_usdt": pnl, "fees_usdt": 1.0, "margin_usdt": 88.0,
+            "exit_is_estimate": False, "closed_at": ts,
+            "entry_context": {"sized_stop_roi": 30.0}}
+
+
+def test_the_baseline_is_computed_once_and_held():
+    """
+    wallet_now - net is exact at any instant, but it was recomputed on EVERY
+    dashboard refresh, so the "from" figure drifted all day and read as
+    "24h ago" rather than a fixed 00:00.
+    """
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()
+    start = 1_000_000.0
+    a = day_report([_day_trade(start + 60, 100.0)], day_baseline=None,
+                   day_start_ts=start, wallet_now=5100.0)
+    b = day_report([_day_trade(start + 60, 100.0),
+                    _day_trade(start + 120, 50.0)], day_baseline=None,
+                   day_start_ts=start, wallet_now=5150.0)
+    assert a["baseline"] == pytest.approx(5000.0)
+    assert b["baseline"] == pytest.approx(5000.0)     # HELD
+    assert b["net_pnl"] == pytest.approx(150.0)       # net still moves
+
+
+def test_it_re_bases_when_the_day_rolls():
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()
+    start = 1_000_000.0
+    day_report([_day_trade(start + 60, 100.0)], day_baseline=None,
+               day_start_ts=start, wallet_now=5100.0)
+    nxt = day_report([_day_trade(start + 90_000, 20.0)], day_baseline=None,
+                     day_start_ts=start + 86_400, wallet_now=5170.0)
+    assert nxt["baseline"] == pytest.approx(5150.0)
+
+
+def test_only_the_current_day_is_cached():
+    """The cache is keyed on the day start; yesterday's entry is useless."""
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()
+    start = 1_000_000.0
+    day_report([_day_trade(start + 60, 10.0)], day_baseline=None,
+               day_start_ts=start, wallet_now=5010.0)
+    day_report([_day_trade(start + 90_000, 10.0)], day_baseline=None,
+               day_start_ts=start + 86_400, wallet_now=5020.0)
+    assert len(_DAY_BASELINE) == 1
