@@ -142,13 +142,31 @@ class PeerEval:
             out = {"label": self.label, "symbol": symbol, "side": side,
                    "at": time.time()}
             if row is None:
-                # The most informative answer: our pipeline never saw it.
+                # NAME THE CAUSE. "not in our current scan" covered three
+                # things fixed by three different settings, and 9 of 13
+                # cross-evaluations came back with exactly that and nothing
+                # more.
+                rejected = snap.get("rejected") or {}
+                movers = set(snap.get("movers") or [])
+                if symbol in rejected:
+                    why = rejected[symbol]
+                    stage = "screened_out"
+                elif movers and symbol not in movers:
+                    why = (f"not among our {len(movers)} movers — below "
+                           f"{snap.get('config', {}).get('min_abs_change_pct')}% "
+                           f"24h change, or under the volume floor of "
+                           f"{(snap.get('config', {}) or {}).get('effective_vol_floor')}")
+                    stage = "not_a_mover"
+                else:
+                    why = ("not in our current scan; this instance has not "
+                           "recorded why (scan may not have completed yet)")
+                    stage = "unknown"
                 out.update({
                     "verdict": "not_surfaced",
-                    "detail": ("this symbol is not in our current scan — not a "
-                               "mover, under the volume floor, or outside the "
-                               "RSI screen"),
+                    "stage": stage,
+                    "detail": why,
                     "scan_size": len(rows),
+                    "movers": len(movers),
                 })
                 self.record({"kind": "received", "at": time.time(),
                              "theirs": payload, "mine": out})

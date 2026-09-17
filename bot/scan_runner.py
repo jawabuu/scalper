@@ -64,6 +64,8 @@ class ScanRunner:
         self._last_scan_ts: float = 0.0
         self._last_error: str | None = None
         self._universe_size: int = 0
+        self._last_rejected: dict = {}
+        self._last_movers: set = set()
         self._effective_vol_floor: float = 0.0
         # Regime measures, derived from the ticker set already fetched.
         self._breadth_pct: float | None = None
@@ -195,9 +197,17 @@ class ScanRunner:
             return self._last_results
 
         self._universe_size = len(movers)
+        # Why each symbol did NOT become a candidate. Without this, peer
+        # cross-evaluation can only say "not in our current scan", which
+        # covers three completely different causes — not a mover, under the
+        # volume floor, or screened out on RSI — and they are fixed by three
+        # different settings.
+        rejected: dict = {}
+        mover_syms = {m[0] for m in movers}
         for sym, qv, pct, hi, lo in movers:
             df = self._ohlcv(sym)
             if df is None:
+                rejected[sym] = "no candles returned"
                 continue
             try:
                 # Some ticker payloads omit high/low; derive them from the
@@ -223,15 +233,24 @@ class ScanRunner:
                                     high_24h=h, low_24h=l)
             except Exception as e:
                 log.debug(f"evaluate failed for {sym}: {e}")
+                rejected[sym] = f"evaluate failed: {type(e).__name__}"
                 continue
             if c is not None:
                 candidates.append(c)
+            else:
+                # evaluate_symbol returns None on the RSI/EMA screen.
+                rejected[sym] = (
+                    f"passed volume and movement (24h {pct:+.1f}%, "
+                    f"vol {qv/1e6:.0f}M) but failed the scanner's RSI/EMA "
+                    f"screen")
 
         pairs = balance_directions(rank_with_deltas(self.tracker.annotate(candidates)))
         self.tracker.commit(candidates)
 
         with self._lock:
             self._last_results = pairs
+            self._last_rejected = rejected
+            self._last_movers = mover_syms
             self._last_scan_ts = time.time()
             self._last_duration_s = self._last_scan_ts - started
             self._last_error = None
@@ -279,6 +298,11 @@ class ScanRunner:
                 "last_scan_ts": self._last_scan_ts,
                 "last_scan_ago_s": (time.time() - self._last_scan_ts) if self._last_scan_ts else None,
                 "universe_size": self._universe_size,
+                # Why each mover did NOT become a candidate, so peer
+                # cross-evaluation can name the cause instead of saying
+                # "not in our current scan" for three different reasons.
+                "rejected": dict(getattr(self, "_last_rejected", {})),
+                "movers": sorted(getattr(self, "_last_movers", set())),
                 "demo": self.demo,
                 "range_fallbacks": self._range_misses,
                 "scan_duration_s": round(self._last_duration_s, 1),

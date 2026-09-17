@@ -4630,3 +4630,54 @@ def test_categorical_fields_are_agreement_not_ratio(tmp_path):
     pe.compare(theirs, mine)
     ag = pe.calibration()["agreement"]["strength"]
     assert ag["n"] == 3 and ag["same_pct"] == pytest.approx(66.7, abs=0.1)
+
+
+# ── not_surfaced must name the cause ───────────────────────────────────────
+#
+# 9 of 13 cross-evaluations came back "this symbol is not in our current scan
+# — not a mover, under the volume floor, or outside the RSI screen". Three
+# causes, three different settings, one message. It could not support a
+# harmonisation decision.
+
+def _peer_stage(tmp_path, snap):
+    from bot.peer_eval import PeerEval
+    pe = PeerEval(mode="both", peer_url="", label="live",
+                  path=str(tmp_path / "p.jsonl"))
+    scanner = type("S", (), {"snapshot": staticmethod(lambda: snap)})()
+    return pe.evaluate({"symbol": "REZ/USDT:USDT", "side": "short"},
+                       scanner, None)
+
+
+_BASE = {"config": {"min_abs_change_pct": 8, "effective_vol_floor": 30_600_000}}
+
+
+def test_screened_out_is_distinguished(tmp_path):
+    out = _peer_stage(tmp_path, {**_BASE, "candidates": [],
+                                 "movers": ["REZ/USDT:USDT"],
+                                 "rejected": {"REZ/USDT:USDT": "failed RSI"}})
+    assert out["verdict"] == "not_surfaced"
+    assert out["stage"] == "screened_out"
+    assert "failed RSI" in out["detail"]
+
+
+def test_not_a_mover_is_distinguished(tmp_path):
+    out = _peer_stage(tmp_path, {**_BASE, "candidates": [],
+                                 "movers": ["AAA/USDT:USDT"], "rejected": {}})
+    assert out["stage"] == "not_a_mover"
+    assert "8" in out["detail"]              # the threshold it missed
+
+
+def test_an_unrecorded_reason_says_so_rather_than_guessing(tmp_path):
+    out = _peer_stage(tmp_path, {**_BASE, "candidates": [], "movers": [],
+                                 "rejected": {}})
+    assert out["stage"] == "unknown"
+    assert "has not recorded why" in out["detail"]
+
+
+def test_the_scanner_records_why_a_mover_was_dropped():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner)
+    assert "rejected[sym]" in src
+    assert '"rejected": dict(' in src
+    assert '"movers": sorted(' in src
