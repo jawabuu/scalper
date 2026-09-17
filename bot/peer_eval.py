@@ -243,8 +243,12 @@ class PeerEval:
         """
         import statistics as st
         rows = [r for r in self.report(limit=limit) if r.get("kind") == "pair"]
-        fields = ("atr_pct", "rsi", "ema_gap_pct", "dist_to_extreme_pct",
-                  "vol_usdt_24h", "recent_tr_pct", "change_24h_pct")
+        # Ratios only make sense for NUMERIC fields; `strength` and
+        # `direction` are compared by agreement instead, below.
+        fields = ("atr_pct", "rsi", "ema_gap_pct", "change_24h_pct",
+                  "volume_24h_usdt", "pct_below_24h_high",
+                  "pct_above_24h_low", "range_pos_24h", "recent_tr_pct",
+                  "htf_trend_pct", "efficiency")
         out = {"pairs": len(rows), "by_symbol": {}, "fields": {}}
         for f in fields:
             ratios = []
@@ -267,6 +271,50 @@ class PeerEval:
                     "min": round(min(ratios), 4),
                     "max": round(max(ratios), 4),
                 }
+        # PER SYMBOL, because 30 readings of 6 coins is not 30 independent
+        # observations — the same coin re-read across scans barely moves.
+        # Within a symbol the ATR ratio was stable to three decimals; ACROSS
+        # symbols it ran 1.16 to 1.49. The cross-symbol spread is the number
+        # that decides whether one scaling factor is usable at all.
+        per: dict = {}
+        for r in rows:
+            sym = r.get("symbol")
+            a = (r.get("theirs") or {}).get("atr_pct")
+            b = (r.get("mine") or {}).get("atr_pct")
+            try:
+                a, b = float(a), float(b)
+            except (TypeError, ValueError):
+                continue
+            if abs(a) > 1e-9:
+                per.setdefault(sym, []).append(b / a)
+        out["atr_by_symbol"] = {
+            k: {"n": len(v), "median": round(st.median(v), 4),
+                "min": round(min(v), 4), "max": round(max(v), 4)}
+            for k, v in sorted(per.items(), key=lambda kv: -len(kv[1]))[:30]}
+        if len(per) >= 3:
+            meds = [st.median(v) for v in per.values()]
+            out["atr_across_symbols"] = {
+                "symbols": len(meds),
+                "median": round(st.median(meds), 4),
+                "min": round(min(meds), 4),
+                "max": round(max(meds), 4),
+                "spread_pct": round((max(meds) / min(meds) - 1) * 100, 1),
+            }
+
+        # Categorical fields: agreement rate, not a ratio.
+        for f in ("strength", "direction", "breakout", "gap_rising", "turn"):
+            same = tot = 0
+            for r in rows:
+                a = (r.get("theirs") or {}).get(f)
+                b = (r.get("mine") or {}).get(f)
+                if a is None or b is None:
+                    continue
+                tot += 1
+                same += (a == b)
+            if tot >= 3:
+                out.setdefault("agreement", {})[f] = {
+                    "n": tot, "same_pct": round(same / tot * 100, 1)}
+
         syms = {}
         for r in rows:
             syms[r.get("symbol")] = syms.get(r.get("symbol"), 0) + 1
@@ -312,10 +360,17 @@ class PeerEval:
 
 # The readings that decide an entry, so a disagreement can be traced to the
 # number it came from rather than just to a verdict.
-_FIELDS = ("rsi", "atr_pct", "dist_to_extreme_pct", "ema_gap_pct",
-           "change_24h_pct", "vol_usdt_24h", "strength", "turned_up",
-           "gap_rising", "breakout", "efficiency", "recent_tr_pct",
-           "callback_pct", "streak")
+# NAMES MUST MATCH Candidate.as_row() in scanner.py. The first version
+# guessed `vol_usdt_24h` and `dist_to_extreme_pct`; the row actually carries
+# `volume_24h_usdt` and `pct_below_24h_high` / `pct_above_24h_low`. Those
+# fields silently never paired — and volume is the one that drives the
+# percentile divergence, so it was the most important omission.
+_FIELDS = ("rsi", "atr_pct", "ema_gap_pct", "change_24h_pct",
+           "volume_24h_usdt", "pct_below_24h_high", "pct_above_24h_low",
+           "range_pos_24h", "range_quality", "htf_trend_pct",
+           "gap_narrowing_pct", "gap_rise_pct", "recent_tr_pct",
+           "strength", "gap_rising", "breakout", "efficiency", "turn",
+           "direction")
 
 
 def _readings(row: dict) -> dict:

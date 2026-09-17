@@ -4559,3 +4559,74 @@ def test_a_disabled_peer_eval_says_which_kind_of_disabled():
     block = src[i:i + 1200]
     assert "was not constructed at startup" in block
     assert "PEER_EVAL_MODE=" in block
+
+
+def test_the_reading_fields_match_the_scanner_row():
+    """
+    The first version guessed `vol_usdt_24h` and `dist_to_extreme_pct`. The
+    row carries `volume_24h_usdt` and `pct_below_24h_high`, so those fields
+    silently never paired — and volume is what drives the percentile
+    divergence, the most important omission of the lot.
+    """
+    import inspect
+    from bot import peer_eval, scanner
+    row_src = inspect.getsource(scanner.Candidate.as_row)
+    for f in peer_eval._FIELDS:
+        if f in ("strength",):          # added by the snapshot, not as_row
+            continue
+        assert f'"{f}"' in row_src, f"{f} is not a real scanner row key"
+
+
+def test_volume_pairs_now(tmp_path):
+    from bot.peer_eval import PeerEval
+    pe = PeerEval(mode="both", peer_url="", label="live",
+                  path=str(tmp_path / "p.jsonl"))
+    mine = _Snap([{"symbol": f"C{i}/USDT:USDT", "volume_24h_usdt": v,
+                   "atr_pct": 2.0}
+                  for i, v in enumerate((349e6, 674e6, 451e6))])
+    theirs = {"from": "demo", "kind": "scan",
+              "rows": [{"symbol": f"C{i}/USDT:USDT", "volume_24h_usdt": v,
+                        "atr_pct": 2.0}
+                       for i, v in enumerate((6476e6, 9000e6, 12051e6))]}
+    pe.compare(theirs, mine)
+    c = pe.calibration()
+    assert "volume_24h_usdt" in c["fields"]
+    assert c["fields"]["volume_24h_usdt"]["median"] < 0.2   # demo ~19x higher
+
+
+def test_the_cross_symbol_spread_is_reported(tmp_path):
+    """
+    30 readings of 6 coins is not 30 independent observations. Within a symbol
+    the ATR ratio was stable to three decimals; ACROSS symbols it ran
+    1.16-1.49, and that spread decides whether one scaling factor is usable.
+    """
+    from bot.peer_eval import PeerEval
+    pe = PeerEval(mode="both", peer_url="", label="live",
+                  path=str(tmp_path / "p.jsonl"))
+    mine = _Snap([{"symbol": f"C{i}/USDT:USDT", "atr_pct": v}
+                  for i, v in enumerate((1.159, 1.360, 1.492))])
+    theirs = {"from": "demo", "kind": "scan",
+              "rows": [{"symbol": f"C{i}/USDT:USDT", "atr_pct": 1.0}
+                       for i in range(3)]}
+    pe.compare(theirs, mine)
+    c = pe.calibration()
+    assert c["atr_across_symbols"]["symbols"] == 3
+    assert c["atr_across_symbols"]["spread_pct"] == pytest.approx(28.7, abs=0.5)
+    assert len(c["atr_by_symbol"]) == 3
+
+
+def test_categorical_fields_are_agreement_not_ratio(tmp_path):
+    """SYN read 'weakening' on demo and 'strengthening' on live at the same
+    moment — a ratio is meaningless, agreement is not."""
+    from bot.peer_eval import PeerEval
+    pe = PeerEval(mode="both", peer_url="", label="live",
+                  path=str(tmp_path / "p.jsonl"))
+    mine = _Snap([{"symbol": f"C{i}/USDT:USDT", "strength": s, "atr_pct": 1.0}
+                  for i, s in enumerate(("weakening", "strengthening",
+                                         "weakening"))])
+    theirs = {"from": "demo", "kind": "scan",
+              "rows": [{"symbol": f"C{i}/USDT:USDT", "strength": "weakening",
+                        "atr_pct": 1.0} for i in range(3)]}
+    pe.compare(theirs, mine)
+    ag = pe.calibration()["agreement"]["strength"]
+    assert ag["n"] == 3 and ag["same_pct"] == pytest.approx(66.7, abs=0.1)
