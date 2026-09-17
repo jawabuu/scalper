@@ -1102,7 +1102,9 @@
               <option value="30">30 days</option>
               <option value="0">all</option>
             </select>
-            <select id="ft-export" onchange="onExportPick(this)" class="btn"
+            <button class="btn" onclick="downloadPeerReport()"
+                    title="what the other instance made of each entry">Peer</button>
+                        <select id="ft-export" onchange="onExportPick(this)" class="btn"
                     title="export the visible window, or the whole record"
                     style="padding:3px 6px">
               <option value="" selected>Export…</option>
@@ -2598,6 +2600,22 @@ let _histDays = 2;
 // A select rather than two buttons: the row is narrow and "Export all" is
 // rarely what is wanted, so it should not occupy equal space with the window
 // control. Resets to the placeholder so the same choice can be picked twice.
+// The cross-evaluation record: for each entry, what the other instance said
+// about the same symbol at the same moment.
+async function downloadPeerReport() {
+  try {
+    const d = await api('/api/peer/report?limit=2000');
+    if (!d || !d.enabled) { alert('Peer evaluation is not enabled'); return; }
+    const blob = new Blob([JSON.stringify(d, null, 2)],
+                          {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `peer-eval-${stamp(Date.now() / 1000)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { alert('Peer report unavailable: ' + e.message); }
+}
+
 function onExportPick(el) {
   const v = el.value;
   el.value = '';

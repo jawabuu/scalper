@@ -4335,3 +4335,118 @@ def test_a_missing_exchange_handle_does_not_raise():
     svc.symbol_leverage_detail = lambda sym: (20.0, "positionRisk")
     lev, src = svc.ensure_leverage("LSK/USDT:USDT", 10)
     assert lev == 20.0 and src == "positionRisk"
+
+
+# ── Peer cross-evaluation ──────────────────────────────────────────────────
+#
+# Over one day demo and live traded 15 symbols EACH and overlapped on FOUR.
+# Demo won 77%, live 41%, on identical rules — and nothing in either log says
+# whether that is the config, the market, or which coins each happened to see.
+
+class _Scan:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def snapshot(self):
+        return {"candidates": self._rows}
+
+
+def _pe(tmp_path, mode="both", label="live"):
+    from bot.peer_eval import PeerEval
+    return PeerEval(mode=mode, peer_url="", label=label,
+                    path=str(tmp_path / "peer.jsonl"))
+
+
+def _payload(symbol="BR/USDT:USDT"):
+    return {"from": "demo", "symbol": symbol, "side": "short",
+            "at": 1_000_000.0, "reason": "RSI 85", "readings": {"rsi": 85.0}}
+
+
+def test_a_symbol_the_peer_never_saw_is_reported_as_such(tmp_path):
+    """The most informative verdict: the DATA differed, not the rules."""
+    pe = _pe(tmp_path)
+    out = pe.evaluate(_payload(), _Scan([]), None)
+    assert out["verdict"] == "not_surfaced"
+    assert "not in our current scan" in out["detail"]
+
+
+def test_a_symbol_the_peer_refuses_carries_the_reason(tmp_path):
+    import logging
+    from bot.auto_trader import AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        pe = _pe(tmp_path)
+        row = _short(breakout=_brk(gap_widening=False, breakout=False))
+        row["symbol"] = "BR/USDT:USDT"
+        row["rsi"] = 60.0                      # below short_rsi_min
+        auto = type("A", (), {"cfg": AutoTradeConfig(
+            enabled=True, short_rsi_min=75)})()
+        out = pe.evaluate(_payload(), _Scan([row]), auto)
+        assert out["verdict"] == "refused"
+        assert out["detail"]
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_agreement_is_reported_as_would_enter(tmp_path):
+    import logging
+    from bot.auto_trader import AutoTradeConfig
+    logging.disable(logging.CRITICAL)
+    try:
+        pe = _pe(tmp_path)
+        row = _short(breakout=_brk(gap_widening=False, breakout=False))
+        row["symbol"] = "BR/USDT:USDT"
+        auto = type("A", (), {"cfg": AutoTradeConfig(
+            enabled=True, short_rsi_min=75, veto_breakout=False)})()
+        out = pe.evaluate(_payload(), _Scan([row]), auto)
+        assert out["verdict"] == "would_enter"
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_each_side_can_be_send_receive_or_both(tmp_path):
+    from bot.peer_eval import PeerEval
+    for mode, sends, receives in (("off", False, False),
+                                  ("send", True, False),
+                                  ("receive", False, True),
+                                  ("both", True, True)):
+        p = PeerEval(mode=mode, peer_url="http://peer:8000", label="x")
+        assert (p.sends, p.receives) == (sends, receives), mode
+
+
+def test_receiving_is_refused_when_the_mode_says_send_only(tmp_path):
+    pe = _pe(tmp_path, mode="send")
+    assert pe.evaluate(_payload(), _Scan([]), None)["verdict"] == "disabled"
+
+
+def test_a_malformed_payload_never_raises(tmp_path):
+    pe = _pe(tmp_path)
+    for bad in ({}, {"symbol": ""}, {"symbol": None}):
+        out = pe.evaluate(bad, _Scan([]), None)
+        assert out["verdict"] in ("error", "not_surfaced")
+
+
+def test_the_endpoint_is_rate_limited(tmp_path):
+    from bot.peer_eval import MAX_PER_MINUTE
+    pe = _pe(tmp_path)
+    verdicts = [pe.evaluate(_payload(), _Scan([]), None)["verdict"]
+                for _ in range(MAX_PER_MINUTE + 5)]
+    assert "rate_limited" in verdicts
+
+
+def test_evaluation_makes_no_exchange_calls():
+    """It answers from the snapshot already in hand — no weight, and it cannot
+    be used to drive requests, which is what replaces auth here."""
+    import inspect
+    from bot import peer_eval
+    src = inspect.getsource(peer_eval.PeerEval.evaluate)
+    for forbidden in ("fetch_ohlcv", "fetch_ticker", "exchange", "requests"):
+        assert forbidden not in src, forbidden
+
+
+def test_both_sides_are_recorded_for_comparison(tmp_path):
+    pe = _pe(tmp_path)
+    pe.evaluate(_payload(), _Scan([]), None)
+    rows = pe.report()
+    assert rows and rows[0]["kind"] == "received"
+    assert "theirs" in rows[0] and "mine" in rows[0]

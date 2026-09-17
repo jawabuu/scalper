@@ -841,6 +841,8 @@ class AutoTrader:
         # `except` logged at DEBUG, and DEBUG is invisible at INFO — so stream
         # health silently never printed while the stream itself worked.
         self._stream_log_n: int = 0
+        # Cross-evaluation peer, set by main.py. None = off.
+        self.peer_eval = None
 
     # -- reporting -------------------------------------------------------
     def _record(self, action: str, detail: str, symbol: str = ""):
@@ -1346,6 +1348,15 @@ class AutoTrader:
                     f"AUTO-ENTRY {side.upper()} {symbol}: {decision.reason}"
                     f"{' (' + note + ')' if note else ''}"
                     f"{' [DRY RUN]' if res.get('dry_run') else ''}")
+                # Ask the other instance whether it would have taken this. Own
+                # thread, everything swallowed — instrumentation must never
+                # affect a trade.
+                pe = getattr(self, "peer_eval", None)
+                if pe is not None:
+                    try:
+                        pe.notify_entry(symbol, side, row, decision.reason)
+                    except Exception:
+                        pass
                 self._record("entered",
                              f"{side} · {decision.reason}"
                              + (f" · {note}" if note else ""), symbol)

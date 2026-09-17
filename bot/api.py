@@ -48,6 +48,13 @@ def _instance_identity() -> dict:
 
 
 _auto_error: str = ""
+_peer_eval = None
+
+
+def set_peer_eval(pe):
+    """Attach the cross-evaluation service."""
+    global _peer_eval
+    _peer_eval = pe
 
 
 def set_auto_trader(auto):
@@ -326,6 +333,30 @@ def create_app(engine) -> FastAPI:
             ctx = t.get("entry_context") or {}
             w.writerow([t.get(k) for k in keys] + [ctx.get(k) for k in ctx_keys])
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
+    @app.post("/api/peer/evaluate")
+    def peer_evaluate(payload: dict):
+        """
+        INTERNAL, UNAUTHENTICATED, EVALUATION ONLY.
+
+        Reachable only on the Docker network between the two containers; it is
+        not exposed by nginx. It reads the scan snapshot this instance already
+        holds and returns a verdict — it places no orders, changes no config
+        and makes no exchange calls, so the worst a caller can do is fill the
+        report file. Rate-limited to 60/min for that reason.
+        """
+        pe = _peer_eval
+        if pe is None:
+            return {"verdict": "disabled", "detail": "peer eval not configured"}
+        return pe.evaluate(payload, _scanner, _auto)
+
+    @app.get("/api/peer/report")
+    def peer_report(limit: int = 500, user: dict = Depends(_require_auth)):
+        pe = _peer_eval
+        if pe is None:
+            return {"enabled": False, "rows": []}
+        return {"enabled": True, "status": pe.status(),
+                "rows": pe.report(limit=limit)}
 
     @app.get("/api/auto-trade")
     def auto_trade_status(user: dict = Depends(_require_auth)):

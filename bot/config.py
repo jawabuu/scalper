@@ -350,6 +350,15 @@ class BotConfig:
     # The websocket is OPT-IN; REST is the transport on both environments so
     # findings translate. See CandidateStream for why the ~1s it buys does not
     # change any decision the drift gate makes.
+    # Cross-evaluation with the other instance. "off" | "send" | "receive" |
+    # "both". Internal only — the endpoint is not exposed by nginx and makes
+    # no exchange calls.
+    peer_eval_mode: str = field(default_factory=lambda: _env(
+        "PEER_EVAL_MODE", "both").strip().lower())
+    peer_eval_url: str = field(default_factory=lambda: _env(
+        "PEER_EVAL_URL", "").strip())
+    peer_eval_label: str = field(default_factory=lambda: _env(
+        "PEER_EVAL_LABEL", "").strip())
     stream_websocket_enabled: bool = field(default_factory=lambda: _env_bool(
         "CANDIDATE_WEBSOCKET_ENABLED", False))
     # Override the websocket endpoint, e.g. to try an alternate live host.

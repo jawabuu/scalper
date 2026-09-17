@@ -306,6 +306,27 @@ if __name__ == "__main__":
                         log.error(f"candidate stream unavailable ({e}) — "
                                   f"entries will use the scan snapshot")
                         auto.stream = None
+                # Cross-evaluation. Sends on entry, answers the peer from
+                # our own snapshot. Never blocks the trading loop.
+                try:
+                    from bot.peer_eval import PeerEval
+                    from bot.api import set_peer_eval
+                    label = (cfg.peer_eval_label
+                             or ("demo" if cfg.guardian_demo else "live"))
+                    pe = PeerEval(
+                        mode=cfg.peer_eval_mode,
+                        peer_url=cfg.peer_eval_url,
+                        label=label,
+                        path=str(Path(cfg.futures_state_path).with_name(
+                            "peer-eval.jsonl")))
+                    auto.peer_eval = pe
+                    set_peer_eval(pe)
+                    if pe.sends or pe.receives:
+                        log.warning(
+                            f"Peer eval: {pe.mode} as '{label}'"
+                            + (f" -> {cfg.peer_eval_url}" if pe.sends else ""))
+                except Exception as e:
+                    log.warning(f"peer eval unavailable: {e}")
                 set_auto_trader(auto)
 
                 def _auto_loop():
