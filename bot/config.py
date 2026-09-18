@@ -389,6 +389,26 @@ class BotConfig:
         "AUTO_TURN_MIN_BARS_SINCE", 2))
     # Longs only: require the EMA gap to be narrowing. Default TRUE — the
     # condition the scanner's own comment already claimed to apply.
+    # SHORT MIRRORS of the two long confirmations. The scanner already computes
+    # turned(df, cfg, "short") and carries it as `turn` on every short
+    # candidate, and it is read by nothing: a short qualified on RSI plus
+    # `gap > -ema_tolerance_pct`, which a strong uptrend passes by construction.
+    # G/USDT 2026-09-18 07:59 was shorted with turned_up=False and
+    # bars_since_low=0 — the extreme was the CURRENT bar, i.e. still making new
+    # highs — and lost 30% ROI.
+    #
+    # Default FALSE, unlike the long side. Not timidity: switching it on makes
+    # 26 existing short tests refuse entries they used to take, which is the
+    # measure of how much it bites. Set AUTO_SHORT_REQUIRE_TURN=true in the
+    # compose env to enable it, and compare one run against one run.
+    auto_short_require_turn: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_SHORT_REQUIRE_TURN", False))
+    # The EMA gap must be NARROWING — EMA9 falling back toward EMA21 from
+    # above. Default FALSE: on G it was already True, so it would not have
+    # stopped that trade, and turning on two screens at once makes the next
+    # run unattributable.
+    auto_short_require_convergence: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_SHORT_REQUIRE_CONVERGENCE", False))
     auto_long_require_convergence: bool = field(default_factory=lambda: _env_bool(
         "AUTO_LONG_REQUIRE_CONVERGENCE", True))
     # off | all | short | long  (True/False still accepted)

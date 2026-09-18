@@ -1559,7 +1559,28 @@ class FuturesGuardian:
 
         prot = [o for o in live
                 if o.get("reduce_only") and "STOP" in (o.get("type") or "").upper()]
+        # An id present in ANY book is present. Classification is a separate
+        # question from existence, and conflating them produced a false alarm
+        # the moment the audit started seeing the algo book: G/USDT
+        # 2026-09-18 08:38:39 reported "2 order(s) but NONE is protective" and
+        # both tracked ids MISSING, while both were resting fine.
+        #
+        # Binance's algo rows do not always carry reduceOnly, so they fail the
+        # protective test above. That test stays STRICT on purpose — entries
+        # here are TRAILING_STOP orders too, and widening it would let the
+        # sweep treat an entry as a stop and cancel it.
+        all_ids = {o["id"] for o in live if o.get("id")}
         live_ids = {o["id"] for o in prot if o.get("id")}
+        unclassified = [o for o in live
+                        if o.get("id") and o["id"] not in live_ids
+                        and o["id"] in tracked_ids]
+        if unclassified:
+            log.debug(
+                f"{pos.symbol}: {len(unclassified)} tracked order(s) in the "
+                f"listing could not be classified as protective (algo rows "
+                f"often omit reduceOnly): "
+                + ", ".join(f"{o['id']}:{o.get('type') or '?'}"
+                            for o in unclassified))
         trails = [o for o in prot
                   if "TRAILING" in (o.get("type") or "").upper()]
 
@@ -1578,11 +1599,24 @@ class FuturesGuardian:
                      f"anything. guardian holds [{held}].")
             return
         if not prot:
-            log.warning(f"PROTECTION-UNPROTECTED {pos.symbol}: the listing "
-                        f"returned {len(live)} order(s) but NONE is protective. "
-                        f"guardian holds [{held}].")
+            # Only an alarm when the tracked orders are genuinely ABSENT. If
+            # they are in the listing but unclassifiable, that is a field-shape
+            # problem in the algo payload, not an unprotected position.
+            tracked_present = [o for o in tracked_ids if o in all_ids]
+            if tracked_present:
+                log.info(
+                    f"PROTECTION {pos.symbol}: the listing returned "
+                    f"{len(live)} order(s); {len(tracked_present)} of the "
+                    f"guardian's are present but carry no reduceOnly flag, so "
+                    f"they cannot be confirmed protective. Not treating this "
+                    f"as unprotected. guardian holds [{held}].")
+            else:
+                log.warning(f"PROTECTION-UNPROTECTED {pos.symbol}: the listing "
+                            f"returned {len(live)} order(s) but NONE is "
+                            f"protective. guardian holds [{held}].")
         for name, oid in tracked.items():
-            if oid and oid not in live_ids:
+            # Existence, not classification — see all_ids above.
+            if oid and oid not in all_ids:
                 log.warning(f"PROTECTION-MISSING {pos.symbol}: tracked {name} "
                             f"{oid} is not in the exchange's open orders — it "
                             f"filled, was cancelled, or the listing is blind.")

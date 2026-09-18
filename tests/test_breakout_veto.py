@@ -5458,3 +5458,114 @@ def test_a_trade_with_no_entry_context_is_not_counted_anywhere():
     rows = bucket_by([{"realised_pnl_usdt": 1.0, "final_roi": 5.0}],
                      lambda t: _stamp(t, "change_24h_pct"), CHANGE_24H_BUCKETS)
     assert sum(r["n"] for r in rows) == 0
+
+
+# ── Short entries can now require a confirmed downturn ───────────────────────
+# A short qualified on RSI plus `gap > -ema_tolerance_pct`, which a strong
+# uptrend passes by construction. scanner.py:791 says so outright: convergence
+# is "INFORMATIONAL (fade-early mode). RSI leads the screen." So nothing asked
+# whether the move was turning. G/USDT 2026-09-18 07:59 was shorted with
+# turned_up=False and bars_since_low=0 — the extreme was the CURRENT bar.
+
+def _short_row(**kw):
+    row = {"symbol": "G/USDT:USDT", "direction": "short",
+           "rsi": 77.2, "atr_pct": 3.203,
+           "ema_gap_pct": 5.55, "gap_narrowing": True, "gap_rise_pct": -0.5716,
+           # The callback is sized from the distance to the 24h high, so a row
+           # without it is refused before any screen is reached. G's own value.
+           "pct_below_24h_high": -1.01,
+           "turn": {"turned_up": False, "bars_since_low": 0, "rise_pct": 0.0}}
+    row.update(kw)
+    return row
+
+
+def _short_cfg(**kw):
+    from bot.auto_trader import AutoTradeConfig
+    base = dict(short_rsi_min=70, min_atr_pct=0.0, veto_breakout=False)
+    base.update(kw)
+    return AutoTradeConfig(**base)
+
+
+def test_the_short_turn_screen_is_off_by_default():
+    """Enabling it refuses entries the old screen took. Opt in, one run."""
+    from bot.auto_trader import AutoTradeConfig
+    assert AutoTradeConfig().short_require_turn is False
+    assert AutoTradeConfig().short_require_convergence is False
+
+
+def test_g_would_have_been_refused_with_the_turn_screen_on():
+    from bot.auto_trader import evaluate_candidate
+    d = evaluate_candidate(_short_row(), 2, _short_cfg(short_require_turn=True))
+    assert not d.enter
+    assert "no turn yet" in d.reason
+    assert "the high is not behind us" in d.reason
+
+
+def test_a_confirmed_turn_still_enters():
+    from bot.auto_trader import evaluate_candidate
+    row = _short_row(turn={"turned_up": True, "bars_since_low": 4,
+                           "rise_pct": 0.8})
+    assert evaluate_candidate(row, 2, _short_cfg(short_require_turn=True)).enter
+
+
+def test_the_turn_screen_does_not_touch_longs():
+    from bot.auto_trader import evaluate_candidate
+    d = evaluate_candidate(_short_row(), 2, _short_cfg(short_require_turn=True))
+    assert d.side == "short"        # the rule is side-scoped
+    # With it off, the same row enters — so nothing else in the path changed.
+    assert evaluate_candidate(_short_row(), 2, _short_cfg()).enter
+
+
+def test_convergence_is_the_second_screen_and_separate():
+    """G passed convergence, so enabling both at once proves nothing."""
+    from bot.auto_trader import evaluate_candidate
+    row = _short_row(turn={"turned_up": True, "bars_since_low": 4,
+                           "rise_pct": 0.8})
+    assert evaluate_candidate(
+        row, 2, _short_cfg(short_require_convergence=True)).enter   # narrowing
+    row2 = dict(row, gap_narrowing=False)
+    d = evaluate_candidate(row2, 2, _short_cfg(short_require_convergence=True))
+    assert not d.enter and "not converging" in d.reason
+
+
+def test_both_short_screens_follow_the_env_convention():
+    import inspect
+    import bot.config as botcfg
+    import main
+    src = inspect.getsource(botcfg)
+    assert '"AUTO_SHORT_REQUIRE_TURN"' in src
+    assert '"AUTO_SHORT_REQUIRE_CONVERGENCE"' in src
+    m = inspect.getsource(main)
+    assert "short_require_turn=cfg.auto_short_require_turn" in m
+    assert "short_require_convergence=cfg.auto_short_require_convergence" in m
+
+
+# ── The audit must not cry wolf on algo rows ─────────────────────────────────
+# G 2026-09-18 08:38:39: "2 order(s) but NONE is protective" and both tracked
+# ids MISSING, while both were resting. Binance's algo rows omit reduceOnly,
+# so they fail the protective test — which stays strict, because entries here
+# are TRAILING_STOP orders too and widening it would let them be cancelled.
+
+def test_existence_is_checked_against_every_book_not_just_protective_ones():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert "all_ids = {" in src
+    assert "if oid and oid not in all_ids:" in src
+
+
+def test_a_present_but_unclassifiable_order_is_not_called_unprotected():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert "tracked_present" in src
+    # The sentence spans an f-string break, so match a fragment.
+    assert "Not treating this" in src and "as unprotected" in src
+
+
+def test_the_protective_test_itself_stays_strict():
+    """Widening it would let the sweep cancel an entry order."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert 'o.get("reduce_only") and "STOP" in' in src

@@ -65,6 +65,8 @@ class AutoTradeConfig:
     defer_vol_late_trend: float = 1.5
     long_require_turn: bool = True
     long_require_convergence: bool = True
+    short_require_turn: bool = False
+    short_require_convergence: bool = False
     # off | all | short | long. Two booleans said the same thing twice and
     # could contradict each other; one setting cannot.
     #   short  velocity floor on shorts only (the default)
@@ -391,6 +393,34 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                         f"{turn.get('bars_since_low')} candle(s) back "
                         f"(rise {turn.get('rise_pct')}%). Buying the left side "
                         f"of a U is buying a falling market."))
+
+    if side == "short" and cfg.short_require_turn:
+        # The mirror of the long turn test. turned(..., "short") asks whether
+        # the HIGH is behind us: the fast EMA's extreme within the window is at
+        # least turn_min_bars_since candles back, and price is off it. A peak
+        # still forming is not a peak crossed.
+        #
+        # This is the "confirm the downturn" screen. Without it a short needed
+        # only a high RSI, and RSI stays high for the whole of a trend.
+        turn = row.get("turn") or {}
+        if not turn.get("turned_up"):
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"no turn yet — the high is not behind us "
+                        f"(bars since extreme "
+                        f"{turn.get('bars_since_low')}, move off it "
+                        f"{turn.get('rise_pct')}%)"))
+
+    if side == "short" and cfg.short_require_convergence:
+        # SIGNED: EMA9 must be falling back TOWARD EMA21 from above. A gap
+        # still widening is a trend, not a rollover.
+        if not row.get("gap_narrowing"):
+            return AutoDecision(
+                False, symbol, side,
+                reason=(f"EMA9 is not converging on EMA21 "
+                        f"(gap {row.get('ema_gap_pct')}%, moved "
+                        f"{row.get('gap_rise_pct')}%) — a widening gap is a "
+                        f"trend, not a rollover"))
 
     if side == "long" and cfg.long_require_convergence:
         # SIGNED, not absolute. A gap going +0.10% -> +0.02% shrinks just as
@@ -917,6 +947,8 @@ class AutoTrader:
                 "last_refusals": dict(getattr(self, "_last_refusals", {})),
                 "stream": (_stream_status(getattr(self, "stream", None))),
                 "long_require_convergence": self.cfg.long_require_convergence,
+                "short_require_turn": self.cfg.short_require_turn,
+                "short_require_convergence": self.cfg.short_require_convergence,
                 "callback_use_velocity": velocity_mode(
                     self.cfg.callback_use_velocity),
                 "veto_breakout": self.cfg.veto_breakout,
@@ -965,6 +997,8 @@ class AutoTrader:
         "defer_vol_trend": (float, 0.5, 5.0),
         "defer_vol_late_trend": (float, 0.0, 5.0),
         "long_require_convergence": (bool, None, (True, False)),
+        "short_require_turn": (bool, None, (True, False)),
+        "short_require_convergence": (bool, None, (True, False)),
         "callback_use_velocity": (str, None, ("off", "all", "short", "long")),
         "veto_breakout": (bool, None, (True, False)),
         "max_dist_to_extreme_pct": (float, 0.1, 50.0),

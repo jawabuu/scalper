@@ -286,6 +286,8 @@ if __name__ == "__main__":
                     veto_breakout=cfg.auto_veto_breakout,
                     long_require_convergence=cfg.auto_long_require_convergence,
                     long_require_turn=cfg.auto_long_require_turn,
+                    short_require_turn=cfg.auto_short_require_turn,
+                    short_require_convergence=cfg.auto_short_require_convergence,
                     defer_on_rising_volume=cfg.auto_defer_rising_volume,
                     defer_vol_trend=cfg.auto_defer_vol_trend,
                     defer_vol_late_trend=cfg.auto_defer_vol_late_trend,
