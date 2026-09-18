@@ -5953,3 +5953,83 @@ def test_the_allow_list_follows_the_env_convention():
     assert '"SCAN_ALLOWED_UNDERLYING"' in inspect.getsource(botcfg)
     assert "allowed_underlying=tuple(cfg.scan_allowed_underlying)" in \
         inspect.getsource(main)
+
+
+# ── The activation the exchange KEEPS, not the one we asked for ──────────────
+# G/USDT 2026-09-18 14:46:43: asked for 0.009818 (+5% ROI), the exchange
+# reported 0.0098795 — mark. Accepted, so nothing raised, and the trail rested
+# at a level nobody chose. The request was never logged, so it could not be
+# told apart from "ignored", "clamped" or "never sent".
+
+def _resp_guardian():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    return g
+
+
+class _RPos:
+    symbol = "G/USDT:USDT"; side = "short"
+    entry_price = 0.009867; qty = 1.0
+    leverage = 10; effective_leverage = 10.0; margin = 1.0
+
+
+def test_a_substituted_activation_is_an_error_not_a_note(caplog):
+    g = _resp_guardian()
+    with caplog.at_level("INFO"):
+        g._log_trail_response(
+            _RPos(), {"activationPrice": 0.009818, "callbackRate": 0.3},
+            {"info": {"orderId": "1", "status": "NEW",
+                      "activatePrice": "0.0098795", "priceRate": "0.3"}})
+    assert "TRAIL-ACTIVATION-IGNORED" in caplog.text
+    assert "0.009818" in caplog.text and "0.0098795" in caplog.text
+
+
+def test_an_honoured_activation_does_not_raise_the_alarm(caplog):
+    g = _resp_guardian()
+    with caplog.at_level("INFO"):
+        g._log_trail_response(
+            _RPos(), {"activationPrice": 0.009818, "callbackRate": 0.3},
+            {"info": {"orderId": "1", "activatePrice": "0.009818"}})
+    assert "TRAIL-RESPONSE" in caplog.text
+    assert "TRAIL-ACTIVATION-IGNORED" not in caplog.text
+
+
+def test_no_activation_sent_means_nothing_to_compare(caplog):
+    g = _resp_guardian()
+    with caplog.at_level("INFO"):
+        g._log_trail_response(_RPos(), {"callbackRate": 0.3},
+                              {"info": {"activatePrice": "0.0098795"}})
+    assert "TRAIL-ACTIVATION-IGNORED" not in caplog.text
+
+
+def test_a_malformed_response_cannot_break_placement(caplog):
+    g = _resp_guardian()
+    g._log_trail_response(_RPos(), {"activationPrice": 0.1}, None)
+    g._log_trail_response(_RPos(), {"activationPrice": 0.1},
+                          {"info": {"activatePrice": "not-a-number"}})
+
+
+def test_both_the_request_and_the_retry_are_logged():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._create_trail_order)
+    assert src.count("TRAIL-REQUEST") == 2          # first attempt and retry
+    assert src.count("self._log_trail_response(") == 2
+
+
+def test_two_resting_trails_are_expected_under_arm_at_entry():
+    """
+    Both trails resting is the POINT: there is no arm event to supersede the
+    adaptive one, and not superseding it preserves the extreme Binance has
+    been tracking.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    i = src.index('tracked["adaptive"] and tracked["armed"]')
+    tail = src[i:]
+    assert 'getattr(self.cfg, "arm_at_entry", False)' in tail
+    assert "as arm-at-entry intends" in tail
+    assert "PROTECTION-OVERLAP" in tail        # still warns when it is off

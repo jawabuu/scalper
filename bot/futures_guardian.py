@@ -1318,6 +1318,43 @@ class FuturesGuardian:
         except Exception:
             return raw
 
+    def _log_trail_response(self, pos: FuturesPosition,
+                            params: dict, order: dict) -> None:
+        """
+        Compare the activation SENT against the one the exchange kept.
+
+        A silent substitution is the dangerous case: the order is accepted, so
+        nothing raises, and the trail rests at a level nobody asked for. That
+        is what happened to the arm-at-entry trail on G/USDT — asked +5% ROI,
+        got mark, which makes a 0.3% callback live from entry instead of
+        dormant until +5%.
+        """
+        try:
+            info = (order or {}).get("info") or {}
+            sent = params.get("activationPrice")
+            got = info.get("activatePrice") or info.get("activationPrice")
+            rate = info.get("priceRate") or info.get("callbackRate")
+            log.info(
+                f"TRAIL-RESPONSE {pos.symbol}: id={info.get('orderId') or (order or {}).get('id')} "
+                f"status={info.get('status')} "
+                f"activation sent={sent} kept={got} "
+                f"callbackRate sent={params.get('callbackRate')} kept={rate} "
+                f"workingType={info.get('workingType')}")
+            if sent and got:
+                try:
+                    d = (float(got) - float(sent)) / float(sent) * 100
+                except (TypeError, ValueError, ZeroDivisionError):
+                    return
+                if abs(d) > 0.01:
+                    log.error(
+                        f"TRAIL-ACTIVATION-IGNORED {pos.symbol}: asked for "
+                        f"{sent}, the exchange kept {got} ({d:+.3f}%). The "
+                        f"trail is NOT resting where it was placed — treat "
+                        f"any level-based arming as not working until this "
+                        f"is understood.")
+        except Exception as e:
+            log.debug(f"{pos.symbol}: trail response log failed: {e}")
+
     def _create_trail_order(self, pos: FuturesPosition, side: str,
                             qty: float, cb: float,
                             activation: float | None = None,
@@ -1339,10 +1376,20 @@ class FuturesGuardian:
             if activate_now else None)
         if act:
             params["activationPrice"] = act
+        # Log what is SENT, not just what comes back. G/USDT 2026-09-18
+        # 14:46:43 asked for activation 0.009818 (+5% ROI) and the exchange
+        # reported 0.0098795, which is mark — accepted, but with a DIFFERENT
+        # activation, and no rejection to explain it. Without the request
+        # beside the response there is no way to tell whether the value was
+        # ignored, clamped, or never sent.
+        log.info(f"TRAIL-REQUEST {pos.symbol}: side={side} qty={qty} "
+                 f"params={params}")
         try:
-            return self.exchange.create_order(
+            order = self.exchange.create_order(
                 symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
                 amount=qty, price=None, params=params)
+            self._log_trail_response(pos, params, order)
+            return order
         except Exception as e:
             if not act:
                 raise
@@ -1352,9 +1399,13 @@ class FuturesGuardian:
                 f"derive one from its own latest price, which may leave the "
                 f"trail dormant.")
             params.pop("activationPrice", None)
-            return self.exchange.create_order(
+            log.info(f"TRAIL-REQUEST {pos.symbol} (retry): side={side} "
+                     f"qty={qty} params={params}")
+            order = self.exchange.create_order(
                 symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
                 amount=qty, price=None, params=params)
+            self._log_trail_response(pos, params, order)
+            return order
 
     def _place_native_trail(self, pos: FuturesPosition,
                             rescue: bool = False,
@@ -1742,10 +1793,19 @@ class FuturesGuardian:
                         f"{[t.get('id') for t in trails]}. Exactly one is "
                         f"intended.")
         if tracked["adaptive"] and tracked["armed"]:
-            log.warning(f"PROTECTION-OVERLAP {pos.symbol}: adaptive trail "
-                        f"{tracked['adaptive']} and armed trail "
-                        f"{tracked['armed']} are both held — arming should "
-                        f"have superseded the adaptive one.")
+            # Under arm-at-entry BOTH trails are meant to rest: the armed one
+            # is placed dormant at entry, so there is no arm event to
+            # supersede the adaptive one — and not superseding it is the point,
+            # since every supersede discarded the extreme Binance had tracked.
+            if getattr(self.cfg, "arm_at_entry", False):
+                log.info(f"PROTECTION {pos.symbol}: adaptive and armed trails "
+                         f"both resting, as arm-at-entry intends "
+                         f"({tracked['adaptive']}, {tracked['armed']}).")
+            else:
+                log.warning(f"PROTECTION-OVERLAP {pos.symbol}: adaptive trail "
+                            f"{tracked['adaptive']} and armed trail "
+                            f"{tracked['armed']} are both held — arming should "
+                            f"have superseded the adaptive one.")
 
     def _wait_counterfactual(self, symbol: str, side: str, meta: dict) -> dict:
         """
