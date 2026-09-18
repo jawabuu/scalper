@@ -544,6 +544,13 @@ def create_app(engine) -> FastAPI:
             "testnet":          _engine.cfg.testnet,
             "strategy":         _engine.cfg.strategy,
             "kill_switch":      _engine.kill_switch,
+            # Whether cross-instance evaluation is actually doing anything, so
+            # the UI can hide its Peer control rather than offering a button
+            # that only ever explains it is off. PEER_EVAL_MODE=off -> False.
+            "peer_eval_enabled": bool(
+                _peer_eval is not None
+                and (getattr(_peer_eval, "sends", False)
+                     or getattr(_peer_eval, "receives", False))),
             "trailing_activation_enabled": _engine.trailing_activation_enabled,
             "trailing_activation_pct":     _engine.trailing_activation_pct,
             "btc_filter_enabled":          _engine.btc_filter_enabled,

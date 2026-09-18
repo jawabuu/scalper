@@ -4959,3 +4959,174 @@ def test_the_ui_asks_for_a_figure_and_validates_it():
     assert "prompt(" in block
     assert "account_value" in block
     assert "not a positive number" in block
+
+
+# ── Price reference and provenance ───────────────────────────────────────────
+# 2026-09-17/18: on five shorts the guardian's price came in BELOW the real
+# mark every time — by 0.11%, 0.21%, 0.99% and 9.78%. For a short that inflates
+# ROI, and the damage scaled with the gap: floor refused with -2021, trail left
+# dormant, trail rejected outright, +96.5% reported on a position 1.4% down.
+
+def _price_guardian():
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.exchange = object()
+    g._premium_index_mark = lambda symbol: None
+    return g
+
+
+def test_mark_beats_last_when_both_are_present():
+    g = _price_guardian()
+    t = {"last": 0.0015552, "close": 0.0015552,
+         "info": {"markPrice": "0.0015585"}}
+    assert g._price_from_ticker("ONE/USDT:USDT", t) == 0.0015585
+
+
+def test_the_premium_index_supplies_mark_when_the_ticker_has_none():
+    # ccxt's binanceusdm ticker comes from /fapi/v1/ticker/24hr, which carries
+    # no markPrice, so this is the normal path and not a fallback.
+    g = _price_guardian()
+    g._premium_index_mark = lambda symbol: 0.1211
+    assert g._price_from_ticker("X/USDT:USDT", {"last": 0.10926}) == 0.1211
+
+
+def test_last_is_used_when_no_mark_exists_but_the_source_says_so():
+    g = _price_guardian()
+    assert g._price_from_ticker("UNI/USDT:USDT", {"last": 7.298}) == 7.298
+    assert "NO MARK" in g._last_price_source
+
+
+def test_the_source_of_every_price_is_recorded():
+    g = _price_guardian()
+    g._premium_index_mark = lambda symbol: 0.1211
+    g._price_from_ticker("X/USDT:USDT", {"last": 1.0})
+    assert g._last_price_source == "premiumIndex.markPrice"
+
+
+def test_a_stale_fallback_price_is_named_out_loud(caplog):
+    """
+    resolve_price() reaches for previousClose (24h old) and a completed candle
+    before giving up. Whatever it returns must not pass silently as current.
+    """
+    import bot.futures_guardian as fg
+    g = _price_guardian()
+    orig = fg.resolve_price
+    fg.resolve_price = lambda ex, sym: (0.10926, "ticker.previousClose")
+    try:
+        with caplog.at_level("WARNING"):
+            assert g._price_from_ticker("X/USDT:USDT", {}) == 0.10926
+        assert "previousClose" in caplog.text
+        assert "NOT a live price" in caplog.text
+    finally:
+        fg.resolve_price = orig
+
+
+# ── An order the exchange refused is not protection ──────────────────────────
+
+class _RejectPos:
+    symbol = "ONE/USDT:USDT"; side = "short"
+    entry_price = 0.12093; qty = 1.0
+    leverage = 10; effective_leverage = 10.0; margin = 1.0
+
+
+def _accept_guardian():
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g._record = lambda *a, **k: None
+    return g
+
+
+def test_a_rejected_order_yields_no_id():
+    g = _accept_guardian()
+    order = {"id": "2000001443682594", "status": "REJECTED"}
+    assert g._accepted_id(_RejectPos(), order, "ARMED trailing stop") is None
+
+
+def test_rejection_is_read_from_the_raw_info_block_too():
+    g = _accept_guardian()
+    order = {"id": "123", "info": {"status": "REJECTED"}}
+    assert g._accepted_id(_RejectPos(), order, "fixed stop") is None
+
+
+def test_an_expired_order_is_not_protection_either():
+    g = _accept_guardian()
+    assert g._accepted_id(_RejectPos(), {"id": "1", "status": "EXPIRED"},
+                          "trail") is None
+
+
+def test_an_accepted_order_returns_its_id():
+    g = _accept_guardian()
+    order = {"id": "2000001442640586", "status": "NEW"}
+    assert g._accepted_id(_RejectPos(), order, "ARMED trailing stop") \
+        == "2000001442640586"
+
+
+def test_a_response_with_no_id_is_a_failure():
+    g = _accept_guardian()
+    assert g._accepted_id(_RejectPos(), {"status": "NEW"}, "trail") is None
+
+
+def test_a_missing_status_does_not_block_a_real_id():
+    """Not every payload carries status; absence is not rejection."""
+    g = _accept_guardian()
+    assert g._accepted_id(_RejectPos(), {"id": "77"}, "trail") == "77"
+
+
+def test_all_three_placement_sites_verify_acceptance():
+    """
+    The fixed stop, the rescue trail and the armed trail. Any one of them
+    recording an id for a refused order lets it displace real protection.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    # Four: the fixed stop, each leg of a split stop, the rescue trail and
+    # the armed trail. The split legs were missed on the first pass.
+    assert src.count("self._accepted_id(pos, order,") == 4
+    import bot.futures_guardian as fg
+    place = inspect.getsource(FuturesGuardian._place_stop)
+    split = inspect.getsource(FuturesGuardian._place_split_stops)
+    trail = inspect.getsource(FuturesGuardian._place_native_trail)
+    for name, body in (("_place_stop", place), ("_place_split_stops", split),
+                       ("_place_native_trail", trail)):
+        assert "_accepted_id(" in body, name
+
+
+def test_a_refused_trail_returns_none_so_nothing_is_superseded():
+    """
+    The supersede is gated on a truthy return, so returning None is what stops
+    a rejected trail from cancelling the adaptive one that was actually there.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._place_native_trail)
+    assert src.count("if not oid:\n            return None") >= 1
+
+
+# ── Peer control is hidden when the peer is off ──────────────────────────────
+
+def test_status_reports_whether_peer_eval_is_live():
+    import inspect
+    import bot.api as api
+    src = inspect.getsource(api)
+    assert '"peer_eval_enabled"' in src
+    # Derived from what the PeerEval object actually does, not from the raw
+    # mode string, because sends also requires PEER_EVAL_URL to be set.
+    assert 'getattr(_peer_eval, "sends", False)' in src
+    assert 'getattr(_peer_eval, "receives", False)' in src
+
+
+def test_the_peer_button_is_hidden_by_default_and_sized_like_its_neighbours():
+    html = open("ui/index.html", encoding="utf-8").read()
+    i = html.index('id="ft-peer"')
+    tag = html[i:html.index("</button>", i)]
+    assert "display:none" in tag          # off unless the status says otherwise
+    assert "padding:3px 6px" in tag       # same as ft-window and ft-export
+    assert 'status.peer_eval_enabled' in html
+
+
+def test_all_three_history_controls_share_one_padding():
+    html = open("ui/index.html", encoding="utf-8").read()
+    for el in ('id="ft-window"', 'id="ft-peer"', 'id="ft-export"'):
+        i = html.index(el)
+        assert "padding:3px 6px" in html[i:i + 400], el

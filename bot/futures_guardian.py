@@ -592,25 +592,146 @@ class FuturesGuardian:
     def mark_price(self, pos: FuturesPosition) -> float | None:
         return self._price_from_ticker(pos.symbol, self._ticker(pos.symbol))
 
+    # Divergence worth a line, and how often to say it. The profit floor sits
+    # 0.1% from entry at 20x, so a gap of that order makes it unplaceable.
+    PRICE_DIVERGENCE_PCT = 0.05
+    PRICE_LOG_INTERVAL_S = 30.0
+    MARK_CACHE_TTL_S = 1.0
+
     def _price_from_ticker(self, symbol: str, t: dict | None) -> float | None:
-        if not t:
-            price, source = resolve_price(self.exchange, symbol)
-            if price <= 0:
-                log.warning(f"{symbol}: could not read a price ({source})")
-                return None
-            return price
-        for field in ("last", "close", "markPrice"):
-            try:
-                v = float(t.get(field))
-            except (TypeError, ValueError):
-                continue
-            if v > 0:
-                return v
+        """
+        The price every ROI, peak, floor and trail level is computed from.
+
+        This MUST be the reference the exchange triggers on. Stops go on with
+        workingType=MARK_PRICE, so this returns MARK.
+
+        It used to return ticker `last`, and on 2026-09-17/18 the guardian's
+        price came in BELOW the real mark on five shorts out of five — by
+        0.11%, 0.21%, 0.99% and 9.78%. For a short that inflates ROI, and the
+        damage scaled with the gap: a small one had the floor refused with
+        -2021, a larger one left the trail resting with an activation price it
+        never reached, and the largest had the trail rejected outright while
+        the guardian reported +96.5% ROI on a position that was 1.4% DOWN.
+
+        Returns the price; the source is recorded on self._last_price_source
+        so callers can log where a number actually came from.
+        """
+        mark, last, src = self._mark_and_last(symbol, t)
+
+        if mark is not None and last is not None and mark > 0 and last > 0:
+            div = abs(mark - last) / mark * 100
+            if div >= self.PRICE_DIVERGENCE_PCT:
+                self._throttled(
+                    f"div:{symbol}",
+                    lambda: log.info(
+                        f"PRICE-DIVERGENCE {symbol}: mark={mark} last={last} "
+                        f"({(mark - last) / mark * 100:+.3f}%). Levels are "
+                        f"computed from mark, which is what stops trigger on."))
+
+        if mark is not None and mark > 0:
+            self._last_price_source = src
+            return mark
+
+        if last is not None and last > 0:
+            # Acting on last is better than going blind, but every level this
+            # cycle is then computed against a reference the exchange does NOT
+            # trigger on, which is how the -2021 refusals happened.
+            self._last_price_source = "ticker.last (NO MARK)"
+            self._throttled(
+                f"nomark:{symbol}",
+                lambda: log.warning(
+                    f"{symbol}: no mark price available — using last={last}. "
+                    f"Stop levels this cycle may be refused."))
+            return last
+
+        # Last resort. resolve_price() reaches for previousClose (24h old) and
+        # a completed candle close before giving up, so whatever it returns is
+        # named out loud rather than silently treated as the current price.
         price, source = resolve_price(self.exchange, symbol)
+        self._last_price_source = source
         if price <= 0:
             log.warning(f"{symbol}: could not read a price ({source})")
             return None
+        if source not in ("ticker.last", "ticker.close", "ticker.markPrice",
+                          "ticker.mark", "ticker.info.markPrice",
+                          "ticker.info.lastPrice", "ticker.bid/ask mid"):
+            log.warning(
+                f"{symbol}: price {price} came from {source}, which is NOT a "
+                f"live price. ROI, peak and every stop level this cycle are "
+                f"derived from it.")
         return price
+
+    def _throttled(self, key: str, emit):
+        seen = self.__dict__.setdefault("_log_seen", {})
+        now = time.time()
+        if now - seen.get(key, 0.0) >= self.PRICE_LOG_INTERVAL_S:
+            seen[key] = now
+            emit()
+
+    def _mark_and_last(self, symbol: str, t: dict | None):
+        """(mark, last, source) from one ticker payload."""
+        def _num(d, *fields):
+            for f in fields:
+                try:
+                    v = float((d or {}).get(f))
+                except (TypeError, ValueError):
+                    continue
+                if v > 0:
+                    return v
+            return None
+
+        info = (t or {}).get("info") or {}
+        last = _num(t, "last", "close") or _num(info, "lastPrice")
+        mark = _num(t, "markPrice", "mark")
+        src = "ticker.markPrice"
+        if mark is None:
+            mark = _num(info, "markPrice")
+            src = "ticker.info.markPrice"
+        if mark is None:
+            mark = self._premium_index_mark(symbol)
+            src = "premiumIndex.markPrice"
+        return mark, last, src
+
+    def _premium_index_mark(self, symbol: str) -> float | None:
+        """
+        Mark from the premium index. ccxt's binanceusdm ticker comes from
+        /fapi/v1/ticker/24hr, which carries no markPrice, so this is the normal
+        path rather than a fallback. Cached briefly because the guardian polls
+        every 2.5s and may hold several positions; briefly, because a stale
+        mark is the very thing this change exists to avoid.
+        """
+        cache = self.__dict__.setdefault("_mark_cache", {})
+        now = time.time()
+        hit = cache.get(symbol)
+        if hit and now - hit[0] < self.MARK_CACHE_TTL_S:
+            return hit[1]
+        for name in ("fetchMarkPrice", "fetch_mark_price"):
+            fn = getattr(self.exchange, name, None)
+            if fn is None:
+                continue
+            try:
+                row = fn(symbol) or {}
+                v = float((row.get("info") or {}).get("markPrice")
+                          or row.get("markPrice") or 0)
+                if v > 0:
+                    cache[symbol] = (now, v)
+                    return v
+            except Exception as e:
+                log.debug(f"{name} failed for {symbol}: {e}")
+        fn = getattr(self.exchange, "fapiPublicGetPremiumIndex", None)
+        if fn is not None:
+            try:
+                row = fn({"symbol": symbol.split(":")[0].replace("/", "")}) or {}
+                if isinstance(row, list):
+                    row = row[0] if row else {}
+                v = float(row.get("markPrice") or 0)
+                if v > 0:
+                    cache[symbol] = (now, v)
+                    return v
+            except Exception as e:
+                log.debug(f"premiumIndex failed for {symbol}: {e}")
+        cache[symbol] = (now, None)
+        return None
 
     RANGE_CACHE_TTL_S = 300.0
     # Consecutive cycles a position must be absent before it counts as closed.
@@ -1061,7 +1182,9 @@ class FuturesGuardian:
             params={"stopPrice": float(price_str), "reduceOnly": True,
                     "workingType": self.cfg.stop_working_type},
         )
-        oid = str(order.get("id") or order.get("orderId") or "")
+        oid = self._accepted_id(pos, order, "fixed stop")
+        if not oid:
+            return None
         log.info(f"Placed stop for {pos.symbol}: {side} STOP_MARKET "
                  f"trigger={price_str} id={oid}")
         return oid
@@ -1089,7 +1212,11 @@ class FuturesGuardian:
                     params={"stopPrice": float(price_str), "reduceOnly": True,
                     "workingType": self.cfg.stop_working_type},
                 )
-                ids.append(str(order.get("id") or order.get("orderId") or ""))
+                # Same exposure as the single stop: a refused split leg must
+                # not be recorded as though it were resting.
+                split_id = self._accepted_id(pos, order, "split stop")
+                if split_id:
+                    ids.append(split_id)
             remaining -= float(qty_str)
             n += 1
         if not ids:
@@ -1099,6 +1226,47 @@ class FuturesGuardian:
             f"{max_qty:g} — placed {len(ids)} split stops at {price_str}")
         self._split_stop_ids[pos.symbol] = ids
         return ids[0]
+
+    # Statuses that mean the exchange did NOT take the order. Binance answers
+    # 200 with the order body either way, so create_order returning normally
+    # is not acceptance.
+    DEAD_STATUSES = {"REJECTED", "EXPIRED", "CANCELED", "CANCELLED"}
+
+    def _accepted_id(self, pos: FuturesPosition, order: dict, what: str) -> str | None:
+        """
+        The order id, but only if the exchange actually took the order.
+
+        OP 03:16:27 and 牛来 04:23:07 were both logged as "ARMED native
+        trailing stop ... locks in ~+2% ROI" with an id. Binance's own order
+        history shows both REJECTED. The guardian then cancelled the adaptive
+        trail as "superseded" in favour of an order that did not exist, and the
+        position ran unprotected until a floor landed seconds later.
+
+        Returning None here makes every caller treat it as a failed placement,
+        which is what they already do for an exception.
+        """
+        oid = str((order or {}).get("id")
+                  or (order or {}).get("orderId") or "")
+        status = str((order or {}).get("status")
+                     or ((order or {}).get("info") or {}).get("status")
+                     or "").upper()
+        if status in self.DEAD_STATUSES:
+            log.error(
+                f"{pos.symbol}: {what} was {status} by the exchange — "
+                f"NOT recording it as protection (id={oid or 'none'}). "
+                f"The position is not protected by this order.")
+            self._record(pos.symbol, "order_not_accepted",
+                         f"{what} {status}")
+            return None
+        if not oid:
+            log.error(f"{pos.symbol}: {what} returned no order id "
+                      f"(status={status or 'unknown'}) — treating as failed.")
+            return None
+        if status and status not in ("NEW", "OPEN", "PARTIALLY_FILLED",
+                                     "FILLED", "ACCEPTED", "WORKING"):
+            log.warning(f"{pos.symbol}: {what} accepted with unexpected "
+                        f"status {status} (id={oid}).")
+        return oid
 
     def _place_native_trail(self, pos: FuturesPosition,
                             rescue: bool = False,
@@ -1145,7 +1313,9 @@ class FuturesGuardian:
                 params={"callbackRate": cb, "reduceOnly": True,
                         "workingType": self.cfg.stop_working_type},
             )
-            oid = str(order.get("id") or order.get("orderId") or "")
+            oid = self._accepted_id(pos, order, "RESCUE trailing stop")
+            if not oid:
+                return None
             log.warning(
                 f"{pos.symbol}: RESCUE trailing stop placed — activates now, "
                 f"closes on a {cb}% adverse move ({cb * lev:.0f}% ROI at "
@@ -1178,7 +1348,9 @@ class FuturesGuardian:
             params={"callbackRate": cb, "reduceOnly": True,
                         "workingType": self.cfg.stop_working_type},
         )
-        oid = str(order.get("id") or order.get("orderId") or "")
+        oid = self._accepted_id(pos, order, "ARMED trailing stop")
+        if not oid:
+            return None
         log.info(
             f"{pos.symbol}: ARMED native trailing stop (callback {cb}% price = "
             f"{callback_roi_at(lev, self.cfg):.0f}% ROI at {lev:.0f}x), locks in "
@@ -1725,9 +1897,22 @@ class FuturesGuardian:
         _stop_roi_used = self._cap_stop_to_budget(pos, self.effective_stop_roi(pos))
         stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
+        _peak_before = state.peak_roi
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
             initial_stop_override=_stop_roi_used)
+
+        # peak_roi is MONOTONIC, so one bad price pins it for the life of the
+        # position and every later decision is taken against it. 牛来 reached a
+        # recorded peak of +96.5% while actually 1.4% down. Record the price
+        # and the field it came from at the moment the peak moves, so a phantom
+        # can be traced to its source instead of inferred from order history.
+        if state.peak_roi > _peak_before + 0.01:
+            log.info(
+                f"PEAK {pos.symbol}: {_peak_before:+.1f}% -> "
+                f"{state.peak_roi:+.1f}% ROI | price={price} "
+                f"src={getattr(self, '_last_price_source', '?')} "
+                f"entry={pos.entry_price} lev={pos.effective_leverage:.1f}x")
 
         # ── Armed phase: Binance owns the trail ──────────────────────────────
         # Once a native trailing stop is resting the exchange tracks the peak

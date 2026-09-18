@@ -1112,9 +1112,13 @@ return to the current wallet. Does not touch trades."
               <option value="30">30 days</option>
               <option value="0">all</option>
             </select>
-            <button class="btn" onclick="downloadPeerReport()"
-                    title="what the other instance made of each entry">Peer</button>
-                        <select id="ft-export" onchange="onExportPick(this)" class="btn"
+            <!-- Hidden unless PEER_EVAL_MODE has the peer actually sending or
+                 receiving. Shown, it carries the same padding as the two
+                 selects so the three line up. -->
+            <button id="ft-peer" class="btn" onclick="downloadPeerReport()"
+                    title="what the other instance made of each entry"
+                    style="padding:3px 6px;display:none">Peer</button>
+            <select id="ft-export" onchange="onExportPick(this)" class="btn"
                     title="export the visible window, or the whole record"
                     style="padding:3px 6px">
               <option value="" selected>Export…</option>
@@ -3932,6 +3936,11 @@ async function refresh() {
     }
     setEl('refresh-hint', `updated ${new Date().toLocaleTimeString()}`);
     if (status.version) setEl('version-hint', `v${status.version}`);
+    // Peer report is only offered when the peer is live. Older backends do not
+    // send the field at all, so treat "missing" as off rather than showing a
+    // button that cannot work.
+    const peerBtn = document.getElementById('ft-peer');
+    if (peerBtn) peerBtn.style.display = status.peer_eval_enabled ? '' : 'none';
 
     // Strategy badge + strategy-specific control visibility.
     applyStrategyView(status);
