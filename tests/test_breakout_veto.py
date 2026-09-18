@@ -924,12 +924,11 @@ def test_rescue_trail_ignores_the_profit_lock_test():
     src = inspect.getsource(FuturesGuardian._place_native_trail)
     rescue_block = src[src.index("if rescue:"):src.index("cb = trail_callback_price_pct")]
     assert "locked" not in rescue_block
-    # The params actually sent: callbackRate only. No activationPrice means
-    # Binance activates it at the current mark rather than waiting for a
-    # profit level that a losing position will never reach.
-    params = [l for l in rescue_block.splitlines() if "params={" in l]
-    assert params and "callbackRate" in params[0]
-    assert "activationPrice" not in params[0]
+    # It goes out through _create_trail_order, which sets an activationPrice
+    # that is ALREADY satisfied. Omitting one does NOT activate at the mark:
+    # Binance derives its own, and WLD 2026-09-18 07:13:47 rested dormant
+    # 0.043% short of reachable while the adaptive trail was cancelled for it.
+    assert "_create_trail_order(" in rescue_block
 
 
 def test_rescue_is_requested_when_a_fixed_stop_is_refused():
@@ -1253,7 +1252,13 @@ def test_every_protective_order_carries_the_working_type():
     import inspect
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian)
-    assert src.count('"workingType": self.cfg.stop_working_type') == 4
+    # Three literal sites, not four: the armed and rescue trails built
+    # identical params dicts and now share _create_trail_order, which is also
+    # what adds activationPrice. The property under test is unchanged.
+    assert src.count('"workingType": self.cfg.stop_working_type') == 3
+    assert '"workingType": self.cfg.stop_working_type' in \
+        inspect.getsource(FuturesGuardian._create_trail_order)
+    assert src.count("self._create_trail_order(") == 2   # armed + rescue
 
 
 def test_the_trade_records_which_price_was_in_force():
@@ -5191,3 +5196,197 @@ def test_the_give_back_accounting_cannot_break_a_close():
     src = inspect.getsource(FuturesGuardian)
     i = src.index("GIVE-BACK")
     assert "give-back line failed" in src[i:i + 2000]
+
+
+# ── P&L source ordering: fills, then ledger, then the estimate ───────────────
+# a9b1d41 put the ledger first because a price ESTIMATE invented +4.32 on a
+# trade opened and closed at the same price. That still holds for the estimate.
+# It does not hold for the fills: WLD 2026-09-18 10:16 summed to +0.2684 from
+# the fills, Binance reported Total PNL 0.26840000, the wallet moved +0.26 —
+# and the ledger returned +0.0934, a partially-populated income query.
+
+def _pnl_src():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    return inspect.getsource(FuturesGuardian._record_closed_trade)
+
+
+def test_complete_fills_outrank_the_ledger():
+    src = _pnl_src()
+    assert 'if pnl_source == "fills" and fills_complete:' in src
+
+
+def test_incomplete_fills_do_not():
+    """A partial fill sum is no better than a partial ledger."""
+    src = _pnl_src()
+    i = src.index('if pnl_source == "fills" and fills_complete:')
+    tail = src[i:i + 1600]
+    assert "else:" in tail
+    assert 'pnl_source = "ledger"' in tail
+
+
+def test_the_estimate_stays_last():
+    """The +4.32 came from reconstructing the exit. Nothing promotes it."""
+    src = _pnl_src()
+    assert 'realised = computed' in src
+    i = src.index('if pnl_source == "fills" and fills_complete:')
+    assert 'pnl_source = "computed"' not in src[i:]
+
+
+def test_coverage_is_measured_against_the_closing_side():
+    src = _pnl_src()
+    assert 'close_side = "buy" if side == "short" else "sell"' in src
+    assert "fills_cover = closed_qty / pos_qty" in src
+    assert "fills_cover >= 0.99" in src
+
+
+def test_coverage_flags_survive_a_fill_lookup_failure():
+    """
+    They are read after the try that sets them, so they must be defined even
+    when fetch_my_trades raises — otherwise the whole close path dies on a
+    NameError at exactly the moment the record matters.
+    """
+    src = _pnl_src()
+    decl = src.index("fills_complete = False")
+    first_try = src.index("try:")
+    assert decl < first_try
+
+
+def test_the_disagreement_is_still_logged_either_way():
+    """That line is what surfaced this. Silencing it hides the next one."""
+    src = _pnl_src()
+    # The message is split across f-string lines, so normalise whitespace
+    # before counting rather than matching the source layout.
+    # f-string continuations break the message across literals, so count the
+    # branches by what each one names rather than by the sentence.
+    i = src.index('if pnl_source == "fills" and fills_complete:')
+    tail = src[i:]
+    assert tail.count("log.warning(") >= 2      # fills-win and ledger-win
+    assert tail.count("income ledger") >= 2
+    assert "Check wallet_gap" in tail
+
+
+def test_fees_still_come_from_the_ledger():
+    """
+    _income_pnl converts BNB commission via _fee_asset_rate. Summing BNB as
+    USDT reported 0.0000 on every live trade, so live was silently gross while
+    demo was net. Nothing here may route fees around that.
+    """
+    src = _pnl_src()
+    assert "self._last_trade_fees = round(led_comm, 6)" in src
+    # And it must come AFTER the fills set their own figure, so the ledger's
+    # converted commission is the one that survives.
+    assert src.index("self._last_trade_fees = round(fees, 6)") < \
+        src.index("self._last_trade_fees = round(led_comm, 6)")
+
+
+# ── Trails activate at placement; the audit reads the right book ─────────────
+
+def test_the_activation_settings_follow_the_env_convention():
+    """Anything that changes what is SENT goes through the three layers."""
+    import inspect
+    from bot.futures_guard import GuardConfig
+    import bot.config as botcfg
+    import main
+    assert GuardConfig().trail_activate_now is True
+    assert GuardConfig().trail_activation_eps_pct == 0.3
+    cfg_src = inspect.getsource(botcfg)
+    assert '"GUARD_TRAIL_ACTIVATE_NOW"' in cfg_src
+    assert '"GUARD_TRAIL_ACTIVATION_EPS_PCT"' in cfg_src
+    main_src = inspect.getsource(main)
+    assert "trail_activate_now=cfg.guard_trail_activate_now" in main_src
+    assert "trail_activation_eps_pct=cfg.guard_trail_activation_eps_pct" in main_src
+
+
+def _act_guardian(**cfgkw):
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+
+    class _Ex:
+        def price_to_precision(self, sym, p):
+            return f"{p:.10f}"
+    g.exchange = _Ex()
+    g.cfg = GuardConfig(**cfgkw)
+    return g
+
+
+class _ActShort:
+    symbol = "WLD/USDT:USDT"; side = "short"
+    entry_price = 0.4322; qty = 1.0
+    leverage = 20; effective_leverage = 20.0; margin = 1.0
+
+
+class _ActLong(_ActShort):
+    side = "long"
+
+
+def test_activation_sits_the_already_satisfied_side_of_the_mark():
+    g = _act_guardian()
+    mark = 0.43026546          # WLD 07:13:47
+    assert g._activation_now(_ActShort(), mark) > mark   # buy closes a short
+    assert g._activation_now(_ActLong(), mark) < mark
+
+
+def test_the_margin_clears_the_gap_that_left_wld_dormant():
+    """WLD's derived activation sat 0.043% short. 0.3% covers that."""
+    g = _act_guardian()
+    mark = 0.43026546
+    act = g._activation_now(_ActShort(), mark)
+    assert (act - mark) / mark * 100 > 0.043
+
+
+def test_activation_can_be_switched_off_without_a_redeploy():
+    g = _act_guardian(trail_activate_now=False)
+    assert g._activation_now(_ActShort(), 0.43026546) is None
+
+
+def test_no_mark_means_no_activation_rather_than_a_guessed_one():
+    g = _act_guardian()
+    assert g._activation_now(_ActShort(), None) is None
+    assert g._activation_now(_ActShort(), 0) is None
+
+
+def test_a_refused_activation_retries_without_one():
+    """Never worse than before: the fallback IS the previous behaviour."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._create_trail_order)
+    assert 'params.pop("activationPrice", None)' in src
+    assert src.count("create_order(") == 2
+    assert "if not act:\n                raise" in src
+
+
+def test_both_trails_go_out_through_the_activating_helper():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._place_native_trail)
+    assert src.count("self._create_trail_order(") == 2
+
+
+def test_the_audit_reads_the_algo_book():
+    """
+    Conditional and trailing stops are ALGO orders. fetch_open_orders is the
+    unified book and cannot return them, which is what PROTECTION-BLIND was
+    reporting — WLD 07:15:20-24: unified 0, raw fapi 0, algo 2.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert "self._algo_orders()" in src
+    assert "self.fetch_open_orders(pos.symbol)" in src   # both books, not one
+
+
+def test_the_algo_symbol_match_accepts_the_wire_form():
+    """An over-strict match would drop everything and look like the bug."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert 'unified.split(":")[0].replace("/", "").upper()' in src
+
+
+def test_a_failing_algo_book_does_not_take_the_audit_down():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._audit_protection)
+    assert "algo book unavailable to audit" in src

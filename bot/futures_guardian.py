@@ -1268,6 +1268,59 @@ class FuturesGuardian:
                         f"status {status} (id={oid}).")
         return oid
 
+    def _activation_now(self, pos: FuturesPosition, mark: float | None):
+        """
+        An activationPrice that is ALREADY satisfied, so the trail is live at
+        placement rather than waiting for price to reach it.
+
+        Binance activates a BUY trail (closing a short) when price <=
+        activationPrice, and a SELL trail when price >= it. "Now" therefore
+        means just the far side of the current mark. Returns None when the
+        mark is unknown or the behaviour is switched off, and the placement
+        then falls back to sending no activationPrice at all.
+        """
+        if not getattr(self.cfg, "trail_activate_now", True):
+            return None                     # GUARD_TRAIL_ACTIVATE_NOW=false
+        if not mark or mark <= 0:
+            return None
+        eps = abs(getattr(self.cfg, "trail_activation_eps_pct", 0.3)) / 100.0
+        raw = mark * (1 + eps) if stop_side(pos) == "buy" else mark * (1 - eps)
+        try:
+            return float(self.exchange.price_to_precision(pos.symbol, raw))
+        except Exception:
+            return raw
+
+    def _create_trail_order(self, pos: FuturesPosition, side: str,
+                            qty: float, cb: float):
+        """
+        Place the trail, activating it immediately where the exchange allows.
+
+        If the explicit activationPrice is refused, retry WITHOUT one. That is
+        exactly the previous behaviour, so this can never leave a position with
+        less protection than before — only with a trail that is live sooner.
+        """
+        params = {"callbackRate": cb, "reduceOnly": True,
+                  "workingType": self.cfg.stop_working_type}
+        act = self._activation_now(pos, self.mark_price(pos))
+        if act:
+            params["activationPrice"] = act
+        try:
+            return self.exchange.create_order(
+                symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
+                amount=qty, price=None, params=params)
+        except Exception as e:
+            if not act:
+                raise
+            log.warning(
+                f"{pos.symbol}: trail refused with activationPrice={act} "
+                f"({_safe_err(e)}) — retrying without one. Binance will then "
+                f"derive one from its own latest price, which may leave the "
+                f"trail dormant.")
+            params.pop("activationPrice", None)
+            return self.exchange.create_order(
+                symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
+                amount=qty, price=None, params=params)
+
     def _place_native_trail(self, pos: FuturesPosition,
                             rescue: bool = False,
                             callback_pct: float | None = None) -> str | None:
@@ -1307,12 +1360,8 @@ class FuturesGuardian:
                          f"TRAILING_STOP_MARKET reduceOnly {qty_str} "
                          f"{pos.symbol} callbackRate={cb}%")
                 return f"dry-rescue-{int(time.time()*1000)}"
-            order = self.exchange.create_order(
-                symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
-                amount=float(qty_str), price=None,
-                params={"callbackRate": cb, "reduceOnly": True,
-                        "workingType": self.cfg.stop_working_type},
-            )
+            order = self._create_trail_order(
+                pos, side, float(qty_str), cb)
             oid = self._accepted_id(pos, order, "RESCUE trailing stop")
             if not oid:
                 return None
@@ -1343,12 +1392,7 @@ class FuturesGuardian:
                      f"{qty_str} {pos.symbol} callbackRate={cb}%")
             return f"dry-trail-{int(time.time()*1000)}"
 
-        order = self.exchange.create_order(
-            symbol=pos.symbol, type="TRAILING_STOP_MARKET", side=side,
-            amount=float(qty_str), price=None,
-            params={"callbackRate": cb, "reduceOnly": True,
-                        "workingType": self.cfg.stop_working_type},
-        )
+        order = self._create_trail_order(pos, side, float(qty_str), cb)
         oid = self._accepted_id(pos, order, "ARMED trailing stop")
         if not oid:
             return None
@@ -1366,8 +1410,10 @@ class FuturesGuardian:
         Record the activation price Binance assigned, and how far it sits from
         the mark we hold.
 
-        We send no activationPrice, so Binance derives one. A BUY trail (a
-        short) activates at price <= activationPrice, so an activation BELOW
+        An explicit activationPrice is now sent (GUARD_TRAIL_ACTIVATE_NOW), so
+        this is the confirmation that it landed — and still catches the case
+        where the exchange refused it and the retry let Binance derive its own.
+        A BUY trail (a short) activates at price <= activationPrice, so one BELOW
         the mark means the trail rests DORMANT until price falls that far —
         and if the move reverses first it never activates at all, while the
         guardian holds an id and the exchange really is holding the order.
@@ -1481,8 +1527,31 @@ class FuturesGuardian:
         tracked_ids = {v for v in tracked.values() if v}
 
         try:
-            live = [self._normalise_order(o)
-                    for o in (self.fetch_open_orders(pos.symbol) or [])]
+            # fetch_open_orders is the UNIFIED book, which structurally cannot
+            # contain what this audits: conditional and trailing stops are ALGO
+            # orders in a separate book. _open_orders_multi already knows that
+            # ("they never appear in /fapi/v1/openOrders"); the audit did not,
+            # so it read a book that can never hold them and reported
+            # PROTECTION-BLIND on every cycle. WLD 2026-09-18 07:15:20-24 shows
+            # all three in one pass: unified 0, raw fapi 0, algo 2.
+            rows = list(self.fetch_open_orders(pos.symbol) or [])
+            try:
+                unified = str(getattr(pos, "symbol", "") or "")
+                base = unified.split(":")[0].replace("/", "").upper()
+                for o in (self._algo_orders() or []):
+                    if not isinstance(o, dict):
+                        continue
+                    # Algo rows carry the WIRE symbol (ONEUSDT), not the
+                    # unified one (ONE/USDT:USDT). Compare on the stripped form
+                    # so the filter does not silently drop everything — an
+                    # over-strict match here would look exactly like the bug
+                    # being fixed.
+                    sym = str(o.get("symbol") or "").upper()
+                    if not sym or sym == unified.upper() or sym == base:
+                        rows.append(o)
+            except Exception as e:
+                log.debug(f"{pos.symbol}: algo book unavailable to audit: {e}")
+            live = [self._normalise_order(o) for o in rows]
         except Exception as e:
             log.warning(f"PROTECTION {pos.symbol}: could not list orders "
                         f"({_safe_err(e)}) — audit skipped this cycle")
@@ -2601,6 +2670,12 @@ class FuturesGuardian:
         realised = None
         pnl_source = "none"
         ledger_pnl = None
+        # How much of the position the fills we can see actually account for.
+        # Declared HERE, not inside the try below, because a fill-lookup
+        # failure must leave these false rather than undefined — the ordering
+        # test reads them either way.
+        fills_cover = None
+        fills_complete = False
         # Reset per close. This is instance state, and leaving it set meant a
         # trade whose fill lookup failed inherited the PREVIOUS trade's
         # commission — a wrong number that looks entirely plausible.
@@ -2637,6 +2712,26 @@ class FuturesGuardian:
                 except (TypeError, ValueError):
                     pass
             self._last_trade_fees = round(fees, 6)
+
+            # Do these fills account for the WHOLE position? A close that
+            # arrives in several parts, or a query that reads too early, gives
+            # a partial sum — and a partial sum is no more trustworthy than a
+            # partial ledger. Coverage is what separates "authoritative" from
+            # "as much as had landed when we looked".
+            try:
+                close_side = "buy" if side == "short" else "sell"
+                closed_qty = sum(
+                    float(t.get("amount") or 0) for t in scoped
+                    if str(t.get("side") or "").lower() == close_side)
+                pos_qty = 0.0
+                if entry and entry > 0:
+                    pos_qty = float(meta.get("notional") or 0) / entry
+                if pos_qty > 0:
+                    fills_cover = closed_qty / pos_qty
+                    fills_complete = fills_cover >= 0.99
+            except Exception as e:
+                log.debug(f"{symbol}: fill coverage check failed: {e}")
+
             if scoped and not pnl:
                 log.debug(f"{symbol}: {len(scoped)} fill(s) in scope, all zero realisedPnl")
             if pnl:
@@ -2692,18 +2787,52 @@ class FuturesGuardian:
             realised = computed
             pnl_source = "computed"
 
-        # The income ledger is the exchange's own accounting and wins over both
-        # the fill sum and the price estimate — INCLUDING when it reports zero,
-        # which is exactly the case a price-based estimate gets wrong. One
-        # trade opened and closed at the same price (true result 0) and was
-        # recorded as +4.32 because the estimated exit was never checked.
+        # Three sources, in order of what they actually are:
+        #
+        #   fills   — the executed trades. Authoritative WHEN COMPLETE.
+        #   ledger  — the exchange's own accounting. Authoritative EVENTUALLY;
+        #             the income endpoint can still be filling in when this
+        #             runs, seconds after the close.
+        #   computed — the exit reconstructed from the stop level. An estimate,
+        #             and the one that invents money.
+        #
+        # a9b1d41 put the ledger above the others because a price ESTIMATE
+        # invented +4.32 on a trade opened and closed at the same price. That
+        # reasoning stands and is why `computed` is still last. But it also put
+        # the ledger above the FILLS, and those are not an estimate — WLD
+        # 2026-09-18 10:16 summed to +0.2684 from the fills, Binance's own
+        # order detail reported Total PNL 0.26840000, and the wallet moved
+        # +0.26. The ledger returned +0.0934, roughly a third, which is what a
+        # partially-populated income query looks like on a multi-fill close.
+        # Taking it cost that trade 0.175 USDT of recorded profit.
+        #
+        # The original bug cannot return through fills: a trade opened and
+        # closed at the same price sums to zero in the fill records, correctly.
+        # Only the estimate could invent the +4.32.
         if ledger_pnl is not None:
-            if realised is not None and abs(realised - ledger_pnl) > 0.01:
-                log.warning(
-                    f"{symbol}: {pnl_source} P&L {realised:+.4f} disagrees with "
-                    f"the income ledger {ledger_pnl:+.4f} — using the ledger.")
-            realised = ledger_pnl
-            pnl_source = "ledger"
+            disagrees = realised is not None and abs(realised - ledger_pnl) > 0.01
+            if pnl_source == "fills" and fills_complete:
+                # Complete fills outrank the ledger. Still say so — that line
+                # is what surfaced this, and silencing it would hide the next
+                # disagreement of a different kind.
+                if disagrees:
+                    log.warning(
+                        f"{symbol}: fills P&L {realised:+.4f} disagrees with the "
+                        f"income ledger {ledger_pnl:+.4f} — using the FILLS "
+                        f"(they cover {fills_cover:.0%} of the position; the "
+                        f"ledger can still be filling in). Check wallet_gap.")
+            else:
+                if disagrees:
+                    why = ("fills covered only "
+                           f"{fills_cover:.0%} of the position"
+                           if fills_cover is not None and pnl_source == "fills"
+                           else f"{pnl_source} is not the fill record")
+                    log.warning(
+                        f"{symbol}: {pnl_source} P&L {realised:+.4f} disagrees "
+                        f"with the income ledger {ledger_pnl:+.4f} — using the "
+                        f"ledger ({why}).")
+                realised = ledger_pnl
+                pnl_source = "ledger"
 
         # When the exchange reports realised PnL it reflects the ACTUAL fill.
         # The guardian polls, so a stop that triggered between cycles filled at

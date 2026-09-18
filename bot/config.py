@@ -468,6 +468,19 @@ class BotConfig:
     # the exchange minimum.
     guard_rescue_trail_callback_pct: float = field(default_factory=lambda: _env_float(
         "GUARD_RESCUE_TRAIL_CALLBACK_PCT", 0.1))
+    # A trailing stop sent with no activationPrice is NOT activated at the
+    # mark — Binance derives one, and WLD 2026-09-18 07:13:47 went on 0.043%
+    # short of reachable and rested DORMANT while the adaptive trail was
+    # cancelled for it. True sends an explicit activationPrice on the already
+    # satisfied side of the mark. Set false to restore the old behaviour
+    # without a redeploy.
+    guard_trail_activate_now: bool = field(default_factory=lambda: _env_bool(
+        "GUARD_TRAIL_ACTIVATE_NOW", True))
+    # How far past the mark that activation sits, as a price %. Only needs to
+    # clear tick rounding and a tick or two of movement between our read and
+    # the exchange's evaluation.
+    guard_trail_activation_eps_pct: float = field(default_factory=lambda: _env_float(
+        "GUARD_TRAIL_ACTIVATION_EPS_PCT", 0.3))
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(
