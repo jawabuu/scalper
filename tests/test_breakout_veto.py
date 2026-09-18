@@ -6212,3 +6212,34 @@ def test_the_baseline_survives_a_restart():
     src = inspect.getsource(AutoTrader)
     assert '"day_baseline_source": getattr(self.state, "day_baseline_source", "")' in src
     assert 's.day_baseline_source = str(data.get("day_baseline_source") or "")' in src
+
+
+def test_the_reset_endpoint_imports_every_name_it_uses():
+    """
+    api.py imports DAY_TZ_OFFSET_H per-function, not at module level, so a new
+    caller must import it too. v3.55.0 shipped without that and RE-BASE failed
+    at runtime with `name 'DAY_TZ_OFFSET_H' is not defined` — the tests only
+    read the source, so nothing caught it.
+    """
+    import ast
+    from pathlib import Path
+    src = Path("bot/api.py").read_text()
+    i = src.index("def reset_baselines")
+    j = src.index("\n    @app.", i)
+    body = src[i:j]
+    tree = ast.parse("def _f():\n" + "\n".join(
+        "    " + ln for ln in body.splitlines()[1:]))
+    imported = {a.asname or a.name
+                for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                for a in n.names}
+    imported |= {a.asname or a.name.split(".")[0]
+                 for n in ast.walk(tree) if isinstance(n, ast.Import)
+                 for a in n.names}
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    # Names the enclosing create_app scope legitimately provides.
+    closure = {"_auto", "_guardian", "payload", "user", "done", "log",
+               "float", "getattr", "Exception", "str", "print", "bool"}
+    missing = {n for n in used
+               if n in {"DAY_TZ_OFFSET_H", "day_report", "_DAY_BASELINE"}
+               and n not in imported}
+    assert not missing, f"used but never imported here: {sorted(missing)}"

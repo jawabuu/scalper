@@ -370,6 +370,9 @@ def create_app(engine) -> FastAPI:
         if payload.get("day", True):
             try:
                 from bot.analysis import _DAY_BASELINE, day_report
+                # DAY_TZ_OFFSET_H is imported per-function in this module, so
+                # it must be imported HERE too — it is not module-level.
+                from bot.auto_trader import DAY_TZ_OFFSET_H
                 import time as _t
                 st = getattr(_auto, "state", None) if _auto else None
                 # WRITE a baseline, do not clear a cache.
