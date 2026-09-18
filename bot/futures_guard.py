@@ -217,8 +217,6 @@ class GuardConfig:
     # One winner is clipped; the one disaster is cut short.
     rescue_trail_callback_pct: float = 0.1
     arm_at_entry: bool = False
-    trail_activate_now: bool = True
-    trail_activation_eps_pct: float = 0.3
     # Which price triggers a stop. Binance defaults to CONTRACT_PRICE — the
     # LAST TRADED price on this book, wick included. MARK_PRICE is an index
     # across venues with smoothing, and exists precisely so a single-venue

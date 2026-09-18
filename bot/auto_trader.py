@@ -601,6 +601,12 @@ class SafetyState:
     """Running state the safety limits are evaluated against."""
     day_start_balance: float = 0.0
     day_started_at: float = 0.0
+    # When the baseline was captured, and how. A baseline taken AT the
+    # rollover is the real 00:00 balance; one taken at a mid-day restart is
+    # just "the balance when the process woke up" and must not be presented as
+    # the day's starting figure.
+    day_baseline_at: float = 0.0
+    day_baseline_source: str = ""      # rollover | restart | operator
     day_key: str = ""
     recent_entry_times: list[float] = field(default_factory=list)
     symbol_blocked_until: dict[str, float] = field(default_factory=dict)
@@ -629,6 +635,12 @@ def day_start_ts(now: float, offset_h: float | None = None) -> float:
     return midnight - off
 
 
+# How soon after local midnight a rollover still counts as capturing the true
+# 00:00 balance. The guardian polls every few seconds, so a running bot rolls
+# within one cycle; anything later means the process was not up at midnight.
+BASELINE_FRESH_S = 300.0
+
+
 def roll_day(state: SafetyState, balance: float, now: float | None = None) -> SafetyState:
     """Reset the daily baseline (and any halt) when the LOCAL day changes."""
     now = now or _time.time()
@@ -636,11 +648,21 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
     if state.day_key != key:
         state.day_key = key
         state.day_start_balance = balance
-        state.day_started_at = day_start_ts(now)
+        started = day_start_ts(now)
+        state.day_started_at = started
+        state.day_baseline_at = now
+        # Crossing midnight WHILE RUNNING gives the true 00:00 balance. Waking
+        # up mid-day gives whatever the wallet holds now, which is not the
+        # day's start and must not be shown as one.
+        state.day_baseline_source = (
+            "rollover" if (now - started) <= BASELINE_FRESH_S else "restart")
         state.halted_reason = None
         state.reentries_today = {}
     if state.day_start_balance <= 0:
         state.day_start_balance = balance
+        state.day_baseline_at = now
+        if not state.day_baseline_source:
+            state.day_baseline_source = "restart"
     return state
 
 
@@ -938,6 +960,8 @@ class AutoTrader:
         return {
             "day_start_balance": self.state.day_start_balance,
             "day_started_at": getattr(self.state, "day_started_at", 0.0),
+            "day_baseline_at": getattr(self.state, "day_baseline_at", 0.0),
+            "day_baseline_source": getattr(self.state, "day_baseline_source", ""),
             "day_key": self.state.day_key,
             "recent_entry_times": list(self.state.recent_entry_times),
             "symbol_blocked_until": dict(self.state.symbol_blocked_until),
@@ -945,6 +969,8 @@ class AutoTrader:
             "reentries_today": dict(self.state.reentries_today),
             "day_start_balance": self.state.day_start_balance,
             "day_started_at": getattr(self.state, "day_started_at", 0.0),
+            "day_baseline_at": getattr(self.state, "day_baseline_at", 0.0),
+            "day_baseline_source": getattr(self.state, "day_baseline_source", ""),
             "halted_reason": self.state.halted_reason,
         }
 
@@ -958,6 +984,8 @@ class AutoTrader:
         s = self.state
         s.day_start_balance = float(data.get("day_start_balance") or 0.0)
         s.day_started_at = float(data.get("day_started_at") or 0.0)
+        s.day_baseline_at = float(data.get("day_baseline_at") or 0.0)
+        s.day_baseline_source = str(data.get("day_baseline_source") or "")
         s.day_key = data.get("day_key") or ""
         s.recent_entry_times = list(data.get("recent_entry_times") or [])
         s.symbol_blocked_until = dict(data.get("symbol_blocked_until") or {})
@@ -1025,6 +1053,8 @@ class AutoTrader:
             "reentries_today": dict(self.state.reentries_today),
             "day_start_balance": self.state.day_start_balance,
             "day_started_at": getattr(self.state, "day_started_at", 0.0),
+            "day_baseline_at": getattr(self.state, "day_baseline_at", 0.0),
+            "day_baseline_source": getattr(self.state, "day_baseline_source", ""),
         }
 
     def set_enabled(self, on: bool) -> dict:

@@ -4853,14 +4853,26 @@ def test_only_the_current_day_is_cached():
 # a deposit that makes the old start meaningless. The only previous remedy was
 # clearing trade history, which throws away the trades to fix one number.
 
-def test_the_reset_endpoint_touches_no_trades():
+def _reset_baselines_src():
+    """The endpoint's own source, not a fixed-size window of the module."""
     from pathlib import Path
     src = Path("bot/api.py").read_text()
     i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
-    for forbidden in ("closed_trades", "_journal", "cancel", "create_order",
-                      "close_position"):
+    j = src.index("\n    @app.", i)
+    return src[i:j]
+
+
+def test_the_reset_endpoint_changes_no_trades_orders_or_positions():
+    """
+    It now READS closed_trades to work out the day's P&L, which is how it
+    derives the 00:00 balance. Reading is fine; the guarantee that matters is
+    that it writes nothing and places nothing.
+    """
+    block = _reset_baselines_src()
+    for forbidden in ("_journal", "cancel", "create_order", "close_position",
+                      "reduceOnly", "save_journal"):
         assert forbidden not in block, forbidden
+    assert "closed_trades()" in block          # read-only, and needed
 
 
 def test_clearing_the_day_cache_forces_a_recompute():
@@ -4878,21 +4890,24 @@ def test_clearing_the_day_cache_forces_a_recompute():
     assert b["baseline"] == pytest.approx(5000.0)   # recomputed, still right
 
 
-def test_the_day_key_is_cleared_so_roll_day_re_bases():
-    from pathlib import Path
-    src = Path("bot/api.py").read_text()
-    i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
-    assert "day_start_balance = 0.0" in block
-    assert 'day_key = ""' in block
+def test_rebase_stores_the_days_start_instead_of_zeroing_it():
+    """
+    The old version set day_start_balance to 0.0 and cleared day_key so
+    roll_day would re-base. That achieved nothing visible — the card
+    reconstructs, so clearing a cache recomputes the same number — while
+    silently moving the DAILY HALT's threshold to the current balance and
+    erasing the day's drawdown.
+    """
+    block = _reset_baselines_src()
+    assert "st.day_start_balance = float(base)" in block
+    assert 'st.day_baseline_source = "operator"' in block
+    assert "day_start_balance = 0.0" not in block
+    assert 'st.day_key = ""' not in block
 
 
 def test_the_account_reset_uses_the_cached_balance_attribute():
     """There is no wallet_balance() method on the guardian."""
-    from pathlib import Path
-    src = Path("bot/api.py").read_text()
-    i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
+    block = _reset_baselines_src()
     assert '_wallet_balance_cached' in block
     assert "g.wallet_balance()" not in block
 
@@ -4900,10 +4915,7 @@ def test_the_account_reset_uses_the_cached_balance_attribute():
 def test_the_account_reset_is_opt_in():
     """Today alone is the common case; re-basing account return discards the
     whole run's reference point."""
-    from pathlib import Path
-    src = Path("bot/api.py").read_text()
-    i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
+    block = _reset_baselines_src()
     assert 'payload.get("day", True)' in block       # defaults on
     assert 'payload.get("account")' in block         # defaults OFF
 
@@ -4921,21 +4933,18 @@ def test_an_explicit_wallet_start_wins_over_the_current_balance():
     deposit, or when picking up a run already in progress, the operator has
     the correct figure and the bot does not.
     """
-    from pathlib import Path
-    src = Path("bot/api.py").read_text()
-    i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
-    assert 'payload.get("account_value")' in block
-    j = block.index('payload.get("account_value")')
-    k = block.index("_wallet_balance_cached")
+    # Scoped to the ACCOUNT branch: the day branch also reads the cached
+    # wallet now, to derive the 00:00 balance.
+    block = _reset_baselines_src()
+    acct = block[block.index('if payload.get("account")'):]
+    assert 'payload.get("account_value")' in acct
+    j = acct.index('payload.get("account_value")')
+    k = acct.index("_wallet_balance_cached")
     assert j < k, "the explicit value must be tried before the cached balance"
 
 
 def test_a_bad_explicit_value_changes_nothing():
-    from pathlib import Path
-    src = Path("bot/api.py").read_text()
-    i = src.index("def reset_baselines")
-    block = src[i:i + 3200]
+    block = _reset_baselines_src()
     assert "must be a positive" in block
     assert "bal = None" in block
 
@@ -5282,22 +5291,6 @@ def test_fees_still_come_from_the_ledger():
 
 # ── Trails activate at placement; the audit reads the right book ─────────────
 
-def test_the_activation_settings_follow_the_env_convention():
-    """Anything that changes what is SENT goes through the three layers."""
-    import inspect
-    from bot.futures_guard import GuardConfig
-    import bot.config as botcfg
-    import main
-    assert GuardConfig().trail_activate_now is True
-    assert GuardConfig().trail_activation_eps_pct == 0.3
-    cfg_src = inspect.getsource(botcfg)
-    assert '"GUARD_TRAIL_ACTIVATE_NOW"' in cfg_src
-    assert '"GUARD_TRAIL_ACTIVATION_EPS_PCT"' in cfg_src
-    main_src = inspect.getsource(main)
-    assert "trail_activate_now=cfg.guard_trail_activate_now" in main_src
-    assert "trail_activation_eps_pct=cfg.guard_trail_activation_eps_pct" in main_src
-
-
 def _act_guardian(**cfgkw):
     from bot.futures_guard import GuardConfig
     from bot.futures_guardian import FuturesGuardian
@@ -5321,38 +5314,12 @@ class _ActLong(_ActShort):
     side = "long"
 
 
-def test_activation_sits_the_already_satisfied_side_of_the_mark():
-    g = _act_guardian()
-    mark = 0.43026546          # WLD 07:13:47
-    assert g._activation_now(_ActShort(), mark) > mark   # buy closes a short
-    assert g._activation_now(_ActLong(), mark) < mark
-
-
-def test_the_margin_clears_the_gap_that_left_wld_dormant():
-    """WLD's derived activation sat 0.043% short. 0.3% covers that."""
-    g = _act_guardian()
-    mark = 0.43026546
-    act = g._activation_now(_ActShort(), mark)
-    assert (act - mark) / mark * 100 > 0.043
-
-
-def test_activation_can_be_switched_off_without_a_redeploy():
-    g = _act_guardian(trail_activate_now=False)
-    assert g._activation_now(_ActShort(), 0.43026546) is None
-
-
-def test_no_mark_means_no_activation_rather_than_a_guessed_one():
-    g = _act_guardian()
-    assert g._activation_now(_ActShort(), None) is None
-    assert g._activation_now(_ActShort(), 0) is None
-
-
 def test_a_refused_activation_retries_without_one():
     """Never worse than before: the fallback IS the previous behaviour."""
     import inspect
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian._create_trail_order)
-    assert 'params.pop("activationPrice", None)' in src
+    assert 'params.pop("activatePrice", None)' in src
     assert src.count("create_order(") == 2
     assert "if not act:\n                raise" in src
 
@@ -5979,7 +5946,7 @@ def test_a_substituted_activation_is_an_error_not_a_note(caplog):
     g = _resp_guardian()
     with caplog.at_level("INFO"):
         g._log_trail_response(
-            _RPos(), {"activationPrice": 0.009818, "callbackRate": 0.3},
+            _RPos(), {"activatePrice": 0.009818, "callbackRate": 0.3},
             {"info": {"orderId": "1", "status": "NEW",
                       "activatePrice": "0.0098795", "priceRate": "0.3"}})
     assert "TRAIL-ACTIVATION-IGNORED" in caplog.text
@@ -5990,7 +5957,7 @@ def test_an_honoured_activation_does_not_raise_the_alarm(caplog):
     g = _resp_guardian()
     with caplog.at_level("INFO"):
         g._log_trail_response(
-            _RPos(), {"activationPrice": 0.009818, "callbackRate": 0.3},
+            _RPos(), {"activatePrice": 0.009818, "callbackRate": 0.3},
             {"info": {"orderId": "1", "activatePrice": "0.009818"}})
     assert "TRAIL-RESPONSE" in caplog.text
     assert "TRAIL-ACTIVATION-IGNORED" not in caplog.text
@@ -6006,8 +5973,8 @@ def test_no_activation_sent_means_nothing_to_compare(caplog):
 
 def test_a_malformed_response_cannot_break_placement(caplog):
     g = _resp_guardian()
-    g._log_trail_response(_RPos(), {"activationPrice": 0.1}, None)
-    g._log_trail_response(_RPos(), {"activationPrice": 0.1},
+    g._log_trail_response(_RPos(), {"activatePrice": 0.1}, None)
+    g._log_trail_response(_RPos(), {"activatePrice": 0.1},
                           {"info": {"activatePrice": "not-a-number"}})
 
 
@@ -6046,31 +6013,56 @@ def _probe_src():
     return open("tools/probe_trail_activation.py", encoding="utf-8").read()
 
 
-def test_the_probe_tries_both_endpoints():
+def test_the_probe_varies_one_parameter_at_a_time():
+    """
+    The UI kept Activation Price <= 0.0200000 with the market at 0.02312, as a
+    CONDITIONAL order — so the exchange honours it and algoType is not the
+    discriminator. Two suspects remain: workingType and reduceOnly.
+    """
     src = _probe_src()
-    assert "create_order(" in src              # ccxt -> algo
-    assert "fapiPrivatePostOrder(" in src      # direct -> plain
+    assert '"--working-type"' in src
+    assert '"--no-reduce-only"' in src
+    assert "CONTRACT_PRICE" in src
+    # the plain endpoint is settled (-4120) and no longer worth a request
+    assert "fapiPrivatePostOrder(" not in src
 
 
-def test_the_probe_cannot_open_or_increase_a_position():
-    """Both orders are reduceOnly, and it never opens one of its own."""
+def test_the_probe_is_reduce_only_unless_asked_otherwise():
     src = _probe_src()
-    assert src.count('"reduceOnly": True') >= 1
-    assert '"reduceOnly": "true"' in src
+    assert 'if not a.no_reduce_only:\n        params["reduceOnly"] = True' in src
     assert "create_market_order" not in src
     assert "This probe never opens one" in src
 
 
-def test_the_probe_cancels_whatever_it_placed():
+def test_step_two_warns_that_it_can_open_a_position():
+    """--no-reduce-only is the only mode that carries that risk."""
     src = _probe_src()
-    assert "ex.cancel_order(oid, symbol)" in src
-    assert "COULD NOT CANCEL" in src           # and says so if it cannot
+    assert "CAN open a position if it" in src
+    assert "qty * 0.01" in src        # minimal size
+
+
+def test_the_probe_cancels_through_the_algo_book_first():
+    """
+    cancel_order searches the REGULAR book and returns -2011 on these — that
+    is what stranded an order on the first run.
+    """
+    src = _probe_src()
+    i = src.index("for oid, which in placed:")
+    tail = src[i:]
+    assert "fapiPrivateDeleteAlgoOrder" in tail
+    assert tail.index("fapiPrivateDeleteAlgoOrder") < tail.index("cancel_order")
+    assert "COULD NOT CANCEL" in tail
 
 
 def test_the_probe_defaults_to_demo():
     src = _probe_src()
-    assert 'ap.add_argument("--live"' in src
-    assert "demo = not a.live" in src
+    assert 'ap.add_argument("--live", action="store_true"' in src
+    # Resolved from the CONTAINER's own env, so it cannot silently talk to the
+    # wrong endpoint, and a live container refuses to run without --live.
+    assert "demo = resolve_demo()" in src
+    assert "if not demo and not a.live:" in src
+    # Credentials follow bot/config.py: the suffix tracks TESTNET.
+    assert 'f"BINANCE_API_KEY_{suffix}"' in src
 
 
 def test_the_probe_asks_on_the_profitable_side():
@@ -6082,5 +6074,141 @@ def test_the_probe_asks_on_the_profitable_side():
 def test_the_probe_states_what_each_outcome_means():
     src = _probe_src()
     for phrase in ("HONOURED", "SUBSTITUTED WITH MARK",
-                   "not achievable", "/fapi/v1/order"):
+                   "STILL SUBSTITUTED", "that is the setting the trail needs"):
         assert phrase in src, phrase
+
+
+# ── The field is activatePrice, not activationPrice ──────────────────────────
+# ccxt maps activationPrice for POST /fapi/v1/order, then routes conditional
+# linear-swap orders to POST /fapi/v1/algoOrder — a different schema. Binance
+# ignores unrecognised parameters, so every trail since v3.44 was accepted
+# with the activation silently defaulted to the current price.
+#
+# COTI demo 2026-09-18: activatePrice=0.02181 vs mark 0.020771 kept EXACTLY,
+# +5.0022%, reduceOnly=True, MARK_PRICE — the same combination substituted
+# eight times running under the other spelling.
+
+def test_the_trail_sends_activate_price():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._create_trail_order)
+    assert 'params["activatePrice"] = act' in src
+    assert '"activationPrice"' not in src        # the spelling that is ignored
+
+
+def test_activate_now_is_expressed_by_omitting_the_field():
+    """
+    Binance requires a BUY trail's activation AT OR BELOW the current price
+    and a SELL trail's at or above, so an already-satisfied activation cannot
+    be expressed. Omitting it defaults to the current price, which IS
+    "activate now" — and now the key is recognised, a wrong-side value would
+    be REJECTED rather than ignored.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._create_trail_order)
+    assert "act = activation if activation else None" in src
+    assert "_activation_now" not in src
+
+
+def test_only_an_explicit_level_is_sent():
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g.cfg = GuardConfig()
+    sent = {}
+
+    class _Ex:
+        def create_order(self, **kw):
+            sent.update(kw.get("params") or {})
+            return {"info": {"orderId": "1", "activatePrice": "3.402"}}
+    g.exchange = _Ex()
+
+    class _P:
+        symbol = "AR/USDT:USDT"; side = "short"
+        entry_price = 3.439; qty = 1.0
+        leverage = 20; effective_leverage = 20.0; margin = 1.0
+
+    g._create_trail_order(_P(), "buy", 1.0, 0.15, activation=3.402)
+    assert sent.get("activatePrice") == 3.402
+    sent.clear()
+    g._create_trail_order(_P(), "buy", 1.0, 0.15)
+    assert "activatePrice" not in sent        # omitted, not guessed
+
+
+# ── The daily baseline must be OBSERVED, not derived ─────────────────────────
+# base = wallet_now - net_since_midnight is a SUBTRACTION, so it absorbs every
+# per-trade recording error, cumulatively. Four consecutive demo closes on
+# 2026-09-18 moved it +6.83 USDT; over 47 trades the card drifted 5504 -> 5488
+# and read like a rolling 24h balance. It is also why RE-BASE did nothing:
+# clearing a cache of a deterministic function recomputes the same number.
+
+def _roll(bal, now, state=None):
+    from bot.auto_trader import SafetyState, roll_day
+    return roll_day(state or SafetyState(), bal, now)
+
+
+def test_crossing_midnight_while_running_captures_the_real_balance():
+    from bot.auto_trader import day_start_ts
+    import time
+    now = time.time()
+    midnight = day_start_ts(now)
+    st = _roll(5504.0, midnight + 3)        # one poll after the rollover
+    assert st.day_baseline_source == "rollover"
+    assert st.day_start_balance == 5504.0
+
+
+def test_waking_up_mid_day_is_not_a_days_start():
+    from bot.auto_trader import day_start_ts
+    import time
+    now = time.time()
+    st = _roll(5114.0, day_start_ts(now) + 6 * 3600)
+    assert st.day_baseline_source == "restart"
+
+
+def test_a_trusted_baseline_is_used_verbatim():
+    """No arithmetic, so no drift."""
+    from bot.analysis import day_report
+    r = day_report([], day_baseline=5504.0, day_start_ts=1789700000.0,
+                   wallet_now=5114.0, baseline_source="rollover")
+    assert r["baseline"] == 5504.0
+    assert r["baseline_source"] == "rollover"
+
+
+def test_an_untrusted_baseline_falls_back_to_reconstruction():
+    from bot.analysis import day_report, _DAY_BASELINE
+    _DAY_BASELINE.clear()
+    trades = [{"closed_at": 1789700100.0, "net_pnl_usdt": -10.0,
+               "realised_pnl_usdt": -10.0, "exit_is_estimate": False}]
+    r = day_report(trades, day_baseline=9999.0, day_start_ts=1789700000.0,
+                   wallet_now=5114.0, baseline_source="restart")
+    assert r["baseline_source"] == "reconstructed"
+    assert r["baseline"] != 9999.0
+    _DAY_BASELINE.clear()
+
+
+def test_an_operator_baseline_is_trusted_too():
+    from bot.analysis import day_report
+    r = day_report([], day_baseline=5488.0, day_start_ts=1789700000.0,
+                   wallet_now=5000.0, baseline_source="operator")
+    assert r["baseline"] == 5488.0
+
+
+def test_rebase_writes_a_figure_rather_than_clearing_a_cache():
+    import inspect
+    import bot.api as api
+    src = inspect.getsource(api)
+    assert 'st.day_baseline_source = "operator"' in src
+    assert "st.day_start_balance = float(base)" in src
+    # and it must NOT zero the halt's threshold, which is what silently
+    # erased the day's drawdown
+    assert "st.day_start_balance = 0.0" not in src
+
+
+def test_the_baseline_survives_a_restart():
+    """Otherwise every redeploy re-derives it from a wallet that has moved."""
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    assert '"day_baseline_source": getattr(self.state, "day_baseline_source", "")' in src
+    assert 's.day_baseline_source = str(data.get("day_baseline_source") or "")' in src

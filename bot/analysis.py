@@ -317,7 +317,8 @@ _DAY_BASELINE: dict = {}
 
 def day_report(trades: list[dict], day_baseline: float | None,
                day_start_ts: float | None, wallet_now: float | None = None,
-               tz_offset_h: float = 0.0) -> dict:
+               tz_offset_h: float = 0.0,
+               baseline_source: str = "") -> dict:
     """
     The trading day on its own terms: what the account started the day with,
     what it has done since, and how many trades it took to get there.
@@ -352,35 +353,37 @@ def day_report(trades: list[dict], day_baseline: float | None,
         out["wins"] = sum(1 for t in today if (_realised(t) or 0) > 0)
         out["net_pnl"] = round(net, 4)
 
-        # RECONSTRUCT the baseline rather than trust the stored one.
+        # A STORED baseline wins, when it was genuinely captured at the
+        # rollover or set by the operator.
         #
-        # day_start_balance is set by roll_day() when the day KEY changes, so
-        # on a mid-day restart it holds the balance at THAT MOMENT, not at
-        # local midnight. The card read "from $5308" when the real 00:00
-        # figure was $5063.54 — and the percentage inherited the error,
-        # because it is computed from the same number.
+        # Reconstruction — wallet_now minus P&L since midnight — looks exact
+        # and is not, because it is a SUBTRACTION: it absorbs every per-trade
+        # recording error, all day, cumulatively. Four consecutive demo closes
+        # on 2026-09-18 moved it +6.83 USDT:
         #
-        # Working backwards from the current wallet is exact as long as the
-        # trades are recorded, and it survives restarts, redeploys and the
-        # container being down overnight:
+        #     wallet moved   recorded net    error
+        #       -21.5700       -23.5007     +1.9307
+        #       +29.2600       +28.1583     +1.1017
+        #        +5.4200        +2.2620     +3.1580
+        #        -3.6400        -4.2795     +0.6395
         #
-        #     baseline = wallet_now - (realised P&L since local midnight)
+        # Over 47 trades the card drifted 5504 -> 5488, which is why it read
+        # like a rolling 24h balance rather than a fixed 00:00 one. The same
+        # quantity shows up account-wide as wallet_gap.
         #
-        # It cannot see a deposit, withdrawal or funding payment made since
-        # midnight; those would surface as a baseline error. The stored value
-        # is the fallback when there is nothing to reconstruct from.
-        # RECONSTRUCT ONCE, THEN HOLD IT.
-        #
-        # wallet_now - net_pnl_since_midnight is exact at any instant, but it
-        # is recomputed on every dashboard refresh — so the displayed "from"
-        # figure drifts all day as trades close, and reads as "24h ago" rather
-        # than a fixed 00:00. The baseline is a property of the DAY, not of
-        # the moment it is asked for.
-        #
-        # The first reconstruction of the day is cached against the day key
-        # and reused until the key changes.
+        # It is also why RE-BASE appeared to do nothing: clearing a cache of a
+        # deterministic function recomputes the identical number. There was no
+        # stored value to reset.
         base = None
-        if wallet_now and float(wallet_now) > 0 and today and day_start_ts:
+        trusted = baseline_source in ("rollover", "operator")
+        if trusted and day_baseline and float(day_baseline) > 0:
+            base = float(day_baseline)
+            out["baseline"] = round(base, 2)
+            out["baseline_source"] = baseline_source
+        elif wallet_now and float(wallet_now) > 0 and today and day_start_ts:
+            # No trustworthy capture — the container was down over midnight,
+            # or started mid-day. Reconstruct ONCE and hold it for the day, so
+            # at least it stops moving between refreshes.
             key = int(day_start_ts)
             cached = _DAY_BASELINE.get(key)
             if cached is not None:

@@ -249,7 +249,9 @@ def create_app(engine) -> FastAPI:
                     day_start_ts=(getattr(_auto.state, "day_started_at", 0.0)
                                   if _auto is not None else 0.0) or day_start,
                     wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
-                    tz_offset_h=DAY_TZ_OFFSET_H)
+                    tz_offset_h=DAY_TZ_OFFSET_H,
+                    baseline_source=(getattr(_auto.state, "day_baseline_source", "")
+                                     if _auto is not None else ""))
             except Exception as e:
                 report["account_return"] = {"error": str(e)}
                 report["day"] = {"error": str(e)}
@@ -367,13 +369,46 @@ def create_app(engine) -> FastAPI:
         done = {}
         if payload.get("day", True):
             try:
-                from bot.analysis import _DAY_BASELINE
-                _DAY_BASELINE.clear()
+                from bot.analysis import _DAY_BASELINE, day_report
+                import time as _t
                 st = getattr(_auto, "state", None) if _auto else None
-                if st is not None:
-                    st.day_start_balance = 0.0
-                    st.day_key = ""       # forces roll_day to re-base
-                done["day"] = "cleared — recomputed on the next refresh"
+                # WRITE a baseline, do not clear a cache.
+                #
+                # The old version cleared _DAY_BASELINE and zeroed
+                # day_start_balance. Clearing a cache of a deterministic
+                # function recomputes the identical number, so the card never
+                # changed — while zeroing day_start_balance silently moved the
+                # DAILY HALT's threshold to the current balance, erasing the
+                # day's drawdown with no visible sign.
+                #
+                # Now it computes today's 00:00 balance once, from the wallet
+                # and the P&L since midnight, and STORES it. It stops drifting
+                # because nothing recomputes it, and the halt and the card
+                # then share one figure.
+                _DAY_BASELINE.clear()
+                wallet = getattr(_guardian, "_wallet_balance_cached", 0.0) or 0.0
+                started = getattr(st, "day_started_at", 0.0) if st else 0.0
+                base = None
+                if st is not None and wallet > 0 and started:
+                    rep = day_report(
+                        (_guardian.closed_trades() if _guardian else []),
+                        day_baseline=None, day_start_ts=started,
+                        wallet_now=wallet, tz_offset_h=DAY_TZ_OFFSET_H)
+                    net = float(rep.get("net_pnl") or 0.0)
+                    base = wallet - net
+                if st is not None and base and base > 0:
+                    prev = st.day_start_balance
+                    st.day_start_balance = float(base)
+                    st.day_baseline_at = _t.time()
+                    st.day_baseline_source = "operator"
+                    done["day"] = (
+                        f"{prev:.2f} -> {base:.2f} (stored; the daily halt "
+                        f"now measures from this figure too)")
+                elif st is None:
+                    done["day"] = "no auto-trader"
+                else:
+                    done["day"] = ("wallet or day start unavailable — "
+                                   "nothing changed")
             except Exception as e:
                 done["day"] = f"failed: {e}"
         if payload.get("account"):

@@ -537,13 +537,6 @@ class BotConfig:
         (_env("SCAN_EXCLUDE_SYMBOLS", "") or "").split(",") if x.strip()])
     guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(
         "GUARD_ARM_AT_ENTRY", False))
-    guard_trail_activate_now: bool = field(default_factory=lambda: _env_bool(
-        "GUARD_TRAIL_ACTIVATE_NOW", True))
-    # How far past the mark that activation sits, as a price %. Only needs to
-    # clear tick rounding and a tick or two of movement between our read and
-    # the exchange's evaluation.
-    guard_trail_activation_eps_pct: float = field(default_factory=lambda: _env_float(
-        "GUARD_TRAIL_ACTIVATION_EPS_PCT", 0.3))
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(

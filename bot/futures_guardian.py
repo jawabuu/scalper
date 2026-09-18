@@ -1268,42 +1268,26 @@ class FuturesGuardian:
                         f"status {status} (id={oid}).")
         return oid
 
-    def _activation_now(self, pos: FuturesPosition, mark: float | None):
-        """
-        An activationPrice that is ALREADY satisfied, so the trail is live at
-        placement rather than waiting for price to reach it.
-
-        Binance activates a BUY trail (closing a short) when price <=
-        activationPrice, and a SELL trail when price >= it. "Now" therefore
-        means just the far side of the current mark. Returns None when the
-        mark is unknown or the behaviour is switched off, and the placement
-        then falls back to sending no activationPrice at all.
-        """
-        if not getattr(self.cfg, "trail_activate_now", True):
-            return None                     # GUARD_TRAIL_ACTIVATE_NOW=false
-        if not mark or mark <= 0:
-            return None
-        eps = abs(getattr(self.cfg, "trail_activation_eps_pct", 0.3)) / 100.0
-        raw = mark * (1 + eps) if stop_side(pos) == "buy" else mark * (1 - eps)
-        try:
-            return float(self.exchange.price_to_precision(pos.symbol, raw))
-        except Exception:
-            return raw
+    # _activation_now was removed in v3.54.0. It computed an activation just
+    # past the mark so a trail would be "live at once", and it never worked —
+    # it sent the field as `activationPrice`, which the algo endpoint ignores.
+    # Now the key is right it would be actively HARMFUL: Binance requires a
+    # BUY trail's activation at or below the current price, so a value just
+    # above would be REJECTED rather than quietly dropped. "Activate now" is
+    # expressed by OMITTING the field, which is Binance's own default.
 
     def _activation_at_roi(self, pos: FuturesPosition, roi: float):
         """
-        The price at which the position reaches `roi`, as an activationPrice.
+        The price at which the position reaches `roi`, as an activatePrice.
 
-        This is the whole point of arming at entry. Binance activates a BUY
-        trail when price <= activationPrice and a SELL trail when price >= it,
-        and price_for_roi gives exactly the price where the ROI is reached —
-        below entry for a short, above for a long. So the activation lands on
-        the right side for either direction without any epsilon.
+        Binance activates a BUY trail when price <= activatePrice and a SELL
+        trail when price >= it, and price_for_roi gives exactly the price where
+        the ROI is reached — below entry for a short, above for a long. So the
+        level lands on the side the exchange requires for either direction,
+        with no epsilon.
 
-        Unlike _activation_now this cannot be outrun: it is derived from the
-        ENTRY price, which does not move, rather than from a mark read moments
-        earlier. PENDLE 2026-09-18 12:38:49 lost that race by 0.023% while
-        price moved 0.323% between the two reads.
+        Derived from the ENTRY price, which does not move, so unlike a value
+        computed from a mark read moments earlier it cannot be outrun.
         """
         if not pos.entry_price or pos.entry_price <= 0:
             return None
@@ -1325,19 +1309,19 @@ class FuturesGuardian:
 
         A silent substitution is the dangerous case: the order is accepted, so
         nothing raises, and the trail rests at a level nobody asked for. That
-        is what happened to the arm-at-entry trail on G/USDT — asked +5% ROI,
-        got mark, which makes a 0.3% callback live from entry instead of
-        dormant until +5%.
+        is what the wrong field name caused for every trail between v3.44 and
+        v3.54.
         """
         try:
             info = (order or {}).get("info") or {}
-            sent = params.get("activationPrice")
+            sent = params.get("activatePrice")
             got = info.get("activatePrice") or info.get("activationPrice")
             rate = info.get("priceRate") or info.get("callbackRate")
             log.info(
-                f"TRAIL-RESPONSE {pos.symbol}: id={info.get('orderId') or (order or {}).get('id')} "
+                f"TRAIL-RESPONSE {pos.symbol}: "
+                f"id={info.get('orderId') or (order or {}).get('id')} "
                 f"status={info.get('status')} "
-                f"activation sent={sent} kept={got} "
+                f"activatePrice sent={sent} kept={got} "
                 f"callbackRate sent={params.get('callbackRate')} kept={rate} "
                 f"workingType={info.get('workingType')}")
             if sent and got:
@@ -1349,9 +1333,7 @@ class FuturesGuardian:
                     log.error(
                         f"TRAIL-ACTIVATION-IGNORED {pos.symbol}: asked for "
                         f"{sent}, the exchange kept {got} ({d:+.3f}%). The "
-                        f"trail is NOT resting where it was placed — treat "
-                        f"any level-based arming as not working until this "
-                        f"is understood.")
+                        f"trail is NOT resting where it was placed.")
         except Exception as e:
             log.debug(f"{pos.symbol}: trail response log failed: {e}")
 
@@ -1368,14 +1350,30 @@ class FuturesGuardian:
         """
         params = {"callbackRate": cb, "reduceOnly": True,
                   "workingType": self.cfg.stop_working_type}
-        # An explicit level wins over "activate now". That is how the armed
-        # trail is placed at entry: dormant BY DESIGN until the exchange sees
-        # the arm level, tick by tick, with no poll needed.
-        act = activation if activation else (
-            self._activation_now(pos, self.mark_price(pos))
-            if activate_now else None)
+        # THE FIELD IS `activatePrice`, NOT `activationPrice`.
+        #
+        # ccxt maps activationPrice for POST /fapi/v1/order, then routes
+        # conditional linear-swap orders to POST /fapi/v1/algoOrder
+        # (binance.py:6888) — a different endpoint with a different schema.
+        # Binance ignores unrecognised parameters rather than rejecting them,
+        # so every trail since v3.44 was accepted with the activation silently
+        # defaulted to the current price. Verified 2026-09-18 on COTI demo:
+        # activatePrice=0.02181 against a mark of 0.020771 was kept EXACTLY,
+        # +5.0022%, with reduceOnly=True and workingType=MARK_PRICE — the same
+        # combination that had been substituted eight times running under the
+        # other spelling. The response has always used `activatePrice`; that
+        # was the clue.
+        #
+        # Only an explicit LEVEL is sent. "Activate now" is omitted on
+        # purpose: Binance requires a BUY trail's activation to sit AT OR
+        # BELOW the current price and a SELL trail's at or above, so an
+        # already-satisfied activation cannot be expressed. Omitting it makes
+        # Binance default to the current price, which is exactly what
+        # "activate now" means — and now that the key is recognised, sending
+        # one on the wrong side would be REJECTED rather than ignored.
+        act = activation if activation else None
         if act:
-            params["activationPrice"] = act
+            params["activatePrice"] = act
         # Log what is SENT, not just what comes back. G/USDT 2026-09-18
         # 14:46:43 asked for activation 0.009818 (+5% ROI) and the exchange
         # reported 0.0098795, which is mark — accepted, but with a DIFFERENT
@@ -1394,11 +1392,11 @@ class FuturesGuardian:
             if not act:
                 raise
             log.warning(
-                f"{pos.symbol}: trail refused with activationPrice={act} "
+                f"{pos.symbol}: trail refused with activatePrice={act} "
                 f"({_safe_err(e)}) — retrying without one. Binance will then "
                 f"derive one from its own latest price, which may leave the "
                 f"trail dormant.")
-            params.pop("activationPrice", None)
+            params.pop("activatePrice", None)
             log.info(f"TRAIL-REQUEST {pos.symbol} (retry): side={side} "
                      f"qty={qty} params={params}")
             order = self.exchange.create_order(
