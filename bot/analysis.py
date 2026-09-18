@@ -179,8 +179,23 @@ DIST_BUCKETS = [Bucket("<1%", 0, 1), Bucket("1-2%", 1, 2),
                 Bucket("2-3%", 2, 3), Bucket("3-5%", 3, 5),
                 Bucket("5%+", 5, 999)]
 
+# The top band used to be a single "1.5%+", which buried everything from a
+# 1.6% coin to a 3.2% one. G/USDT 2026-09-18 08:02 ran at atr_pct 3.203 with a
+# 30% ROI stop — 1.5% of price at 20x, LESS THAN HALF one average candle. That
+# relationship is invisible while the bucket is open-ended, so it is split.
+# ATR is gated below by AUTO_MIN_ATR_PCT and not above on the auto-trade path,
+# which is the asymmetry these bands exist to test.
 ATR_BUCKETS = [Bucket("<0.3%", 0, 0.3), Bucket("0.3-0.7%", 0.3, 0.7),
-               Bucket("0.7-1.5%", 0.7, 1.5), Bucket("1.5%+", 1.5, 999)]
+               Bucket("0.7-1.5%", 0.7, 1.5), Bucket("1.5-2.5%", 1.5, 2.5),
+               Bucket("2.5-4%", 2.5, 4), Bucket("4%+", 4, 999)]
+
+# How far the coin had already travelled on the day when the trade was taken.
+# Captured per trade since the entry context existed, never grouped. G was
+# shorted after +68.78% in 24h; whether that band pays is a question the
+# record can answer and nothing was asking it.
+CHANGE_24H_BUCKETS = [Bucket("<0%", -999, 0), Bucket("0-10%", 0, 10),
+                      Bucket("10-25%", 10, 25), Bucket("25-50%", 25, 50),
+                      Bucket("50-100%", 50, 100), Bucket("100%+", 100, 99999)]
 
 
 def reconcile(trades: list[dict], wallet_now: float | None,
@@ -1028,6 +1043,8 @@ def analyse(trades: list[dict]) -> dict:
         "by_distance_to_extreme": bucket_by(
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
+        "by_change_24h": bucket_by(
+            trades, lambda t: _stamp(t, "change_24h_pct"), CHANGE_24H_BUCKETS),
         "by_exit_reason": exits,
         "by_breakout": by_breakout,
         "by_breakout_parts": by_breakout_parts,

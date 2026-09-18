@@ -5390,3 +5390,71 @@ def test_a_failing_algo_book_does_not_take_the_audit_down():
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian._audit_protection)
     assert "algo book unavailable to audit" in src
+
+
+# ── Grouping the two entry factors the record could never answer ─────────────
+# G/USDT 2026-09-18 08:02: shorted after +68.78% in 24h at atr_pct 3.203, with
+# a 30% ROI stop — 1.5% of price at 20x, less than half one average candle.
+# ATR is gated BELOW by AUTO_MIN_ATR_PCT and not above on the auto-trade path.
+# Neither factor was groupable: the top ATR bucket was an open-ended "1.5%+"
+# and 24h change was captured per trade but never bucketed at all.
+
+def test_the_top_atr_band_is_no_longer_open_ended_at_1_5():
+    from bot.analysis import ATR_BUCKETS
+    labels = [b.label for b in ATR_BUCKETS]
+    assert "1.5%+" not in labels
+    assert "1.5-2.5%" in labels and "2.5-4%" in labels and "4%+" in labels
+
+
+def test_a_high_atr_trade_separates_from_a_merely_volatile_one():
+    from bot.analysis import ATR_BUCKETS, bucket_by, _stamp
+    # bucket_by only counts SCORED trades, so these carry final_roi exactly
+    # as a real closed trade does.
+    trades = [{"entry_context": {"atr_pct": 3.203},
+               "realised_pnl_usdt": -0.4598, "final_roi": -30.3},
+              {"entry_context": {"atr_pct": 1.6},
+               "realised_pnl_usdt": 0.1, "final_roi": 4.0}]
+    rows = {r["label"]: r["n"]
+            for r in bucket_by(trades, lambda t: _stamp(t, "atr_pct"),
+                               ATR_BUCKETS)}
+    assert rows["2.5-4%"] == 1          # G
+    assert rows["1.5-2.5%"] == 1        # would have shared a bucket before
+
+
+def test_the_24h_change_buckets_cover_negative_moves_too():
+    """A short taken on a coin already DOWN is a different animal."""
+    from bot.analysis import CHANGE_24H_BUCKETS, bucket_by, _stamp
+    trades = [{"entry_context": {"change_24h_pct": -8.0},
+               "realised_pnl_usdt": 0.05, "final_roi": 2.0},
+              {"entry_context": {"change_24h_pct": 68.78},
+               "realised_pnl_usdt": -0.4598, "final_roi": -30.3},
+              {"entry_context": {"change_24h_pct": 140.0},
+               "realised_pnl_usdt": -0.1, "final_roi": -5.0}]
+    rows = {r["label"]: r["n"]
+            for r in bucket_by(trades, lambda t: _stamp(t, "change_24h_pct"),
+                               CHANGE_24H_BUCKETS)}
+    assert rows["<0%"] == 1
+    assert rows["50-100%"] == 1         # G
+    assert rows["100%+"] == 1
+
+
+def test_the_analysis_payload_exposes_the_new_grouping():
+    import inspect
+    import bot.analysis as an
+    src = inspect.getsource(an)
+    assert '"by_change_24h"' in src
+    assert 'CHANGE_24H_BUCKETS' in src
+
+
+def test_the_ui_renders_it_next_to_atr():
+    html = open("ui/index.html", encoding="utf-8").read()
+    assert "a.by_change_24h" in html
+    assert html.index("a.by_atr") < html.index("a.by_change_24h")
+
+
+def test_a_trade_with_no_entry_context_is_not_counted_anywhere():
+    """Older trades predate the context and must not distort a band."""
+    from bot.analysis import CHANGE_24H_BUCKETS, bucket_by, _stamp
+    rows = bucket_by([{"realised_pnl_usdt": 1.0, "final_roi": 5.0}],
+                     lambda t: _stamp(t, "change_24h_pct"), CHANGE_24H_BUCKETS)
+    assert sum(r["n"] for r in rows) == 0

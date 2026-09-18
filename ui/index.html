@@ -3434,6 +3434,7 @@ function renderAnalysis(a) {
       statTable('By RSI at entry', a.by_rsi || []),
       statTable('By distance to 24h extreme', a.by_distance_to_extreme || []),
       statTable('By ATR (volatility)', a.by_atr || []),
+      statTable('By 24h change at entry', a.by_change_24h || []),
       statTable('By exit reason', a.by_exit_reason || []),
       timeTable('By breakout structure', a.by_breakout || [],
                 'A wide EMA gap alone fits a blow-off top as well as a '
