@@ -1316,6 +1316,7 @@ class FuturesGuardian:
             oid = self._accepted_id(pos, order, "RESCUE trailing stop")
             if not oid:
                 return None
+            self._log_trail_activation(pos, order, oid, cb, "RESCUE trail")
             log.warning(
                 f"{pos.symbol}: RESCUE trailing stop placed — activates now, "
                 f"closes on a {cb}% adverse move ({cb * lev:.0f}% ROI at "
@@ -1351,12 +1352,60 @@ class FuturesGuardian:
         oid = self._accepted_id(pos, order, "ARMED trailing stop")
         if not oid:
             return None
+        self._log_trail_activation(pos, order, oid, cb, "ARMED trail")
         log.info(
             f"{pos.symbol}: ARMED native trailing stop (callback {cb}% price = "
             f"{callback_roi_at(lev, self.cfg):.0f}% ROI at {lev:.0f}x), locks in "
             f"~{locked:+.0f}% ROI. id={oid}"
         )
         return oid
+
+    def _log_trail_activation(self, pos: FuturesPosition, order: dict,
+                              oid: str, cb: float, what: str):
+        """
+        Record the activation price Binance assigned, and how far it sits from
+        the mark we hold.
+
+        We send no activationPrice, so Binance derives one. A BUY trail (a
+        short) activates at price <= activationPrice, so an activation BELOW
+        the mark means the trail rests DORMANT until price falls that far —
+        and if the move reverses first it never activates at all, while the
+        guardian holds an id and the exchange really is holding the order.
+
+        ONE 2026-09-17 19:56:49 shows that shape directly: activation
+        0.0015552 against a mark of at least 0.0015585, 0.21% away.
+
+        ONE 17:00 is the case this line exists for. Its trail was accepted,
+        Finished, and still gave back 47 ROI points on a 3% callback — which
+        no explanation so far covers. The gap recorded here says whether the
+        trail was live when it was placed or waiting to be.
+        """
+        info = (order or {}).get("info") or {}
+        try:
+            act = float(info.get("activatePrice")
+                        or info.get("activationPrice") or 0)
+        except (TypeError, ValueError):
+            act = 0.0
+        mark = self.mark_price(pos)
+        if act > 0 and mark and mark > 0:
+            gap = (act - mark) / mark * 100
+            # "buy" closes a short and activates at price <= act, so an
+            # activation below the mark is not yet reachable.
+            live = act >= mark if stop_side(pos) == "buy" else act <= mark
+            log.info(
+                f"TRAIL-ACTIVATION {pos.symbol}: {what} id={oid} "
+                f"activation={act} mark={mark} ({gap:+.3f}%) callback={cb}% "
+                f"-> {'LIVE now' if live else 'DORMANT until price reaches it'}"
+                f" | src={getattr(self, '_last_price_source', '?')}")
+            if not live:
+                log.warning(
+                    f"{pos.symbol}: {what} is resting but NOT yet active — it "
+                    f"protects nothing until price moves {abs(gap):.3f}% "
+                    f"further in profit.")
+        else:
+            log.info(
+                f"TRAIL-ACTIVATION {pos.symbol}: {what} id={oid} callback={cb}%"
+                f" — exchange returned no activation price to check.")
 
     def _ensure_adaptive_trail(self, pos: FuturesPosition, state, stop_roi: float):
         """
@@ -2682,6 +2731,44 @@ class FuturesGuardian:
                     f"{final_roi:+.2f}% ROI (last observed was {observed:+.2f}%, "
                     f"the stop filled between polls)"
                 )
+            # What the protective orders SHOULD have delivered, against what
+            # the wallet says. A native trail gives back its callback from the
+            # peak and no more, so peak minus callback is the floor this exit
+            # ought to have respected.
+            #
+            # ONE 17:00 UTC is why this exists: peak +31.8%, an ARMED trail
+            # accepted with a 3% ROI callback, and a close at -15.18%. That is
+            # 47 ROI points past where the trail could account for, and nothing
+            # in the record said which order filled or at what level. Without
+            # this line the next one is diagnosed the same way — from order
+            # history, days later.
+            try:
+                st = self._states.get(symbol)
+                peak = getattr(st, "peak_roi", None) if st else None
+                if peak is not None and peak > 0:
+                    give_back = peak - final_roi
+                    cb_roi = callback_roi_at(leverage, self.cfg) if leverage else None
+                    resting = {k: v for k, v in (
+                        ("fixed", getattr(st, "stop_order_id", None)),
+                        ("floor", getattr(st, "floor_stop_id", None)),
+                        ("trail", getattr(st, "native_trail_id", None)),
+                        ("adaptive", getattr(st, "adaptive_trail_id", None)),
+                    ) if v}
+                    line = (f"GIVE-BACK {symbol}: peak {peak:+.1f}% -> final "
+                            f"{final_roi:+.2f}% = {give_back:.1f} ROI points"
+                            + (f" against a {cb_roi:.0f}% callback" if cb_roi else "")
+                            + f" | resting: {resting or 'nothing on record'}"
+                            + f" | exit~{exit_price}")
+                    # A trail cannot give back more than its callback plus the
+                    # slippage on one market fill. Materially more means the
+                    # trail was not doing the work, and that is worth an alarm
+                    # rather than a line buried at INFO.
+                    if cb_roi and give_back > cb_roi * 2 + 5:
+                        log.warning(line + " — MORE THAN THE TRAIL CAN EXPLAIN")
+                    else:
+                        log.info(line)
+            except Exception as e:
+                log.debug(f"{symbol}: give-back line failed: {e}")
 
         rec = {
             "symbol": symbol,

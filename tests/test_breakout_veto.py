@@ -5130,3 +5130,64 @@ def test_all_three_history_controls_share_one_padding():
     for el in ('id="ft-window"', 'id="ft-peer"', 'id="ft-export"'):
         i = html.index(el)
         assert "padding:3px 6px" in html[i:i + 400], el
+
+
+# ── Diagnosing the next ONE 17:00 ────────────────────────────────────────────
+# That trade had a peak of +31.8%, an ARMED trail the exchange ACCEPTED with a
+# 3% ROI callback, and a close at -15.18%. 47 ROI points past anything the
+# trail can account for, and the record said neither which order filled nor
+# whether the trail was ever live. Both gaps are now logged.
+
+def test_the_activation_price_is_read_back_from_the_response():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._log_trail_activation)
+    assert '"activatePrice"' in src          # Binance's field name
+    assert "DORMANT" in src and "LIVE now" in src
+
+
+def test_both_trail_placements_record_their_activation():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._place_native_trail)
+    assert src.count("self._log_trail_activation(pos, order, oid, cb,") == 2
+
+
+def test_a_dormant_buy_trail_is_the_one_that_warns():
+    """
+    A BUY trail closes a short and activates at price <= activation, so an
+    activation BELOW the mark is not yet reachable. Above it, it is live.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._log_trail_activation)
+    assert 'act >= mark if stop_side(pos) == "buy" else act <= mark' in src
+    assert "protects nothing until price moves" in src
+
+
+def test_an_unexplainable_give_back_is_a_warning_not_a_note():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert "GIVE-BACK" in src
+    assert "MORE THAN THE TRAIL CAN EXPLAIN" in src
+
+
+def test_the_give_back_line_names_every_resting_order():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    i = src.index("GIVE-BACK")
+    block = src[max(0, i - 2000):i + 500]
+    for field in ("stop_order_id", "floor_stop_id",
+                  "native_trail_id", "adaptive_trail_id"):
+        assert field in block, field
+
+
+def test_the_give_back_accounting_cannot_break_a_close():
+    """Instrumentation must never take the close path down with it."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    i = src.index("GIVE-BACK")
+    assert "give-back line failed" in src[i:i + 2000]
