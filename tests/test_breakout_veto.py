@@ -6033,3 +6033,54 @@ def test_two_resting_trails_are_expected_under_arm_at_entry():
     assert 'getattr(self.cfg, "arm_at_entry", False)' in tail
     assert "as arm-at-entry intends" in tail
     assert "PROTECTION-OVERLAP" in tail        # still warns when it is off
+
+
+# ── The activation probe ─────────────────────────────────────────────────────
+# ccxt routes conditional orders on linear swaps to POST /fapi/v1/algoOrder
+# (binance.py:6888), not /fapi/v1/order — which is also why they only ever
+# appear in the algo book. activationPrice IS in that payload, and Binance
+# keeps mark anyway. The probe asks whether the plain endpoint behaves
+# differently.
+
+def _probe_src():
+    return open("tools/probe_trail_activation.py", encoding="utf-8").read()
+
+
+def test_the_probe_tries_both_endpoints():
+    src = _probe_src()
+    assert "create_order(" in src              # ccxt -> algo
+    assert "fapiPrivatePostOrder(" in src      # direct -> plain
+
+
+def test_the_probe_cannot_open_or_increase_a_position():
+    """Both orders are reduceOnly, and it never opens one of its own."""
+    src = _probe_src()
+    assert src.count('"reduceOnly": True') >= 1
+    assert '"reduceOnly": "true"' in src
+    assert "create_market_order" not in src
+    assert "This probe never opens one" in src
+
+
+def test_the_probe_cancels_whatever_it_placed():
+    src = _probe_src()
+    assert "ex.cancel_order(oid, symbol)" in src
+    assert "COULD NOT CANCEL" in src           # and says so if it cannot
+
+
+def test_the_probe_defaults_to_demo():
+    src = _probe_src()
+    assert 'ap.add_argument("--live"' in src
+    assert "demo = not a.live" in src
+
+
+def test_the_probe_asks_on_the_profitable_side():
+    """An arm level sits BELOW mark for a short and ABOVE for a long."""
+    src = _probe_src()
+    assert "mark * (1 - off) if is_short else mark * (1 + off)" in src
+
+
+def test_the_probe_states_what_each_outcome_means():
+    src = _probe_src()
+    for phrase in ("HONOURED", "SUBSTITUTED WITH MARK",
+                   "not achievable", "/fapi/v1/order"):
+        assert phrase in src, phrase
