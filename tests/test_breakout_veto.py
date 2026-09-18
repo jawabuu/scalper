@@ -5569,3 +5569,150 @@ def test_the_protective_test_itself_stays_strict():
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian._audit_protection)
     assert 'o.get("reduce_only") and "STOP" in' in src
+
+
+# ── Arming at entry ──────────────────────────────────────────────────────────
+# The guardian polls every 2.5s, so ROI can reach +10% and fall back to +2%
+# between polls and the trail never arms — arming was an event it had to
+# WITNESS. Handing Binance the arm LEVEL turns a missed observation into a
+# resting order. Strictly earlier, never later.
+
+def _entry_guardian(**cfgkw):
+    from bot.futures_guard import GuardConfig
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+
+    class _Ex:
+        def price_to_precision(self, sym, p):
+            return f"{float(p):.10f}"
+    g.exchange = _Ex()
+    base = dict(arm_at_entry=True, use_native_trail=True, arm_roi=5.0)
+    base.update(cfgkw)
+    g.cfg = GuardConfig(**base)
+    g._all_stop_ids = {}
+    g._record = lambda *a, **k: None
+    g.placed = []
+
+    def _place(pos, rescue=False, callback_pct=None, activation=None):
+        g.placed.append(activation)
+        return "trail-1"
+    g._place_native_trail = _place
+    return g
+
+
+class _EntryShort:
+    symbol = "PENDLE/USDT:USDT"; side = "short"
+    entry_price = 2.6707; qty = 1.0
+    leverage = 20; effective_leverage = 20.0; margin = 1.0
+
+
+class _EntryLong(_EntryShort):
+    side = "long"
+
+
+def _st(**kw):
+    from bot.futures_guard import GuardState
+    return GuardState(**kw)
+
+
+def test_the_activation_is_the_arm_roi_price_not_a_mark_reading():
+    """
+    Derived from ENTRY, which does not move. _activation_now is derived from a
+    mark read moments earlier and PENDLE 12:38:49 lost that race by 0.023%
+    while price moved 0.323% between the two reads.
+    """
+    g = _entry_guardian()
+    act = g._activation_at_roi(_EntryShort(), 5.0)
+    # short: +5% ROI at 20x is 0.25% BELOW entry
+    assert act < _EntryShort().entry_price
+    assert abs(act - 2.6707 * (1 - 0.0025)) < 1e-6
+
+
+def test_a_long_arms_above_entry():
+    """A SELL trail activates at price >= activation, so it must sit above."""
+    g = _entry_guardian()
+    assert g._activation_at_roi(_EntryLong(), 5.0) > _EntryLong().entry_price
+
+
+def test_arming_at_entry_places_one_trail_with_that_activation():
+    g = _entry_guardian()
+    st = _st()
+    g._arm_at_entry(_EntryShort(), st)
+    assert st.native_trail_id == "trail-1"
+    assert len(g.placed) == 1
+    assert g.placed[0] < _EntryShort().entry_price
+
+
+def test_it_never_stacks_a_second_trail():
+    g = _entry_guardian()
+    st = _st()
+    st.native_trail_id = "already-resting"
+    g._arm_at_entry(_EntryShort(), st)
+    assert g.placed == []
+    assert st.native_trail_id == "already-resting"
+
+
+def test_an_already_armed_position_is_left_to_the_poll_block():
+    """Past arm_roi the trail should go on LIVE, not dormant at the level."""
+    g = _entry_guardian()
+    st = _st(); st.armed = True
+    g._arm_at_entry(_EntryShort(), st)
+    assert g.placed == []
+
+
+def test_it_is_off_unless_switched_on():
+    g = _entry_guardian(arm_at_entry=False)
+    st = _st()
+    g._arm_at_entry(_EntryShort(), st)
+    assert g.placed == [] and st.native_trail_id is None
+
+
+def test_a_failed_placement_falls_back_to_the_poll_block():
+    """Never fatal — the old arm path is still there."""
+    g = _entry_guardian()
+    def _boom(pos, **kw):
+        raise Exception("binance -2021")
+    g._place_native_trail = _boom
+    st = _st()
+    g._arm_at_entry(_EntryShort(), st)          # must not raise
+    assert st.native_trail_id is None
+
+
+def test_the_poll_arm_block_no_ops_once_a_trail_rests():
+    """
+    This is what prevents stacking AND what preserves the adaptive trail:
+    the supersede lives inside that block, so it never runs.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    assert "state.armed and not state.native_trail_id" in src
+    i = src.index("state.armed and not state.native_trail_id")
+    assert "adaptive trail superseded" in src[i:]
+
+
+def test_arm_at_entry_runs_beside_the_adaptive_trail_not_instead_of_it():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    assert "self._ensure_adaptive_trail(pos, state," in src
+    assert "self._arm_at_entry(pos, state)" in src
+    assert src.index("_ensure_adaptive_trail") < src.index("_arm_at_entry")
+
+
+def test_a_deliberately_dormant_trail_does_not_warn():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._log_trail_activation)
+    assert "dormant by design" in src
+    assert 'getattr(self.cfg, "arm_at_entry", False)' in src
+
+
+def test_the_switch_follows_the_env_convention():
+    import inspect
+    from bot.futures_guard import GuardConfig
+    import bot.config as botcfg
+    import main
+    assert GuardConfig().arm_at_entry is False
+    assert '"GUARD_ARM_AT_ENTRY"' in inspect.getsource(botcfg)
+    assert "arm_at_entry=cfg.guard_arm_at_entry" in inspect.getsource(main)

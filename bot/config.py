@@ -494,6 +494,22 @@ class BotConfig:
     # cancelled for it. True sends an explicit activationPrice on the already
     # satisfied side of the mark. Set false to restore the old behaviour
     # without a redeploy.
+    # Place the armed trail AT ENTRY, dormant, with its activation at the
+    # arm-ROI price — so Binance arms it tick by tick instead of the guardian
+    # having to witness the crossing on a 2.5s poll. ROI can reach +10% and
+    # fall back to +2% between polls and the old code never armed at all.
+    #
+    # Strictly earlier, never later: the trail protects nothing until price
+    # reaches the arm level, which is exactly when the old code would have
+    # placed it. The poll-driven arm block remains as the fallback.
+    #
+    # Default FALSE. Not timidity: it places a trail EARLIER in the lifecycle,
+    # and 15 existing tests assert the old order sequence (stop first, trail on
+    # arming). Those assertions are coupling, not regressions, but the change
+    # is real and belongs behind a switch for one run.
+    # Set GUARD_ARM_AT_ENTRY=true in compose to enable it.
+    guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(
+        "GUARD_ARM_AT_ENTRY", False))
     guard_trail_activate_now: bool = field(default_factory=lambda: _env_bool(
         "GUARD_TRAIL_ACTIVATE_NOW", True))
     # How far past the mark that activation sits, as a price %. Only needs to

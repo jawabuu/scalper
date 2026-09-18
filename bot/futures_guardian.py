@@ -1290,8 +1290,38 @@ class FuturesGuardian:
         except Exception:
             return raw
 
+    def _activation_at_roi(self, pos: FuturesPosition, roi: float):
+        """
+        The price at which the position reaches `roi`, as an activationPrice.
+
+        This is the whole point of arming at entry. Binance activates a BUY
+        trail when price <= activationPrice and a SELL trail when price >= it,
+        and price_for_roi gives exactly the price where the ROI is reached —
+        below entry for a short, above for a long. So the activation lands on
+        the right side for either direction without any epsilon.
+
+        Unlike _activation_now this cannot be outrun: it is derived from the
+        ENTRY price, which does not move, rather than from a mark read moments
+        earlier. PENDLE 2026-09-18 12:38:49 lost that race by 0.023% while
+        price moved 0.323% between the two reads.
+        """
+        if not pos.entry_price or pos.entry_price <= 0:
+            return None
+        try:
+            raw = price_for_roi(pos, float(roi))
+        except Exception:
+            return None
+        if not raw or raw <= 0:
+            return None
+        try:
+            return float(self.exchange.price_to_precision(pos.symbol, raw))
+        except Exception:
+            return raw
+
     def _create_trail_order(self, pos: FuturesPosition, side: str,
-                            qty: float, cb: float):
+                            qty: float, cb: float,
+                            activation: float | None = None,
+                            activate_now: bool = True):
         """
         Place the trail, activating it immediately where the exchange allows.
 
@@ -1301,7 +1331,12 @@ class FuturesGuardian:
         """
         params = {"callbackRate": cb, "reduceOnly": True,
                   "workingType": self.cfg.stop_working_type}
-        act = self._activation_now(pos, self.mark_price(pos))
+        # An explicit level wins over "activate now". That is how the armed
+        # trail is placed at entry: dormant BY DESIGN until the exchange sees
+        # the arm level, tick by tick, with no poll needed.
+        act = activation if activation else (
+            self._activation_now(pos, self.mark_price(pos))
+            if activate_now else None)
         if act:
             params["activationPrice"] = act
         try:
@@ -1323,7 +1358,8 @@ class FuturesGuardian:
 
     def _place_native_trail(self, pos: FuturesPosition,
                             rescue: bool = False,
-                            callback_pct: float | None = None) -> str | None:
+                            callback_pct: float | None = None,
+                            activation: float | None = None) -> str | None:
         """
         Place Binance's own TRAILING_STOP_MARKET for the armed phase.
 
@@ -1392,7 +1428,8 @@ class FuturesGuardian:
                      f"{qty_str} {pos.symbol} callbackRate={cb}%")
             return f"dry-trail-{int(time.time()*1000)}"
 
-        order = self._create_trail_order(pos, side, float(qty_str), cb)
+        order = self._create_trail_order(pos, side, float(qty_str), cb,
+                                         activation=activation)
         oid = self._accepted_id(pos, order, "ARMED trailing stop")
         if not oid:
             return None
@@ -1444,14 +1481,88 @@ class FuturesGuardian:
                 f"-> {'LIVE now' if live else 'DORMANT until price reaches it'}"
                 f" | src={getattr(self, '_last_price_source', '?')}")
             if not live:
-                log.warning(
-                    f"{pos.symbol}: {what} is resting but NOT yet active — it "
-                    f"protects nothing until price moves {abs(gap):.3f}% "
-                    f"further in profit.")
+                # An arm-at-entry trail is dormant ON PURPOSE — it waits for
+                # the arm level. Only an UNINTENDED dormancy is an alarm, or
+                # this cries wolf on every entry.
+                deliberate = bool(getattr(self.cfg, "arm_at_entry", False)) \
+                    and what.startswith("ARMED")
+                if deliberate:
+                    log.info(
+                        f"{pos.symbol}: {what} is dormant by design — it arms "
+                        f"when price reaches {act} ({abs(gap):.3f}% away).")
+                else:
+                    log.warning(
+                        f"{pos.symbol}: {what} is resting but NOT yet active "
+                        f"— it protects nothing until price moves "
+                        f"{abs(gap):.3f}% further in profit.")
         else:
             log.info(
                 f"TRAIL-ACTIVATION {pos.symbol}: {what} id={oid} callback={cb}%"
                 f" — exchange returned no activation price to check.")
+
+    def _arm_at_entry(self, pos: FuturesPosition, state) -> None:
+        """
+        Place the armed trail NOW, dormant, with its activation at the arm-ROI
+        price — so the exchange arms it tick by tick instead of the guardian
+        noticing on a poll.
+
+        The guardian polls every 2.5s. ROI can reach +10% and fall back to +2%
+        between two polls and the arm never fires, because arming was an event
+        the guardian had to WITNESS. Binance sees every tick. Handing it the
+        level turns a missed observation into a resting order.
+
+        Dormancy is the mechanism here, not the bug it was elsewhere: the trail
+        protects nothing until price reaches the arm level, which is exactly
+        when the old code would have placed it. It is strictly earlier, never
+        later.
+
+        No stacking: one trail per role. This writes native_trail_id, and the
+        arm block in manage_position is already gated on `not
+        state.native_trail_id`, so it becomes a no-op — including its
+        supersede of the adaptive trail. The adaptive trail therefore LIVES,
+        which is a gain: every supersede discarded the extreme Binance had
+        been tracking on it, and that extreme is the peak the guardian cannot
+        see. Both are reduceOnly and close the same direction; whichever fires
+        first closes the position and the other is rejected harmlessly.
+        """
+        if not getattr(self.cfg, "arm_at_entry", False):
+            return                              # GUARD_ARM_AT_ENTRY=false
+        if not self.cfg.use_native_trail:
+            return
+        if state.native_trail_id:
+            return                              # one trail per role
+        if getattr(state, "armed", False):
+            return                  # already past arm_roi — let the arm block
+                                    # place it live rather than dormant here
+        arm_roi = float(getattr(self.cfg, "arm_roi", 0) or 0)
+        if arm_roi <= 0:
+            return
+        activation = self._activation_at_roi(pos, arm_roi)
+        if not activation:
+            log.warning(f"{pos.symbol}: cannot derive the arm level from "
+                        f"entry {pos.entry_price} — leaving the trail to the "
+                        f"poll-driven arm block.")
+            return
+        try:
+            trail_id = self._place_native_trail(pos, activation=activation)
+        except Exception as e:
+            # Never fatal. The poll-driven arm block is still there and will
+            # place the trail the old way if this fails.
+            log.warning(f"{pos.symbol}: arm-at-entry failed ({_safe_err(e)}) "
+                        f"— falling back to arming on a poll.")
+            self._record(pos.symbol, "arm_at_entry_failed", str(e))
+            return
+        if not trail_id:
+            return
+        state.native_trail_id = trail_id
+        self._all_stop_ids.setdefault(pos.symbol, []).append(trail_id)
+        log.warning(
+            f"{pos.symbol}: ARMED AT ENTRY — trail resting with activation at "
+            f"{activation} (+{arm_roi:g}% ROI). It is DORMANT BY DESIGN and "
+            f"arms the moment the exchange sees that price, with no poll "
+            f"needed. id={trail_id}")
+        self._record(pos.symbol, "armed_at_entry",
+                     f"activation {activation} (+{arm_roi:g}% ROI)")
 
     def _ensure_adaptive_trail(self, pos: FuturesPosition, state, stop_roi: float):
         """
@@ -2073,6 +2184,7 @@ class FuturesGuardian:
         # Before anything else: once the position has been far enough ahead it
         # gets a hard floor that nothing below cancels.
         self._ensure_adaptive_trail(pos, state, _stop_roi_used)
+        self._arm_at_entry(pos, state)
         self._ensure_profit_floor(pos, state, price)
         self._audit_protection(pos, state)
 
