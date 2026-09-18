@@ -85,6 +85,9 @@ class ScanRunner:
         genuine movers. Returns (symbol, quote_volume, pct_change).
         """
         tickers = self.exchange.fetch_tickers()
+        self._log_instrument_classes(
+            [s for s in tickers
+             if s.endswith("/USDT:USDT") or s.endswith("/USDT")])
 
         # Percentile mode: derive the volume floor from the universe itself, so
         # the filter keeps working where absolute volumes are not comparable to
@@ -95,6 +98,8 @@ class ScanRunner:
             for sym, t in tickers.items():
                 if not (sym.endswith("/USDT:USDT") or sym.endswith("/USDT")):
                     continue
+                if self._excluded(sym) or self._wrong_class(sym):
+                    continue      # keep them out of the percentile sample too
                 qv = t.get("quoteVolume")
                 if qv:
                     vols.append(float(qv))
@@ -156,6 +161,8 @@ class ScanRunner:
         for sym, t in tickers.items():
             if not sym.endswith("/USDT:USDT") and not sym.endswith("/USDT"):
                 continue
+            if self._excluded(sym) or self._wrong_class(sym):
+                continue
             qv = t.get("quoteVolume") or 0.0
             pct = t.get("percentage")
             if pct is None or qv < vol_floor:
@@ -167,6 +174,78 @@ class ScanRunner:
         # Biggest movers first, then cap the OHLCV workload.
         out.sort(key=lambda r: abs(r[2]), reverse=True)
         return out[: self.max_symbols]
+
+    def _underlying_type(self, sym: str) -> str | None:
+        """Binance's exchangeInfo `underlyingType`, via the ccxt market."""
+        try:
+            info = (self.exchange.market(sym) or {}).get("info") or {}
+        except Exception:
+            return None
+        v = info.get("underlyingType")
+        return str(v) if v not in (None, "", []) else None
+
+    def _log_instrument_classes(self, symbols) -> None:
+        """
+        One-time inventory of the instrument classes in the universe.
+
+        Printed once per process so the operator can see EXACTLY which value
+        separates TradFi perps from crypto perps, rather than anyone guessing.
+        SNXX 2026-09-18 returned -4411 "Please sign TradFi-Perps agreement"
+        and nothing in the scan distinguished it beforehand.
+        """
+        if getattr(self, "_classes_logged", False):
+            return
+        self._classes_logged = True
+        seen: dict = {}
+        for sym in symbols:
+            k = self._underlying_type(sym) or "(none)"
+            ex, n = seen.get(k, (sym, 0))
+            seen[k] = (ex, n + 1)
+        if not seen:
+            return
+        log.info("instrument classes in the scan universe: " + " | ".join(
+            f"underlyingType={k}: {n} symbol(s), e.g. {ex}"
+            for k, (ex, n) in sorted(seen.items(), key=lambda kv: -kv[1][1])))
+        allowed = tuple(getattr(self.cfg, "allowed_underlying", ()) or ())
+        if allowed:
+            log.info(f"SCAN_ALLOWED_UNDERLYING={','.join(allowed)} — only "
+                     f"those classes are tradeable; symbols with no "
+                     f"underlyingType are allowed through.")
+
+    def _wrong_class(self, sym: str) -> bool:
+        """
+        True when the symbol belongs to an instrument class we do not trade.
+
+        Fails OPEN: no configured list, or no underlyingType on the market,
+        and the symbol passes. Getting this wrong in the other direction would
+        empty the universe silently.
+        """
+        allowed = tuple(getattr(self.cfg, "allowed_underlying", ()) or ())
+        if not allowed:
+            return False
+        ut = self._underlying_type(sym)
+        if ut is None:
+            return False
+        return ut.upper() not in tuple(a.upper() for a in allowed)
+
+    def _excluded(self, sym: str) -> bool:
+        """
+        Symbols the scan must never surface.
+
+        Binance's TradFi perps share the ticker feed and pass the volume and
+        RSI filters like any mover, but entries come back -4411 "Please sign
+        TradFi-Perps agreement contract fapi" — an account permission, not a
+        transient error. A rejection opens no position, so it triggers no
+        cooldown, so the symbol is re-attempted every scan indefinitely.
+        SNXX 2026-09-18 14:14:56 and again at 14:15:36.
+
+        Matched on the BASE so the operator writes SNXX, not SNXX/USDT:USDT.
+        """
+        ex = tuple(getattr(self.cfg, "exclude_symbols", ()) or ())
+        if not ex:
+            return False
+        base = sym.split("/")[0].upper()
+        return base in ex or sym.upper() in ex
 
     def _candles_for_24h(self) -> int:
         """

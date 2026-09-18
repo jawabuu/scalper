@@ -208,6 +208,8 @@ if __name__ == "__main__":
         scan_cfg = ScanConfig(
             min_24h_vol_usdt=cfg.scan_min_vol_usdt,
             min_abs_change_pct=cfg.scan_min_change_pct,
+            exclude_symbols=tuple(cfg.scan_exclude_symbols),
+            allowed_underlying=tuple(cfg.scan_allowed_underlying),
             short_rsi_min=cfg.scan_short_rsi_min,
             long_rsi_min=cfg.scan_long_rsi_min,
             long_rsi_max=cfg.scan_long_rsi_max,

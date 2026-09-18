@@ -508,6 +508,33 @@ class BotConfig:
     # arming). Those assertions are coupling, not regressions, but the change
     # is real and belongs behind a switch for one run.
     # Set GUARD_ARM_AT_ENTRY=true in compose to enable it.
+    # Symbols the futures scan must never surface, comma-separated. Matched on
+    # the BASE (SNXX matches SNXX/USDT:USDT), so no need to write the suffix.
+    #
+    # Binance's TradFi perps (tokenised equities) sit in the same ticker feed
+    # and pass the volume and RSI filters like any mover, but need a separate
+    # signed agreement: entries come back -4411 "Please sign TradFi-Perps
+    # agreement contract fapi". Without this they are re-attempted every scan
+    # forever, because a rejection never opens a position and so never
+    # triggers a cooldown.
+    #
+    # NOTE the existing BLACKLIST is consulted only by the SPOT engine
+    # (engine.py:334) and has never applied to futures.
+    # Instrument classes the futures scan will trade, by Binance's
+    # exchangeInfo `underlyingType`. Crypto perps are "COIN"; TradFi perps
+    # (tokenised equities) are a different class needing their own signed
+    # agreement, and entries return -4411.
+    #
+    # FAILS OPEN on purpose: a symbol whose market carries no underlyingType
+    # is allowed through, so a ccxt change or an unloaded market can never
+    # silently empty the universe. The scanner logs the class inventory once
+    # per process — read that line before changing this.
+    scan_allowed_underlying: list = field(default_factory=lambda: [
+        x.strip() for x in
+        (_env("SCAN_ALLOWED_UNDERLYING", "COIN") or "").split(",") if x.strip()])
+    scan_exclude_symbols: list = field(default_factory=lambda: [
+        x.strip().upper() for x in
+        (_env("SCAN_EXCLUDE_SYMBOLS", "") or "").split(",") if x.strip()])
     guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(
         "GUARD_ARM_AT_ENTRY", False))
     guard_trail_activate_now: bool = field(default_factory=lambda: _env_bool(

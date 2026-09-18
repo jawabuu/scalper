@@ -5716,3 +5716,240 @@ def test_the_switch_follows_the_env_convention():
     assert GuardConfig().arm_at_entry is False
     assert '"GUARD_ARM_AT_ENTRY"' in inspect.getsource(botcfg)
     assert "arm_at_entry=cfg.guard_arm_at_entry" in inspect.getsource(main)
+
+
+# ── Symbols the scan must never surface ──────────────────────────────────────
+# SNXX 2026-09-18 14:14:56 and again 14:15:36: -4411 "Please sign TradFi-Perps
+# agreement contract fapi". An account permission, not a transient error. A
+# rejection opens no position, so no cooldown, so it retries every scan.
+
+def _runner(exclude=()):
+    from bot.scanner import ScanConfig
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner.__new__(ScanRunner)
+    r.cfg = ScanConfig(exclude_symbols=tuple(exclude))
+    return r
+
+
+def test_a_base_excludes_every_suffix():
+    r = _runner(("SNXX",))
+    assert r._excluded("SNXX/USDT:USDT")
+    assert r._excluded("SNXX/USDT")
+
+
+def test_it_does_not_catch_a_symbol_that_merely_starts_the_same():
+    r = _runner(("SNX",))
+    assert not r._excluded("SNXX/USDT:USDT")
+    assert r._excluded("SNX/USDT:USDT")
+
+
+def test_nothing_is_excluded_by_default():
+    r = _runner()
+    assert not r._excluded("SNXX/USDT:USDT")
+
+
+def test_the_exclusion_applies_to_the_percentile_sample_too():
+    """Otherwise an untradeable symbol still moves the volume floor."""
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner._prefilter)
+    assert src.count("self._excluded(sym)") == 2
+
+
+def test_the_exclusion_is_wired_from_the_env():
+    import inspect
+    import bot.config as botcfg
+    import main
+    assert '"SCAN_EXCLUDE_SYMBOLS"' in inspect.getsource(botcfg)
+    assert "exclude_symbols=tuple(cfg.scan_exclude_symbols)" in \
+        inspect.getsource(main)
+
+
+def test_a_permanent_rejection_is_recognised():
+    from bot.auto_trader import AutoTrader
+    assert AutoTrader._is_permanent_rejection(
+        "-4411: Please sign TradFi-Perps agreement contract fapi.")
+    assert AutoTrader._is_permanent_rejection("Please sign the AGREEMENT")
+
+
+def test_a_transient_rejection_is_not():
+    """-2021 and margin errors must stay retryable."""
+    from bot.auto_trader import AutoTrader
+    assert not AutoTrader._is_permanent_rejection(
+        "-2021: Order would immediately trigger.")
+    assert not AutoTrader._is_permanent_rejection("insufficient margin")
+    assert not AutoTrader._is_permanent_rejection("")
+
+
+def test_a_blocked_symbol_is_skipped_before_it_is_evaluated():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    assert "if symbol in self._blocked or self._class_is_blocked(symbol):" in src
+    # and the block is set from a permanent rejection, not from any failure
+    assert "if self._is_permanent_rejection(detail):" in src
+
+
+# ── One rejection blocks the whole instrument class ──────────────────────────
+# A per-symbol list needs maintaining and a new listing defeats it. Binance
+# groups TradFi perps apart from crypto perps in exchangeInfo, so the class
+# fields on the refused symbol identify every sibling.
+
+class _FakeEx:
+    def __init__(self, markets):
+        self._m = markets
+
+    def market(self, sym):
+        return self._m.get(sym)
+
+
+def _blocker(markets):
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+    a.exchange = _FakeEx(markets)
+    a._blocked = set()
+    a._blocked_classes = set()
+    return a
+
+
+_TRADFI = {"info": {"underlyingType": "INDEX", "contractType": "PERPETUAL",
+                    "marginAsset": "USDT", "quoteAsset": "USDT"}}
+_CRYPTO = {"info": {"underlyingType": "COIN", "contractType": "PERPETUAL",
+                    "marginAsset": "USDT", "quoteAsset": "USDT"}}
+
+
+def test_blocking_one_symbol_blocks_its_siblings():
+    a = _blocker({"SNXX/USDT:USDT": _TRADFI, "AAPLX/USDT:USDT": _TRADFI,
+                  "INJ/USDT:USDT": _CRYPTO})
+    a._blocked_classes.add(a._market_class("SNXX/USDT:USDT"))
+    assert a._class_is_blocked("AAPLX/USDT:USDT")   # never attempted
+    assert not a._class_is_blocked("INJ/USDT:USDT")  # crypto untouched
+
+
+def test_an_unknown_market_never_matches():
+    """None must not match, or one rejection would block everything."""
+    a = _blocker({"SNXX/USDT:USDT": _TRADFI})
+    a._blocked_classes.add(a._market_class("SNXX/USDT:USDT"))
+    assert a._market_class("MISSING/USDT:USDT") is None
+    assert not a._class_is_blocked("MISSING/USDT:USDT")
+
+
+def test_a_market_with_no_class_fields_yields_no_fingerprint():
+    a = _blocker({"X/USDT:USDT": {"info": {}}})
+    assert a._market_class("X/USDT:USDT") is None
+
+
+def test_an_exchange_that_raises_does_not_break_the_scan():
+    from bot.auto_trader import AutoTrader
+    a = AutoTrader.__new__(AutoTrader)
+
+    class _Boom:
+        def market(self, sym):
+            raise Exception("markets not loaded")
+    a.exchange = _Boom(); a._blocked = set(); a._blocked_classes = set()
+    assert a._market_class("SNXX/USDT:USDT") is None
+    assert not a._class_is_blocked("SNXX/USDT:USDT")
+
+
+def test_nothing_is_blocked_before_a_rejection():
+    a = _blocker({"SNXX/USDT:USDT": _TRADFI})
+    assert not a._class_is_blocked("SNXX/USDT:USDT")
+
+
+def test_permission_wording_counts_as_permanent_too():
+    from bot.auto_trader import AutoTrader
+    for msg in ("-4411: Please sign TradFi-Perps agreement contract fapi.",
+                "account not authorized for this symbol",
+                "operation not permitted"):
+        assert AutoTrader._is_permanent_rejection(msg), msg
+    for msg in ("-2021: Order would immediately trigger.",
+                "insufficient margin", ""):
+        assert not AutoTrader._is_permanent_rejection(msg), msg
+
+
+# ── Reject TradFi perps by CLASS, before they are ever attempted ─────────────
+# Binance's exchangeInfo carries `underlyingType`: crypto perps are COIN,
+# TradFi perps (tokenised equities) are not. Filtering on it keeps them out of
+# the scan entirely, instead of learning from a -4411 the first time.
+
+class _MktEx:
+    def __init__(self, m): self._m = m
+    def market(self, sym): return self._m.get(sym)
+
+
+def _classy(allowed=("COIN",), markets=None):
+    from bot.scanner import ScanConfig
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner.__new__(ScanRunner)
+    r.cfg = ScanConfig(allowed_underlying=tuple(allowed))
+    r.exchange = _MktEx(markets or {
+        "INJ/USDT:USDT":  {"info": {"underlyingType": "COIN"}},
+        "SNXX/USDT:USDT": {"info": {"underlyingType": "INDEX"}},
+        "ODD/USDT:USDT":  {"info": {}},
+    })
+    return r
+
+
+def test_a_crypto_perp_passes_and_a_tradfi_perp_does_not():
+    r = _classy()
+    assert not r._wrong_class("INJ/USDT:USDT")
+    assert r._wrong_class("SNXX/USDT:USDT")
+
+
+def test_a_symbol_with_no_underlying_type_is_allowed_through():
+    """FAIL OPEN. A missing field must never silently empty the universe."""
+    r = _classy()
+    assert not r._wrong_class("ODD/USDT:USDT")
+    assert not r._wrong_class("NOT-A-MARKET/USDT:USDT")
+
+
+def test_an_empty_allow_list_filters_nothing():
+    r = _classy(allowed=())
+    assert not r._wrong_class("SNXX/USDT:USDT")
+
+
+def test_the_match_is_case_insensitive():
+    r = _classy(allowed=("coin",))
+    assert not r._wrong_class("INJ/USDT:USDT")
+
+
+def test_an_exchange_that_raises_fails_open():
+    from bot.scanner import ScanConfig
+    from bot.scan_runner import ScanRunner
+    r = ScanRunner.__new__(ScanRunner)
+    r.cfg = ScanConfig(allowed_underlying=("COIN",))
+
+    class _Boom:
+        def market(self, sym): raise Exception("markets not loaded")
+    r.exchange = _Boom()
+    assert r._underlying_type("SNXX/USDT:USDT") is None
+    assert not r._wrong_class("SNXX/USDT:USDT")
+
+
+def test_the_class_filter_runs_in_both_prefilter_loops():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner._prefilter)
+    assert src.count("self._wrong_class(sym)") == 2
+
+
+def test_the_inventory_is_logged_once_per_process(caplog):
+    r = _classy()
+    with caplog.at_level("INFO"):
+        r._log_instrument_classes(["INJ/USDT:USDT", "SNXX/USDT:USDT"])
+        first = caplog.text
+        r._log_instrument_classes(["INJ/USDT:USDT"])
+    assert "underlyingType=COIN" in first
+    assert "underlyingType=INDEX" in first
+    assert caplog.text.count("instrument classes in the scan universe") == 1
+
+
+def test_the_allow_list_follows_the_env_convention():
+    import inspect
+    import bot.config as botcfg
+    import main
+    from bot.config import BotConfig
+    assert BotConfig().scan_allowed_underlying == ["COIN"]
+    assert '"SCAN_ALLOWED_UNDERLYING"' in inspect.getsource(botcfg)
+    assert "allowed_underlying=tuple(cfg.scan_allowed_underlying)" in \
+        inspect.getsource(main)

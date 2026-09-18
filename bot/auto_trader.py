@@ -875,6 +875,56 @@ class AutoTrader:
         self.peer_eval = None
 
     # -- reporting -------------------------------------------------------
+    # Rejections that will NEVER succeed on a retry. Narrow on purpose:
+    # -2021 (would immediately trigger) and margin errors are transient and
+    # must stay retryable.
+    PERMANENT_REJECTIONS = ("-4411", "agreement", "not authorized",
+                            "not permitted", "permission")
+
+    # The market fields that identify an INSTRUMENT CLASS rather than a
+    # symbol. Binance groups TradFi perps (tokenised equities) apart from
+    # crypto perps here, so one rejection can teach the whole class instead of
+    # the operator maintaining a list that a new listing defeats.
+    CLASS_FIELDS = ("underlyingType", "underlyingSubType", "contractType",
+                    "marginAsset", "quoteAsset")
+
+    @classmethod
+    def _is_permanent_rejection(cls, detail: str) -> bool:
+        d = (detail or "").lower()
+        return any(k.lower() in d for k in cls.PERMANENT_REJECTIONS)
+
+    def _market_class(self, symbol: str):
+        """
+        A hashable fingerprint of the symbol's instrument class.
+
+        Read from ccxt's market info, which carries Binance's own exchangeInfo
+        fields. Returns None when nothing distinguishing is available — and
+        None must never match, or one rejection would block everything.
+        """
+        ex = getattr(self, "exchange", None) or getattr(
+            getattr(self, "entry", None), "exchange", None)
+        if ex is None:
+            ex = getattr(getattr(getattr(self, "entry", None), "guardian",
+                                 None), "exchange", None)
+        if ex is None:
+            return None
+        try:
+            info = (ex.market(symbol) or {}).get("info") or {}
+        except Exception:
+            return None
+        key = tuple(
+            (f, str(info.get(f)))
+            for f in self.CLASS_FIELDS
+            if info.get(f) not in (None, "", [])
+        )
+        return key or None
+
+    def _class_is_blocked(self, symbol: str) -> bool:
+        if not self._blocked_classes:
+            return False
+        k = self._market_class(symbol)
+        return bool(k) and k in self._blocked_classes
+
     def _record(self, action: str, detail: str, symbol: str = ""):
         self._log.append({"ts": _time.time(), "action": action,
                           "symbol": symbol, "detail": detail})
@@ -1231,6 +1281,16 @@ class AutoTrader:
         # Reasons are rebuilt each pass so they always describe the CURRENT
         # candidate list rather than accumulating stale entries.
         self._skip_reasons = {}
+        # Symbols the exchange has permanently refused this session. Process
+        # scoped on purpose: a restart clears it, so signing the agreement
+        # takes effect without a config change.
+        if not hasattr(self, "_blocked"):
+            self._blocked: set[str] = set()
+        if not hasattr(self, "_blocked_classes"):
+            # Instrument classes, not symbols. One -4411 teaches the whole
+            # class, so a newly listed TradFi perp is skipped without ever
+            # being attempted.
+            self._blocked_classes: set = set()
         if not hasattr(self, "_rejections"):
             self._rejections = 0
         open_syms = {p.symbol for p in positions}
@@ -1251,6 +1311,15 @@ class AutoTrader:
             side = row.get("direction", "")
             if symbol in open_syms:
                 self._skip_reasons[symbol] = "position or order already open"
+                continue
+            if symbol in self._blocked or self._class_is_blocked(symbol):
+                # Permanently refused earlier this session, or of the same
+                # instrument class as something that was. Not a strategy
+                # decision, so it stays out of the refusal counter.
+                self._blocked.add(symbol)      # cache, so the lookup is once
+                self._skip_reasons[symbol] = (
+                    "blocked: the exchange refused this instrument class for "
+                    "a reason retrying cannot fix")
                 continue
 
             streak = self.tracker.streak(symbol, side)
@@ -1414,6 +1483,30 @@ class AutoTrader:
                 self._skip_reasons[symbol] = f"exchange rejected: {detail}"
                 self._rejections += 1
                 _log.warning(f"auto-trade: {symbol} entry rejected — {detail}")
+                # A PERMANENT rejection must not be retried. -4411 is an
+                # account permission (TradFi perps need their own signed
+                # agreement), and a rejection opens no position, so it
+                # triggers no cooldown — SNXX was re-attempted every scan.
+                # Blocked for this process only: restart clears it, so a
+                # signed agreement takes effect without touching config.
+                if self._is_permanent_rejection(detail):
+                    self._blocked.add(symbol)
+                    klass = self._market_class(symbol)
+                    if klass:
+                        self._blocked_classes.add(klass)
+                        _log.error(
+                            f"auto-trade: {symbol} BLOCKED, and so is every "
+                            f"symbol of the same instrument class — the "
+                            f"exchange refused it for a reason retrying "
+                            f"cannot fix ({detail}). class="
+                            + ", ".join(f"{k}={v}" for k, v in klass))
+                    else:
+                        _log.error(
+                            f"auto-trade: {symbol} BLOCKED for this session "
+                            f"({detail}). No instrument-class fields were "
+                            f"available, so only this symbol is blocked — "
+                            f"others of the same kind will each be refused "
+                            f"once before they are caught.")
 
         if refusals:
             top = ", ".join(f"{k}={v}" for k, v in

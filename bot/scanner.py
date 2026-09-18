@@ -46,6 +46,15 @@ class ScanConfig:
     # "Movers only": ignore coins whose 24h change is smaller than this in
     # absolute terms. Top gainers AND top losers both qualify.
     min_abs_change_pct: float = 5.0
+    # Bases the scan must never surface (SNXX, not SNXX/USDT:USDT).
+    exclude_symbols: tuple = ()
+    # Instrument classes the scan will TRADE, by Binance's exchangeInfo
+    # `underlyingType`. Crypto perps are "COIN"; TradFi perps (tokenised
+    # equities) are a different class and need a separate signed agreement.
+    # Empty tuple = no filtering. A symbol whose market carries no
+    # underlyingType at all is ALWAYS allowed — fail open, because a missing
+    # field must never silently empty the universe.
+    allowed_underlying: tuple = ()
     short_rsi_min: float = 70.0
     long_rsi_min: float = 50.0
     # Upper bound for LONG candidates. Without it the long screen admits the
