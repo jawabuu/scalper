@@ -536,7 +536,7 @@ class BotConfig:
         x.strip().upper() for x in
         (_env("SCAN_EXCLUDE_SYMBOLS", "") or "").split(",") if x.strip()])
     guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(
-        "GUARD_ARM_AT_ENTRY", False))
+        "GUARD_ARM_AT_ENTRY", True))
     # Start with SPOT trading halted. Useful when a container is redeployed
     # mid-session and you want to inspect before it can act.
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(

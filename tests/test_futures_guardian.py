@@ -82,7 +82,8 @@ class FakeExchange:
                 "info": {"totalWalletBalance": "100.0"}}
 
 
-def _guardian(fake, dry_run=False, cfg=None, adaptive=False):
+def _guardian(fake, dry_run=False, cfg=None, adaptive=False,
+              arm_at_entry=False):
     """
     These tests exercise the FIXED-STOP mechanics: placement, ratcheting,
     replacement, arming, the refusal fallback. The adaptive trail (v3.15.0,
@@ -91,11 +92,22 @@ def _guardian(fake, dry_run=False, cfg=None, adaptive=False):
     it. Adaptive-trail behaviour has its own tests in test_breakout_veto.py —
     placement, supersession by arming, the skipped rescue, sweep exemption and
     the failure path.
+
+    Arm-at-entry (v3.47.0, default ON in production) is disabled for the same
+    reason and by the same rule: it places the armed trail at ADOPTION, before
+    the fixed stop, so `created[0]` is a TRAILING_STOP_MARKET and the poll-arm
+    block downstream becomes a no-op. Turning it on here would not test more,
+    it would test something else — these are the poll-arm path's tests, and
+    that path still runs whenever GUARD_ARM_AT_ENTRY is false or the arm level
+    cannot be derived. Arm-at-entry has its own coverage below and in
+    test_breakout_veto.py.
     """
     g = FuturesGuardian.__new__(FuturesGuardian)     # bypass ccxt construction
     cfg = cfg or GuardConfig()
     if not adaptive:
         cfg = replace(cfg, adaptive_trail_enabled=False)
+    if not arm_at_entry:
+        cfg = replace(cfg, arm_at_entry=False)
     g.cfg = cfg.validate()
     g.demo = True
     g.dry_run = dry_run
@@ -2866,3 +2878,127 @@ def test_fail_fast_leaves_a_trade_that_went_green():
 def test_fail_fast_off_by_default():
     from bot.futures_guard import GuardConfig
     assert GuardConfig().fail_fast_s == 0
+
+
+# ── Arm-at-entry, through a full cycle ───────────────────────────────────────
+# The fixture disables it so the poll-arm tests above keep testing the
+# poll-arm path. These turn it on and check the WHOLE sequence, which is what
+# was missing when GUARD_ARM_AT_ENTRY was first shipped: 15 tests failed on
+# order sequence and were reasoned about rather than run.
+
+def _armed_guardian(fake, **kw):
+    return _guardian(fake, arm_at_entry=True, **kw)
+
+
+def test_arm_at_entry_places_the_trail_before_the_fixed_stop():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    types = [o["type"] for o in fake.created]
+    assert types, "nothing was placed"
+    assert types[0] == "TRAILING_STOP_MARKET"
+    assert "STOP_MARKET" in types, "the fixed stop must still be placed"
+
+
+def test_the_armed_trail_carries_an_activate_price_at_the_arm_level():
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0, lev=10)],
+                        price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    trails = [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
+    armed = [o for o in trails if "activatePrice" in (o["params"] or {})]
+    assert armed, "the armed trail must send an activatePrice"
+    act = float(armed[0]["params"]["activatePrice"])
+    # short, +arm_roi ROI sits BELOW entry
+    assert act < 100.0
+    expected = 100.0 * (1 - g.cfg.arm_roi / 10 / 100)
+    assert abs(act - expected) / expected < 0.001
+
+
+def test_a_long_arms_above_entry_through_the_cycle():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=100.0, lev=10)],
+                        price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    armed = [o for o in fake.created
+             if o["type"] == "TRAILING_STOP_MARKET"
+             and "activatePrice" in (o["params"] or {})]
+    assert armed
+    assert float(armed[0]["params"]["activatePrice"]) > 100.0
+
+
+def test_every_order_it_places_is_reduce_only():
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    assert fake.created
+    for o in fake.created:
+        assert o["params"].get("reduceOnly") is True, o["type"]
+
+
+def test_the_trail_is_not_placed_twice_across_cycles():
+    """One trail per role. The poll-arm block must see it and stand down."""
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    first = len([o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"])
+    g.run_cycle()
+    g.run_cycle()
+    after = len([o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"])
+    assert after == first, f"placed {after - first} extra trail(s)"
+
+
+def test_turning_it_off_restores_the_poll_arm_sequence():
+    """The old path has to stay reachable, or the switch is a lie."""
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _guardian(fake, arm_at_entry=False)
+    g.run_cycle()
+    assert fake.created
+    assert fake.created[0]["type"] == "STOP_MARKET"
+
+
+def test_a_trail_that_cannot_be_placed_does_not_stop_the_fixed_stop():
+    """Arm-at-entry is never fatal — the position still gets its stop."""
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _armed_guardian(fake)
+    real = g._place_native_trail
+
+    def _boom(pos, **kw):
+        raise Exception("binance -2021")
+    g._place_native_trail = _boom
+    g.run_cycle()
+    assert any(o["type"] == "STOP_MARKET" for o in fake.created)
+
+
+def test_arm_at_entry_still_places_the_initial_fixed_stop():
+    """
+    REGRESSION. The early return in manage_position was written for stop ->
+    trail -> supersede. Arm-at-entry inverts that order, so taking it on the
+    first cycle skipped the stop placement entirely and left the position with
+    two trails and no fixed stop. 龙虾 2026-09-19 03:25:08 shows the SIZED
+    handoff line, both trails, and no "initial protective stop" line.
+    """
+    fake = FakeExchange(positions=[_raw_pos("short")], price=100.0)
+    g = _armed_guardian(fake)
+    g.run_cycle()
+    types = [o["type"] for o in fake.created]
+    assert "STOP_MARKET" in types, f"no fixed stop placed; got {types}"
+    assert types[0] == "TRAILING_STOP_MARKET", "the trail still goes on first"
+
+
+def test_the_handover_only_happens_once_the_trail_replaces_the_stop():
+    """
+    The flag, not the trail id, is what hands protection over — otherwise any
+    resting trail suppresses the stop.
+    """
+    from bot.futures_guard import GuardState
+    st = GuardState(native_trail_id="t1")
+    assert st.armed_replaced_stop is False
+
+
+def test_the_replacement_flag_survives_a_restart():
+    import inspect
+    import bot.futures_state as fs
+    src = inspect.getsource(fs)
+    assert '"armed_replaced_stop": s.armed_replaced_stop' in src
+    assert 'st.armed_replaced_stop = bool(raw.get("armed_replaced_stop"))' in src

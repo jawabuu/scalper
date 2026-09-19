@@ -2246,7 +2246,21 @@ class FuturesGuardian:
         self._ensure_profit_floor(pos, state, price)
         self._audit_protection(pos, state)
 
-        if state.native_trail_id:
+        # A trail armed AT ENTRY has not replaced anything yet, so the initial
+        # fixed stop still has to be placed. This early return was written for
+        # the other order of events — stop first, trail later, trail supersedes
+        # stop — and arm-at-entry inverts it. Taken on the first cycle it skips
+        # the stop placement below entirely, leaving the position with two
+        # trails and no fixed stop.
+        #
+        # Observed on 龙虾 2026-09-19 03:25:08: the SIZED handoff line appears,
+        # both trails are placed, and the "initial protective stop at -10.3%
+        # ROI" line never does.
+        #
+        # `armed_replaced_stop` is set only where the trail genuinely takes a
+        # fixed stop's place, so the guard now means what it always intended:
+        # the trail owns protection BECAUSE it replaced the stop.
+        if state.native_trail_id and getattr(state, "armed_replaced_stop", False):
             # Binance owns the trail, so no repositioning — but a fixed stop
             # whose cancel FAILED at arming would otherwise sit untouched until
             # the position closed, still able to fire at a level the trade has
@@ -2315,6 +2329,9 @@ class FuturesGuardian:
                         f"Any existing stop is untracked.")
                 state.native_trail_id = trail_id
                 state.stop_order_id = None
+                # The trail has now REPLACED a fixed stop, which is what lets
+                # manage_position hand protection over to it.
+                state.armed_replaced_stop = True
                 # Track the trail too, so close-time cleanup cancels it.
                 self._all_stop_ids.setdefault(pos.symbol, [])
                 if trail_id not in self._all_stop_ids[pos.symbol]:

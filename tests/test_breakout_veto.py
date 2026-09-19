@@ -2000,6 +2000,12 @@ def test_audit_flags_two_trailing_stops(caplog):
     g, st = _audit_guardian(
         [_po("t1", "TRAILING_STOP_MARKET"), _po("t2", "TRAILING_STOP_MARKET")],
         adaptive_trail_id="t1", native_trail_id="t2")
+    # OVERLAP only means something when arming is supposed to SUPERSEDE the
+    # adaptive trail. Under arm-at-entry BOTH rest by design, so the warning
+    # would fire on every position — that case is covered by
+    # test_two_resting_trails_are_expected_under_arm_at_entry.
+    from dataclasses import replace as _replace
+    g.cfg = _replace(g.cfg, arm_at_entry=False)
     with caplog.at_level("WARNING"):
         g._audit_protection(_TrailPos(), st)
     msgs = " ".join(r.message for r in caplog.records)
@@ -5680,7 +5686,10 @@ def test_the_switch_follows_the_env_convention():
     from bot.futures_guard import GuardConfig
     import bot.config as botcfg
     import main
-    assert GuardConfig().arm_at_entry is False
+    # Default ON: the operator runs GUARD_ARM_AT_ENTRY=true, and a default
+    # that disagrees with the deployment is a second configuration to reason
+    # about. The poll-arm path stays reachable by setting it false.
+    assert GuardConfig().arm_at_entry is True
     assert '"GUARD_ARM_AT_ENTRY"' in inspect.getsource(botcfg)
     assert "arm_at_entry=cfg.guard_arm_at_entry" in inspect.getsource(main)
 

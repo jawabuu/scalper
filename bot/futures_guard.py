@@ -91,6 +91,10 @@ class GuardState:
     # set the exchange manages the trail tick-by-tick and the guardian stops
     # repositioning anything.
     native_trail_id: str | None = None
+    # True once the armed trail has REPLACED a fixed stop. Distinct from
+    # native_trail_id, because a trail armed at ENTRY replaces nothing — the
+    # initial fixed stop still has to be placed.
+    armed_replaced_stop: bool = False
     # Order id of the PROFIT FLOOR: a plain STOP_MARKET at breakeven_stop_roi,
     # placed once peak_roi clears breakeven_at_roi and never cancelled while
     # the position lives. It exists because arming the native trail used to
@@ -216,7 +220,7 @@ class GuardConfig:
     #   ILV  armed +4.0% -> would exit ~+2.0% instead of  +5.06%   (-3 pts)
     # One winner is clipped; the one disaster is cut short.
     rescue_trail_callback_pct: float = 0.1
-    arm_at_entry: bool = False
+    arm_at_entry: bool = True
     # Which price triggers a stop. Binance defaults to CONTRACT_PRICE — the
     # LAST TRADED price on this book, wick included. MARK_PRICE is an index
     # across venues with smoothing, and exists precisely so a single-venue
