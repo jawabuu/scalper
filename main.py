@@ -363,10 +363,13 @@ if __name__ == "__main__":
                         from bot.shadow_decision import ShadowDecisionLogger
                         auto.shadow = ShadowDecisionLogger(
                             path=cfg.shadow_path, model=cfg.shadow_model,
-                            max_per_minute=cfg.shadow_max_per_minute)
+                            max_per_minute=cfg.shadow_max_per_minute,
+                            dedup_window=cfg.shadow_dedup_window_sec)
                         log.warning(
                             f"Shadow decision log ON (model={cfg.shadow_model}, "
-                            f"path={cfg.shadow_path}) — advisory only, "
+                            f"path={cfg.shadow_path}, "
+                            f"dedup={cfg.shadow_dedup_window_sec:.0f}s) "
+                            f"— advisory only, "
                             f"per JEV-BRIEF.md. Read via GET /api/shadow.")
                     except Exception as e:
                         log.error(f"Shadow decision log failed to start: {e} "

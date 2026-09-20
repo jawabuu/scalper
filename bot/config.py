@@ -542,6 +542,16 @@ class BotConfig:
     # never blocks the loop.
     shadow_max_per_minute: int = field(default_factory=lambda: _env_int(
         "SHADOW_MAX_PER_MINUTE", 30))
+    # Seconds a candidate's STATE counts as already judged. The scanner
+    # re-offers the same symbols every cycle: the first real sample was 1021
+    # rows over 24 distinct symbols in minutes, one of them 106 times. The
+    # rate cap never fired, so nothing flagged it — and those rows are not
+    # independent, which poisons any statistic or outcome-join over them.
+    # Keyed on BUCKETED state, so a real move is re-asked at once while a
+    # re-offer of the same setup is not. 0 disables it (pre-v3.71.0
+    # behaviour); it changes WHICH candidates are judged, not just how many.
+    shadow_dedup_window_sec: float = field(default_factory=lambda: _env_float(
+        "SHADOW_DEDUP_WINDOW_SEC", 900.0))
     # Symbols the futures scan must never surface, comma-separated. Matched on
     # the BASE (SNXX matches SNXX/USDT:USDT), so no need to write the suffix.
     #

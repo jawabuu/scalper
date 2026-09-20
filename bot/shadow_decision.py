@@ -86,6 +86,27 @@ DEFAULT_PATH = "logs/shadow_decisions.jsonl"
 # rather than let one noisy scan set the request budget.
 MAX_PER_MINUTE = 30
 
+# How long a candidate stays "already judged" — see _materially_changed.
+#
+# The cap above bounds volume but not REDUNDANCY: the first real sample was
+# 1021 rows over 24 distinct symbols in minutes, CHILLGUY alone 106 times.
+# The cap never fired, so nothing flagged it. Those rows are also not
+# independent, which matters more than their cost: any statistic over them —
+# and any later join to outcomes — would weight a handful of coins by how
+# often the scanner happened to loop.
+#
+# 900s is a judgement call: long enough to collapse a scan loop, short enough
+# that a genuinely evolving setup is re-asked within a candle or two. A real
+# move re-keys immediately regardless of the window, since the key is state,
+# not time.
+DEDUP_WINDOW_SEC = 900.0
+
+# Bounds on the dedup map. Age pruning fires at the soft limit; the hard
+# ceiling evicts oldest-first when a single window holds more distinct states
+# than pruning can clear, which age alone cannot bound.
+_SEEN_SOFT_LIMIT = 512
+_SEEN_HARD_LIMIT = 4096
+
 # ── The questions ────────────────────────────────────────────────────────────
 #
 # One request, four atomic judgements, asked whether the bot enters or
@@ -246,6 +267,77 @@ def _component_confidence(answer) -> float:
     return float(conf)
 
 
+# How far each field must move from the LAST ASKED value to count as a new
+# question. Absolute buckets were tried first and flap: a value drifting
+# around a bucket edge re-keys on every crossing while nothing has changed.
+# Measuring from the last asked value instead means drift must actually
+# accumulate, so a candidate cannot re-ask itself by wobbling.
+_MATERIAL_DELTA = {
+    "rsi": 3.0,
+    "atr_pct": 0.3,
+    "ema_gap_pct": 0.3,
+    "change_24h_pct": 2.0,
+    "range_pos_24h": 0.08,
+    "efficiency": 0.15,
+    "taper_ratio": 0.15,
+    "adv_price_pct": 0.8,
+    "breadth_pct": 10.0,
+    "btc_change_pct": 1.0,
+    "htf_trend_pct": 1.0,
+}
+
+# Categoricals and bools: no noise floor, so any change is a new question.
+_MATERIAL_FLAGS = (
+    "gap_narrowing", "gap_rising", "er_direction", "adv_vol_trend",
+    "adv_bars", "peak_vol_early", "turned_up", "bars_since_low",
+    "tapering", "breakout", "brk_at_extreme", "brk_gap_widening",
+)
+
+
+def _state_signature(state: dict) -> tuple:
+    """
+    (flags, numerics) for one candidate — the two halves compared differently.
+
+    Flags are exact-match; numerics are compared against the last ASKED value
+    using _MATERIAL_DELTA. Returned rather than hashed because hysteresis
+    needs the values themselves, not a digest.
+    """
+    c = state.get("candidate") or {}
+    r = state.get("regime") or {}
+    flags = tuple(c.get(k) for k in _MATERIAL_FLAGS)
+    nums = {}
+    for k in _MATERIAL_DELTA:
+        v = c.get(k, r.get(k))
+        if v is None:
+            continue
+        try:
+            nums[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+    return flags, nums
+
+
+def _materially_changed(prev: tuple, cur: tuple) -> bool:
+    """
+    True if this candidate is a genuinely different question from the last one
+    asked about it.
+
+    A field present now but absent when last asked (or vice versa) counts as
+    changed: the scanner has started or stopped computing it, which is a real
+    difference in what jev is being shown.
+    """
+    prev_flags, prev_nums = prev
+    cur_flags, cur_nums = cur
+    if prev_flags != cur_flags:
+        return True
+    if set(prev_nums) != set(cur_nums):
+        return True
+    for k, v in cur_nums.items():
+        if abs(v - prev_nums[k]) >= _MATERIAL_DELTA[k]:
+            return True
+    return False
+
+
 @dataclass
 class ShadowDecision:
     """One row of logs/shadow_decisions.jsonl. Field names match JEV-BRIEF.md
@@ -367,15 +459,55 @@ class ShadowDecisionLogger:
     """
 
     def __init__(self, path: str = DEFAULT_PATH, model: str = "jev-latest",
-                 max_per_minute: int = MAX_PER_MINUTE, client=None):
+                 max_per_minute: int = MAX_PER_MINUTE, client=None,
+                 dedup_window: float = DEDUP_WINDOW_SEC):
         self.path = Path(path)
         self.model = model
         self.max_per_minute = max_per_minute
         self._client = client              # injected in tests
         self._client_broken = False
+        # 0 disables dedup entirely — the pre-v3.71.0 behaviour, kept because
+        # it changes WHICH candidates get judged, not just how many.
+        self.dedup_window = float(dedup_window)
+        self._seen: dict = {}              # dedup key -> last-asked ts
+        self.skipped_as_unchanged = 0
         self._lock = threading.Lock()
         self._recent: list[float] = []
         self.dropped_for_rate = 0
+
+    def _state_is_new(self, symbol: str, side: str, state: dict) -> bool:
+        """
+        True if this candidate is a genuinely different question from the last
+        one asked about it — see _materially_changed.
+
+        Keyed on (symbol, side) rather than on a state hash, because
+        hysteresis compares against what was last ASKED. That is what stops a
+        drifting indicator re-asking itself every time it crosses a boundary.
+
+        Bounded two ways. Age pruning alone is NOT enough: a wide scan can
+        hold more symbols than the window ever expires, so the hard ceiling
+        evicts oldest-first when pruning cannot help.
+        """
+        if self.dedup_window <= 0:
+            return True
+        sig = _state_signature(state)
+        now = time.time()
+        with self._lock:
+            cutoff = now - self.dedup_window
+            if len(self._seen) > _SEEN_SOFT_LIMIT:
+                self._seen = {k: v for k, v in self._seen.items()
+                              if v[0] > cutoff}
+            if len(self._seen) > _SEEN_HARD_LIMIT:
+                keep = sorted(self._seen.items(), key=lambda kv: kv[1][0],
+                              reverse=True)[:_SEEN_HARD_LIMIT]
+                self._seen = dict(keep)
+            prev = self._seen.get((symbol, side))
+            if prev is not None and prev[0] > cutoff and \
+                    not _materially_changed(prev[1], sig):
+                self.skipped_as_unchanged += 1
+                return False
+            self._seen[(symbol, side)] = (now, sig)
+            return True
 
     def _rate_ok(self) -> bool:
         now = time.time()
@@ -436,6 +568,19 @@ class ShadowDecisionLogger:
         client = self._get_client()
         if client is None:
             return
+        # State is built BEFORE the rate check so an unchanged candidate does
+        # not consume rate budget that a genuinely new one could have used.
+        # Building it is pure dict work on data the scanner already computed —
+        # no fetch, no look-ahead (JEV-BRIEF.md §5 constraint 2).
+        state = _candidate_state(symbol, side, row, snap or {})
+        if not self._state_is_new(symbol, side, state):
+            if self.skipped_as_unchanged in (1, 100) or \
+                    self.skipped_as_unchanged % 1000 == 0:
+                log.info(f"shadow decision: {self.skipped_as_unchanged} "
+                         f"candidate(s) skipped as materially unchanged "
+                         f"within {self.dedup_window:.0f}s. Never affects the "
+                         f"real decision.")
+            return
         if not self._rate_ok():
             if self.dropped_for_rate in (1, 10) or self.dropped_for_rate % 100 == 0:
                 log.warning(f"shadow decision: rate cap "
@@ -443,7 +588,6 @@ class ShadowDecisionLogger:
                             f"{self.dropped_for_rate} candidate(s) skipped "
                             f"so far. Never affects the real decision.")
             return
-        state = _candidate_state(symbol, side, row, snap or {})
         t = threading.Thread(
             target=self._run, name="shadow-decision",
             args=(symbol, side, bot_decision, state, entry_order_id),

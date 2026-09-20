@@ -18,6 +18,7 @@ from bot.shadow_decision import (
     ShadowDecisionLogger, ShadowDecision, read_decisions, summarize,
     FINGERPRINT, _QUESTION_SPECS, _candidate_state, _reasons,
     VALID_VERDICTS, _noul_confidence, _component_confidence,
+    _state_signature, _materially_changed,
 )
 
 
@@ -356,6 +357,161 @@ def test_nouls_carry_no_confidence_attribute():
     from typesafe_sdk._schemas.models import NoulAnswer, ScoreAnswer
     assert "confidence" not in NoulAnswer.model_fields
     assert "confidence" in ScoreAnswer.model_fields
+
+
+# ── Dedup: the scanner re-offers the same candidate every cycle ─────────────
+#
+# First real sample: 1021 rows over 24 distinct symbols in minutes, CHILLGUY
+# 106 times. The rate cap never fired — volume was never the problem,
+# redundancy was. Non-independent rows corrupt any statistic over them and
+# would manufacture false confidence in any later join to outcomes.
+
+def test_an_unchanged_candidate_is_judged_once_not_every_cycle(tmp_path):
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    for _ in range(10):
+        logger.decide_async("CHILLGUY/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP", snap={"breadth_pct": 40})
+    time.sleep(0.3)
+    assert len(c.calls) == 1, "a re-offered, unchanged candidate is one question"
+    assert logger.skipped_as_unchanged == 9
+
+
+def test_a_materially_changed_candidate_is_judged_again(tmp_path):
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    logger.decide_async("X/USDT:USDT", "short", _row(rsi=71.0),
+                        bot_decision="SKIP")
+    logger.decide_async("X/USDT:USDT", "short", _row(rsi=84.0),
+                        bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2), \
+        "a real move is a genuinely different question"
+
+
+def test_float_noise_is_not_a_new_question(tmp_path):
+    # A last-decimal wobble must not re-ask, or dedup collapses on live data.
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    logger.decide_async("X/USDT:USDT", "short", _row(rsi=71.0001),
+                        bot_decision="SKIP")
+    logger.decide_async("X/USDT:USDT", "short", _row(rsi=71.0002),
+                        bot_decision="SKIP")
+    time.sleep(0.3)
+    assert len(c.calls) == 1
+
+
+def test_different_symbols_never_collide(tmp_path):
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    logger.decide_async("A/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    logger.decide_async("B/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2)
+
+
+def test_the_two_sides_of_one_symbol_are_separate_questions(tmp_path):
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2)
+
+
+def test_dedup_runs_before_the_rate_cap(tmp_path):
+    # Ordering matters: an unchanged candidate must not consume budget a
+    # genuinely new one could have used.
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  max_per_minute=2)
+    for _ in range(20):
+        logger.decide_async("X/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    time.sleep(0.3)
+    assert logger.dropped_for_rate == 0, "duplicates must not reach the cap"
+    logger.decide_async("Y/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2), \
+        "budget must still be there for a new candidate"
+
+
+def test_dedup_can_be_disabled_for_the_old_sampling(tmp_path):
+    # It changes WHICH candidates are judged, so the old behaviour stays
+    # reachable — a run compared against pre-v3.71.0 rows needs it.
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0)
+    for _ in range(5):
+        logger.decide_async("X/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 5)
+
+
+def test_the_window_expires(tmp_path):
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0.2)
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    time.sleep(0.35)
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2)
+
+
+def test_the_seen_map_stays_bounded(tmp_path):
+    # It is keyed by state, so an unbounded map would grow with every scan
+    # for the life of the process.
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0.05)
+    for i in range(700):
+        logger.decide_async(f"S{i}/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    assert len(logger._seen) <= 700, len(logger._seen)
+    # And a burst far past the hard ceiling still cannot grow without bound.
+    for i in range(5000):
+        logger.decide_async(f"T{i}/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    assert len(logger._seen) <= 4096, len(logger._seen)
+
+
+def test_regime_is_compared_too_not_just_the_candidate():
+    # The same coin in a different market is a different question.
+    from bot.shadow_decision import _candidate_state
+    a = _candidate_state("X/USDT:USDT", "short", _row(), {"breadth_pct": 10})
+    b = _candidate_state("X/USDT:USDT", "short", _row(), {"breadth_pct": 90})
+    assert _materially_changed(_state_signature(a), _state_signature(b))
+
+
+def test_a_signature_survives_missing_fields():
+    # Scanner rows are not guaranteed to carry every optional block.
+    from bot.shadow_decision import _candidate_state
+    sparse = _candidate_state("X/USDT:USDT", "short", {}, {})
+    assert _state_signature(sparse)[1] == {}
+
+
+def test_drift_must_ACCUMULATE_not_merely_cross_a_boundary(tmp_path):
+    """
+    The reason hysteresis replaced absolute buckets. On a fixed grid a value
+    wobbling either side of an edge re-asks on every crossing; measured from
+    the last ASKED value it cannot. Simulated over a drifting scan this was
+    the difference between 15.6% and 3.1% of candidates judged.
+    """
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    for rsi in (71.0, 72.4, 71.1, 72.6, 71.3, 72.9):     # wobble, no trend
+        logger.decide_async("X/USDT:USDT", "short", _row(rsi=rsi),
+                            bot_decision="SKIP")
+    time.sleep(0.3)
+    assert len(c.calls) == 1, "wobble around a threshold is not a new question"
+    logger.decide_async("X/USDT:USDT", "short", _row(rsi=75.0),
+                        bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2), "real drift IS a new question"
+
+
+def test_a_field_appearing_or_vanishing_counts_as_changed():
+    # The scanner starting or stopping computing something changes what jev
+    # is shown, even if every shared field is identical.
+    from bot.shadow_decision import _candidate_state
+    full = _candidate_state("X/USDT:USDT", "short", _row(), {})
+    gone = _candidate_state("X/USDT:USDT", "short", _row(rsi=None), {})
+    assert _materially_changed(_state_signature(full), _state_signature(gone))
 
 
 def test_an_invalid_bot_decision_is_rejected_before_any_call(tmp_path):
