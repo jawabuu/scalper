@@ -6588,3 +6588,125 @@ def test_the_scanner_computes_it_without_an_extra_request():
     src = inspect.getsource(ScanRunner._prefilter.__globals__["ScanRunner"])
     assert "from bot.crt import detect as _crt_detect" in src
     assert "fetch_ohlcv" not in src.split("_crt_detect")[1][:400]
+
+
+# ── Account value: the fee reserve at COST, not at the mark ─────────────────
+# LSK 2026-09-20, the only trade on a clean live account, isolated the gap:
+#
+#   Binance   Closing PNL -0.22 | Funding 0.00 | Trading Fee -0.04 (-0.0001 BNB)
+#   bot       realised -0.2273  | fees 0.0395 | net -0.2667
+#   USDT      86.28317071 -> 86.0559  =  -0.2273  (the CLOSING PnL exactly)
+#
+# The fee left the BNB balance and never touched USDT, so a USDT-only figure
+# is structurally blind to it. That 0.0395 was the entire reported gap.
+
+def _g_with_basis(rate=749.40):
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g._asset_basis = {}
+    g._fee_asset_rate = lambda a: rate if a == "BNB" else None
+    return g
+
+
+_LIVE_BAL = {"info": {"totalWalletBalance": "86.28", "assets": [
+    {"asset": "USDT", "walletBalance": "86.28"},
+    {"asset": "BNB", "walletBalance": "0.00381285"}]}}
+
+
+def test_account_value_counts_the_fee_reserve():
+    g = _g_with_basis()
+    r = g.account_value(_LIVE_BAL)
+    assert r["usdt"] == 86.28
+    assert round(r["reserve"], 2) == 2.86
+    assert round(r["value"], 2) == 89.14
+
+
+def test_a_bnb_rally_is_not_trading_performance():
+    """
+    At the live mark a $500 reserve moving 10% is +/-$50 — larger than a day
+    of trading, and it would read as if the bot had earned it.
+    """
+    g = _g_with_basis()
+    before = g.account_value(_LIVE_BAL)["value"]
+    g._fee_asset_rate = lambda a: 899.28 if a == "BNB" else None   # +20%
+    assert g.account_value(_LIVE_BAL)["value"] == before
+
+
+def test_a_price_lookup_failure_is_not_a_loss():
+    """Valuing at the mark would drop the asset and print a loss from a blip."""
+    g = _g_with_basis()
+    before = g.account_value(_LIVE_BAL)["value"]
+    g._fee_asset_rate = lambda a: None
+    assert g.account_value(_LIVE_BAL)["value"] == before
+
+
+def test_the_basis_is_recorded_once_and_never_rebased():
+    g = _g_with_basis()
+    g.account_value(_LIVE_BAL)
+    assert g._asset_basis == {"BNB": 749.40}
+    g._fee_asset_rate = lambda a: 1000.0
+    g.account_value(_LIVE_BAL)
+    assert g._asset_basis == {"BNB": 749.40}, "re-basing would invent P&L"
+
+
+def test_demo_has_no_reserve_and_stays_equal_to_usdt():
+    """Fees are USDT there, so the wallet already reflects them."""
+    g = _g_with_basis()
+    r = g.account_value({"info": {"totalWalletBalance": "5000.0"}})
+    assert r["value"] == r["usdt"] == 5000.0
+    assert r["reserve"] == 0.0
+
+
+def test_the_switchover_when_bnb_runs_out_is_continuous():
+    """
+    BNB pays until empty, then USDT does. account_value must step by the same
+    amount either way — it already counted the BNB before it was spent.
+    """
+    from bot.futures_guardian import resolve_account_value
+    px, closing, fee = 749.40, -0.2273, 0.0395
+    u, b = 86.28317071, 0.0001 * 3
+    prices, steps = {"BNB": px}, []
+    prev = resolve_account_value(
+        {"info": {"assets": [{"asset": "USDT", "walletBalance": str(u)},
+                             {"asset": "BNB", "walletBalance": str(b)}]}}, prices)[0]
+    for _ in range(6):
+        if b * px >= fee:
+            b -= fee / px
+            u += closing
+        else:
+            u += closing - fee
+        v = resolve_account_value(
+            {"info": {"assets": [{"asset": "USDT", "walletBalance": str(u)},
+                                 {"asset": "BNB", "walletBalance": str(b)}]}}, prices)[0]
+        steps.append(round(v - prev, 4))
+        prev = v
+    assert len(set(steps)) == 1, f"discontinuity at the switchover: {steps}"
+    assert steps[0] == round(closing - fee, 4)
+
+
+def test_account_value_never_raises_and_never_shrinks_on_error():
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g._wallet_balance_cached = 86.28
+    r = g.account_value({"info": {"assets": "not-a-list"}})
+    assert r["value"] == 86.28
+    assert "usdt-only" in r["source"]
+
+
+def test_the_basis_survives_a_restart():
+    """Otherwise a redeploy re-bases at a new price and invents P&L."""
+    import inspect
+    import bot.futures_state as fs
+    import bot.futures_guardian as fg
+    assert '"asset_basis": dict(asset_basis or {})' in inspect.getsource(fs)
+    src = inspect.getsource(fg)
+    assert 'asset_basis=getattr(self, "_asset_basis", {})' in src
+    assert 'self._asset_basis = dict(data.get("asset_basis") or {})' in src
+
+
+def test_the_return_cards_read_account_value():
+    import inspect
+    import bot.api as api
+    src = inspect.getsource(api)
+    assert src.count("wallet_now=_account_wallet(_guardian)") == 3
+    assert "g.account_value()" in src

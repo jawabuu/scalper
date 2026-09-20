@@ -230,7 +230,7 @@ def create_app(engine) -> FastAPI:
                 report["account_return"] = account_return(
                     trades,
                     baseline=getattr(_guardian, "wallet_start", None),
-                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    wallet_now=_account_wallet(_guardian),
                     day_baseline=day_base,
                     day_start_ts=day_start)
                 # Its own card: account_return has one subtitle line and gives
@@ -248,7 +248,7 @@ def create_app(engine) -> FastAPI:
                     day_baseline=day_base,
                     day_start_ts=(getattr(_auto.state, "day_started_at", 0.0)
                                   if _auto is not None else 0.0) or day_start,
-                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    wallet_now=_account_wallet(_guardian),
                     tz_offset_h=DAY_TZ_OFFSET_H,
                     baseline_source=(getattr(_auto.state, "day_baseline_source", "")
                                      if _auto is not None else ""))
@@ -258,7 +258,7 @@ def create_app(engine) -> FastAPI:
             try:
                 report["reconciliation"] = reconcile(
                     trades,
-                    wallet_now=getattr(_guardian, "_wallet_balance_cached", None),
+                    wallet_now=_account_wallet(_guardian),
                     wallet_start=getattr(_guardian, "wallet_start", None))
             except Exception as e:
                 report["reconciliation"] = {"error": str(e)}
@@ -540,6 +540,29 @@ def create_app(engine) -> FastAPI:
             snap = _auto.set_enabled(on)
         snap["available"] = True
         return snap
+
+    def _account_wallet(g):
+        """
+        What the RETURN cards measure: USDT plus the fee reserve at cost.
+
+        The USDT balance alone cannot see a fee paid in BNB. LSK 2026-09-20,
+        the only trade on a clean account, proved it: the USDT wallet moved
+        -0.2273 — exactly the closing PnL — while the 0.0395 fee left the BNB
+        balance. That 0.0395 was the whole reported gap.
+
+        Degrades to the USDT figure on any failure, never to a smaller number,
+        so a price-lookup blip cannot read as a loss.
+        """
+        if g is None:
+            return None
+        try:
+            av = g.account_value()
+            v = float(av.get("value") or 0.0)
+            if v > 0:
+                return v
+        except Exception:
+            pass
+        return getattr(g, "_wallet_balance_cached", None)
 
     @app.get("/api/shadow")
     def api_shadow(limit: int = 500, symbol: str = "", verdict: str = "",

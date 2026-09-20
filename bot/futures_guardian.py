@@ -192,6 +192,50 @@ def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
     return 0.0, "unresolved"
 
 
+def fee_reserve_basis(assets_seen: dict, basis: dict,
+                      live_prices: dict | None = None) -> dict:
+    """
+    Value a non-USDT balance at what it COST, not at today's mark.
+
+    WHY NOT THE LIVE PRICE. BNB is held to pay fees, not as a position. Marking
+    it to market turns BNB's price into account performance: on a $500 reserve
+    a 10% BNB move is +/-$50, which is larger than a day of trading and would
+    appear in the return card as if the bot had earned it. At a fixed basis the
+    reserve falls ONLY as it is spent, which is the thing actually being
+    measured.
+
+    It also removes the failure mode entirely. Valuing at the mark means a
+    momentary price-lookup failure drops the asset from the total — a $500
+    reserve reading as a $500 loss from a network blip. A basis is recorded
+    once and then never needs a lookup again.
+
+    `basis` is the stored asset -> price map and is UPDATED IN PLACE the first
+    time an asset is seen with a usable live price. An asset already carrying a
+    basis keeps it: re-basing on a later price would reintroduce exactly the
+    drift this exists to prevent.
+
+    Returns the price map to value with. Stablecoins are 1.0 and never stored.
+    """
+    out = {"USDT": 1.0, "BUSD": 1.0, "USDC": 1.0, "FDUSD": 1.0}
+    live = dict(live_prices or {})
+    for name in (assets_seen or {}):
+        up = str(name).upper()
+        if up in out:
+            continue
+        if up in basis:
+            out[up] = float(basis[up])          # cost basis wins, always
+            continue
+        px = live.get(up)
+        try:
+            px = float(px) if px is not None else None
+        except (TypeError, ValueError):
+            px = None
+        if px and px > 0:
+            basis[up] = px                      # recorded once, then fixed
+            out[up] = px
+    return out
+
+
 def resolve_account_value(bal: dict, prices: dict | None = None) -> tuple:
     """
     The whole account in USDT: every asset's walletBalance at its own price.
@@ -404,6 +448,11 @@ class FuturesGuardian:
         self._last_cycle_ts: float = 0.0
         self._last_error: str | None = None
         self._wallet_balance_cached: float = 0.0
+        # Raw fetch_balance payload, for account_value(). Empty until the
+        # first poll, which is why account_value degrades to USDT-only.
+        self._last_balance_payload: dict = {}
+        # Cost basis per non-USDT asset, restored from state on load.
+        self._asset_basis: dict = {}
         self._actions: list[dict] = []   # recent actions, for the dashboard
         self._pos_meta: dict[str, dict] = {}   # symbol -> sizing snapshot
         self._closed_trades: list[dict] = []   # futures trade history
@@ -2597,6 +2646,10 @@ class FuturesGuardian:
                     self._closed_trades = from_state
         self._restored_safety = data.get("safety") or {}
         self._restored_placed_orders = data.get("placed_orders") or {}
+        try:
+            self._asset_basis = dict(data.get("asset_basis") or {})
+        except Exception:
+            self._asset_basis = {}
         if data.get("wallet_start") and self.wallet_start is None:
             self.wallet_start = float(data["wallet_start"])
         with self._lock:
@@ -2705,6 +2758,7 @@ class FuturesGuardian:
                            placed_orders=placed, stop_ids=stop_ids,
                            pending_cancels=pending,
                            wallet_start=self.wallet_start,
+                           asset_basis=getattr(self, "_asset_basis", {}),
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -2717,6 +2771,9 @@ class FuturesGuardian:
 
         try:
             b = self.exchange.fetch_balance()
+            # Keep the raw payload: account_value() needs the assets[] array,
+            # and re-fetching it would double the balance calls.
+            self._last_balance_payload = b
             val, source = resolve_usdt_balance(b)
             if val <= 0:
                 log.warning("Could not resolve a positive USDT futures balance")
@@ -4007,6 +4064,75 @@ class FuturesGuardian:
                 return True
             log.debug(f"orphaned stop {order_id} on {symbol} not cancellable: {e}")
             return False
+
+    def account_value(self, bal: dict | None = None) -> dict:
+        """
+        The whole account in USDT, with the fee reserve at COST.
+
+        This is what the return cards should read. The USDT balance alone
+        cannot see a fee paid in BNB — LSK 2026-09-20 proved it in isolation:
+        the USDT wallet moved -0.2273, exactly the closing PnL, while the
+        0.0395 fee left the BNB balance. That 0.0395 is the entire wallet_gap
+        on that trade.
+
+        Non-USDT assets are valued at the basis recorded the first time a
+        price was seen, never at the live mark — see fee_reserve_basis.
+
+        Never raises, and never reports a smaller account because a lookup
+        failed: on any error it falls back to the USDT balance and says so in
+        `source`, so a blip reads as "degraded" rather than as a loss.
+        """
+        out = {"value": 0.0, "usdt": 0.0, "reserve": 0.0,
+               "per_asset": {}, "unpriced": [], "source": "account_value"}
+        try:
+            if bal is None:
+                bal = self._last_balance_payload or {}
+            usdt, _ = resolve_usdt_balance(bal)
+            # A payload we cannot parse must not resolve to ZERO — that is the
+            # "blip reads as a loss" failure this whole design exists to
+            # avoid. Fall back to the last good cached balance.
+            if not usdt or float(usdt) <= 0:
+                usdt = getattr(self, "_wallet_balance_cached", 0.0) or 0.0
+            out["usdt"] = float(usdt or 0.0)
+            if not hasattr(self, "_asset_basis"):
+                self._asset_basis = {}
+            info = (bal or {}).get("info") or {}
+            assets = info.get("assets") if isinstance(info, dict) else None
+            seen = {str((a or {}).get("asset") or "").upper(): True
+                    for a in (assets or []) if isinstance(a, dict)}
+            prices = fee_reserve_basis(
+                seen, self._asset_basis, self._fee_asset_prices())
+            value, per, unpriced = resolve_account_value(bal, prices)
+            if not value:
+                out["source"] = "usdt-only (no assets array)"
+                out["value"] = out["usdt"]
+                out["reserve"] = 0.0
+                return out
+            out.update(value=value, per_asset=per, unpriced=unpriced)
+            out["reserve"] = round(value - out["usdt"], 8)
+            if unpriced:
+                out["source"] = f"account_value (unpriced: {','.join(unpriced)})"
+            return out
+        except Exception as e:
+            log.debug(f"account_value failed ({e}) — falling back to USDT")
+            out["value"] = out["usdt"] or (
+                getattr(self, "_wallet_balance_cached", 0.0) or 0.0)
+            out["source"] = "usdt-only (degraded)"
+            return out
+
+    def _fee_asset_prices(self) -> dict:
+        """Live prices for basis-setting only. Used ONCE per asset."""
+        prices = {}
+        for name in list(getattr(self, "_asset_basis", {}) or {}) + ["BNB"]:
+            if name in prices or name == "USDT":
+                continue
+            try:
+                rate = self._fee_asset_rate(name)
+                if rate:
+                    prices[name] = float(rate)
+            except Exception:
+                continue
+        return prices
 
     def closed_trades(self) -> list[dict]:
         with self._lock:
