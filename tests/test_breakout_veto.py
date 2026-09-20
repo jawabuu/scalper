@@ -6479,3 +6479,112 @@ def test_main_passes_the_configured_journal_path():
     src = inspect.getsource(main)
     assert "journal_path=(" in src
     assert "cfg.trade_journal_path" in src
+
+
+# ── CRT sweep detection — recorded, never acted on ───────────────────────────
+# Entry TIMING is where the losses are: 79.1% of live entries are already
+# losing the first time the guardian sees them, and nothing in the ~40-field
+# entry context separates a green start from a red one. So the fix is a
+# different TRIGGER, not another screen. CRT's trigger is a failed push beyond
+# a level, confirmed by a close back inside.
+#
+# Nothing reads these fields to make a decision. They exist so the question
+# can be settled against this account's trades rather than someone's chart.
+
+def _c(h, l, cl):
+    return (0, h, l, cl)
+
+
+def _range5(h=110, l=100):
+    return [_c(h, l, 105) for _ in range(5)]
+
+
+def test_a_failed_push_up_is_a_short_sweep():
+    from bot.crt import detect
+    sweep = [_c(112, 104, 108)] + [_c(109, 104, 108) for _ in range(4)]
+    r = detect(_range5() + sweep)
+    assert r["crt_ok"] and r["crt_swept"] is True
+    assert r["crt_side"] == "short"
+    assert r["crt_penetration_pct"] > 0
+
+
+def test_a_failed_push_down_is_a_long_sweep():
+    from bot.crt import detect
+    sweep = [_c(108, 97, 102)] + [_c(108, 99, 102) for _ in range(4)]
+    r = detect(_range5() + sweep)
+    assert r["crt_swept"] is True and r["crt_side"] == "long"
+
+
+def test_closing_BEYOND_the_level_invalidates_the_setup():
+    """
+    The rule's whole point: a close outside means continuation is more likely
+    than reversal. It is an invalidation, not a weaker sweep.
+    """
+    from bot.crt import detect
+    beyond = [_c(112, 104, 111) for _ in range(5)]
+    assert detect(_range5() + beyond)["crt_swept"] is False
+
+
+def test_touching_without_exceeding_is_not_a_sweep():
+    from bot.crt import detect
+    touch = [_c(110, 104, 108) for _ in range(5)]      # equals CRH, not beyond
+    assert detect(_range5() + touch)["crt_swept"] is False
+
+
+def test_both_ends_swept_is_recorded_as_no_signal():
+    """CRT says nothing about which side wins, so it must not guess."""
+    from bot.crt import detect
+    both = [_c(112, 97, 105)] + [_c(109, 104, 105) for _ in range(4)]
+    r = detect(_range5() + both)
+    assert r["crt_swept"] is False and r["crt_side"] == "both"
+
+
+def test_insufficient_history_is_UNKNOWN_not_false():
+    """'No opinion' and 'no sweep' must not look alike in the analysis."""
+    from bot.crt import detect
+    r = detect(_range5()[:3])
+    assert r["crt_swept"] is None
+    assert r["crt_ok"] is False
+
+
+def test_detection_cannot_raise():
+    from bot.crt import detect
+    for junk in ([], None, [("x", "y", "z", "w")] * 20, [(0, 1, 1, 1)] * 20):
+        assert detect(junk)["crt_ok"] in (True, False)
+
+
+def test_agreement_is_none_when_there_was_no_opinion():
+    from bot.crt import agrees
+    assert agrees({}, "short") is None
+    assert agrees({"crt_ok": True, "crt_swept": None}, "short") is None
+    assert agrees({"crt_ok": True, "crt_swept": True,
+                   "crt_side": "short"}, "short") is True
+    assert agrees({"crt_ok": True, "crt_swept": True,
+                   "crt_side": "long"}, "short") is False
+
+
+def test_nothing_in_the_entry_path_reads_the_crt_fields():
+    """Observational. A gate that read these would make the test worthless."""
+    import inspect
+    import bot.auto_trader as at
+    src = inspect.getsource(at.evaluate_candidate)
+    for f in ("crt_swept", "crt_side", "crt_agrees", "crt_ok"):
+        assert f not in src, f"evaluate_candidate reads {f}"
+
+
+def test_the_fields_are_stamped_onto_the_trade_record():
+    import inspect
+    import bot.auto_trader as at
+    src = inspect.getsource(at)
+    for f in ('"crt_swept": row.get("crt_swept")',
+              '"crt_agrees": _crt_agrees(row, side)'):
+        assert f in src, f
+
+
+def test_the_scanner_computes_it_without_an_extra_request():
+    """From the candles already fetched — a per-symbol call would not be free."""
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner._prefilter.__globals__["ScanRunner"])
+    assert "from bot.crt import detect as _crt_detect" in src
+    assert "fetch_ohlcv" not in src.split("_crt_detect")[1][:400]

@@ -331,6 +331,16 @@ def _refusal_key(reason: str) -> str:
     return "other"
 
 
+def _crt_agrees(row: dict, side: str):
+    """None when CRT had no opinion, so a missing judgement is never scored
+    as a disagreement. Never raises — this is a log field, not a gate."""
+    try:
+        from bot.crt import agrees
+        return agrees(row, side)
+    except Exception:
+        return None
+
+
 def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
                        atr_pct: float | None = None) -> AutoDecision:
     """
@@ -1521,6 +1531,17 @@ class AutoTrader:
                         "callback_pct": decision.callback_pct,
                         "callback_source": decision.callback_source,
                         "was_reentry": "cooldown overridden" in why,
+                        # CRT sweep state at the moment of entry, carried
+                        # through from the scan row (bot/crt.py). Recorded
+                        # ONLY — no gate reads it. The question it settles:
+                        # do entries that followed a failed push beyond the
+                        # range start green more often than the 20.9% that
+                        # currently do?
+                        "crt_swept": row.get("crt_swept"),
+                        "crt_side": row.get("crt_side"),
+                        "crt_agrees": _crt_agrees(row, side),
+                        "crt_penetration_pct": row.get("crt_penetration_pct"),
+                        "crt_close_pos": row.get("crt_close_pos"),
                         # The exchange's own order id. Added so the shadow
                         # decision log (bot/shadow_decision.py, JEV-BRIEF.md
                         # §5) can join a jev verdict recorded BEFORE this

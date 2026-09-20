@@ -35,6 +35,11 @@ class ScanRunner:
         self.max_symbols = max_symbols
         self.interval = interval
         self.tracker = ScanTracker()
+        # CRT sweep state per symbol, rebuilt every scan. Observational.
+        self._crt: dict = {}
+        # How many entry-timeframe candles make one CRT range candle. 5 x 3m
+        # = a 15m range, which is the shape the model is usually drawn on.
+        self.crt_group = 5
 
         params: dict = {
             "enableRateLimit": True,
@@ -313,6 +318,18 @@ class ScanRunner:
             if df is None:
                 rejected[sym] = "no candles returned"
                 continue
+            # CRT sweep detection, from the candles ALREADY in hand — no extra
+            # request. Observational only: nothing reads it to make a decision.
+            try:
+                from bot.crt import detect as _crt_detect
+                tail = df.tail(self.crt_group * 2)
+                self._crt[sym] = _crt_detect(
+                    [(0, float(r.high), float(r.low), float(r.close))
+                     for r in tail.itertuples()],
+                    group=self.crt_group)
+            except Exception as e:
+                log.debug(f"{sym}: CRT detection skipped ({e})")
+                self._crt.pop(sym, None)
             try:
                 # Some ticker payloads omit high/low; derive them from the
                 # candles instead. The fetch window is sized to cover 24h
@@ -387,6 +404,7 @@ class ScanRunner:
                     "crossed_up": bool(d.crossed_up),
                     "delta_note": str(d.note),
                 })
+                row.update(self._crt.get(row.get("symbol")) or {})
                 rows.append(row)
             # Regime context travels with the snapshot so every entry can be
         # stamped with the market conditions it was taken in.
