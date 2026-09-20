@@ -107,7 +107,7 @@ def test_a_ripe_decision_is_labelled_with_forward_returns(tmp_path):
     ex = _Exchange(start=100.0, drift=-0.1)      # falling
     assert resolve(ex, str(src), str(dst), now=now) == 1
     rec = json.loads(dst.read_text().strip())
-    assert set(rec["returns_pct"]) == {"15", "30", "60"}
+    assert set(rec["returns_pct"]) == {"3", "6", "15", "30", "60"}
     assert rec["returns_pct"]["60"] < 0
 
 
@@ -218,6 +218,68 @@ def test_an_unparseable_line_does_not_stop_the_pass(tmp_path):
     src.write_text(json.dumps(_row(ts=now - 7200)) + "\n{ broken\n",
                    encoding="utf-8")
     assert resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now) == 1
+
+
+# ── Competing entry triggers ────────────────────────────────────────────────
+#
+# Selection is not the problem — 79.1% of entries were already losing when
+# first seen, and no entry-context field separated the winners. These pin the
+# trigger comparison: CRT, jev's own read, and the plain one-candle wait, all
+# scored against the same forward returns.
+
+def test_the_recorded_trigger_survives_onto_the_outcome_row(tmp_path):
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200,
+                      triggers={"crt_agrees": True, "crt_side": "short"})])
+    resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    rec = json.loads(dst.read_text().strip())
+    assert rec["triggers"]["crt_agrees"] is True
+
+
+def test_crt_no_opinion_is_scored_apart_from_crt_disagreeing(tmp_path):
+    """
+    None means CRT abstained; False means it disagreed. Collapsing them would
+    score a trigger that had no view as one that was wrong — and on live data
+    every entry so far is False or None, so this distinction IS the dataset.
+    """
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [
+        _row(symbol="A/USDT:USDT", ts=now - 7200, triggers={"crt_agrees": False}),
+        _row(symbol="B/USDT:USDT", ts=now - 7200, triggers={"crt_agrees": None}),
+        _row(symbol="C/USDT:USDT", ts=now - 7200, triggers={"crt_agrees": True}),
+    ])
+    resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=30)
+    assert set(s["by_crt_agrees"]) == {"True", "False", "None"}
+    assert all(v["n"] == 1 for v in s["by_crt_agrees"].values())
+
+
+def test_a_row_with_no_triggers_still_resolves(tmp_path):
+    # Rows written before this existed carry none, and must not be dropped.
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200)])
+    assert resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now) == 1
+    assert json.loads(dst.read_text().strip())["triggers"] == {}
+
+
+def test_the_one_candle_wait_baseline_is_reported(tmp_path):
+    """
+    The comparison that keeps a structural trigger honest: if CRT cannot beat
+    simply waiting one candle, its structure has earned nothing.
+    """
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, side="short")])
+    resolve(_Exchange(start=100.0, drift=-0.1), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=30)
+    one = s["wait_baseline"]["one_candle"]
+    assert one["n"] == 1
+    # A falling market favours the short at every horizon.
+    assert one["median_favoured_pct"] > 0
+    assert one["better_than_now_pct"] == 100.0
 
 
 # ── Reading ─────────────────────────────────────────────────────────────────

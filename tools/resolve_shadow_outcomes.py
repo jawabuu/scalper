@@ -71,6 +71,12 @@ def main() -> int:
 
     s = summarize(args.dst, horizon=args.horizon)
     print(json.dumps(s, indent=2))
+    crt = s.get("by_crt_agrees") or {}
+    if crt and "True" not in crt:
+        print("\nNOTE: no observation yet where CRT AGREED. A trigger that "
+              "never fires cannot be told apart from a good one — the "
+              "positive class has to come from REFUSED candidates.",
+              file=sys.stderr)
     if s.get("observations", 0) < 30:
         print("\nNOTE: under 30 observations. Read the medians as a shape "
               "check, not a result — and do not re-fit _WEIGHTS on them.",

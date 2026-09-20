@@ -363,6 +363,9 @@ class ShadowDecision:
     # rows loadable.
     structure_intact: float = 0.0
     composed_score: float = 0.0
+    # Deterministic alternative TRIGGERS, computed in code and recorded raw —
+    # never asked of jev. See _triggers.
+    triggers: dict = None
     weights: dict = None
     enter_threshold: float = 0.0
 
@@ -397,6 +400,49 @@ def _reasons(verdict: str, conviction: float, looks_exhausted: float,
         out.append(f"structural readings agree cleanly (conviction={conviction:.1f}/3)")
     if not out:
         out.append(f"verdict={verdict}, no reading stood out")
+    return out
+
+
+def _triggers(row: dict, side: str) -> dict:
+    """
+    Competing ENTRY TRIGGERS, recorded on every judged candidate.
+
+    Selection is not the problem. bot/crt.py measured 79.1% of entries already
+    losing the first time the guardian sees them, with NOTHING in ~40 entry
+    fields separating the winners — so the open question is WHEN to enter, and
+    there is more than one answer worth testing:
+
+      crt_agrees   structural: a sweep beyond a level that FAILED, confirmed
+                   by a close back inside (bot/crt.py)
+      looks_exhausted  jev's read of the same question from indicator state,
+                   already in every row as a raw component
+
+    Recorded, never gating. Live data as of 2026-09-20 is why: across 7 live
+    entries crt_agrees was False 6 times and None once — never True. As a gate
+    that would have blocked all six losers AND taken zero trades, which cannot
+    distinguish a good filter from one that never fires. The positive class
+    can only come from REFUSED candidates, which is what this log holds.
+
+    A third baseline belongs in the comparison and is NOT a field here: simply
+    waiting one candle. The wait_* columns say the better price arrives one
+    candle later 81% of the time (median +0.26%), so any structural trigger
+    has to beat a plain delay before its structure has earned anything. That
+    one is measured by the short horizons in bot/shadow_outcomes.py instead,
+    since it is a property of the price path rather than of the candidate.
+
+    Never raises: a trigger that errors is recorded as None, never as a
+    disagreement. None means "no opinion", which must stay distinguishable
+    from False when these are scored.
+    """
+    out = {"crt_agrees": None, "crt_swept": row.get("crt_swept"),
+           "crt_side": row.get("crt_side"),
+           "crt_penetration_pct": row.get("crt_penetration_pct"),
+           "crt_close_pos": row.get("crt_close_pos")}
+    try:
+        from bot.crt import agrees
+        out["crt_agrees"] = agrees(row, side)
+    except Exception as e:
+        log.debug(f"shadow decision: CRT trigger unavailable ({e})")
     return out
 
 
@@ -573,6 +619,9 @@ class ShadowDecisionLogger:
         # Building it is pure dict work on data the scanner already computed —
         # no fetch, no look-ahead (JEV-BRIEF.md §5 constraint 2).
         state = _candidate_state(symbol, side, row, snap or {})
+        # Deterministic, cheap, and computed from the SAME row jev is shown —
+        # so the triggers are scored against identical inputs.
+        triggers = _triggers(row, side)
         if not self._state_is_new(symbol, side, state):
             if self.skipped_as_unchanged in (1, 100) or \
                     self.skipped_as_unchanged % 1000 == 0:
@@ -590,15 +639,16 @@ class ShadowDecisionLogger:
             return
         t = threading.Thread(
             target=self._run, name="shadow-decision",
-            args=(symbol, side, bot_decision, state, entry_order_id),
+            args=(symbol, side, bot_decision, state, entry_order_id, triggers),
             daemon=True)
         t.start()
 
-    def _run(self, symbol, side, bot_decision, state, entry_order_id):
+    def _run(self, symbol, side, bot_decision, state, entry_order_id,
+             triggers=None):
         try:
             result = self._client.system_one(state, self._questions())
             rec = self._parse(symbol, side, bot_decision, state,
-                              entry_order_id, result)
+                              entry_order_id, result, triggers)
         except Exception as e:
             # A rejected model name is a CONFIG error, not a transient one:
             # retrying cannot fix it, and the client constructs fine because
@@ -622,11 +672,12 @@ class ShadowDecisionLogger:
                 regime_aligned=0.0,
                 reasons=[f"jev call failed: {type(e).__name__}: {e}"],
                 entry_order_id=entry_order_id, model=self.model,
+                triggers=triggers or {},
                 fingerprint=FINGERPRINT, inputs_seen=state)
         self._write(rec)
 
     def _parse(self, symbol, side, bot_decision, state, entry_order_id,
-              result) -> ShadowDecision:
+              result, triggers=None) -> ShadowDecision:
         conv = result.scores["conviction"]
         conviction = float(conv.score)
         exhausted = float(result.nouls["looks_exhausted"].noul)
@@ -658,6 +709,7 @@ class ShadowDecisionLogger:
             reasons=_reasons(verdict, conviction, exhausted, aligned),
             entry_order_id=entry_order_id,
             model=str(getattr(result, "model", self.model)),
+            triggers=triggers or {},
             fingerprint=FINGERPRINT, inputs_seen=state)
 
     def _write(self, rec: ShadowDecision):

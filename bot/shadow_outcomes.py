@@ -56,7 +56,13 @@ DEFAULT_OUT = "logs/shadow_outcomes.jsonl"
 # Minutes after the decision at which forward return is measured. Short
 # because this is a scalper: a 4h return says nothing about a trade whose
 # median hold is measured in candles.
-HORIZONS_MIN = (15, 30, 60)
+#
+# 3 and 6 are ONE and TWO candles on the 3m timeframe, and they are the point
+# of the trigger comparison rather than an afterthought. The wait_* columns
+# say the better price arrives one candle later 81% of the time (median
+# +0.26%), so a plain one-candle delay is the baseline any structural trigger
+# must beat before its structure has earned anything.
+HORIZONS_MIN = (3, 6, 15, 30, 60)
 
 # Two rows for the same symbol inside this many seconds are treated as one
 # observation. Independent of the live dedup window: this one repairs rows
@@ -84,6 +90,7 @@ class ShadowOutcome:
     regime_aligned: float
     structure_intact: float
     composed_score: float
+    triggers: dict              # the competing entry triggers, as recorded
     base_price: float
     returns_pct: dict          # {"15": -0.4, "30": ...}; horizon -> % move
     favoured_side_pct: dict    # same, signed so + means the SIDE was right
@@ -247,6 +254,7 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
         regime_aligned=float(head.get("regime_aligned") or 0.0),
         structure_intact=float(head.get("structure_intact") or 0.0),
         composed_score=float(head.get("composed_score") or 0.0),
+        triggers=dict(head.get("triggers") or {}),
         base_price=base, returns_pct=rets, favoured_side_pct=favoured,
         collapsed_rows=len(group), resolved_ts=now)
 
@@ -286,4 +294,34 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 30) -> dict:
             seen.setdefault(r.get(field, "?"), []).append(v)
         out[bucket] = {k: {"n": len(v), "median_favoured_pct": med(v)}
                        for k, v in sorted(seen.items())}
+
+    # By TRIGGER. None ("no opinion") is kept distinct from False — collapsing
+    # them would score a trigger that abstained as one that disagreed.
+    seen = {}
+    for r, v in vals:
+        seen.setdefault(str((r.get("triggers") or {}).get("crt_agrees")),
+                        []).append(v)
+    out["by_crt_agrees"] = {k: {"n": len(v), "median_favoured_pct": med(v)}
+                            for k, v in sorted(seen.items())}
+
+    # The baseline every structural trigger must beat: does simply waiting one
+    # candle improve the price? Measured on the same observations, so it is a
+    # like-for-like comparison rather than a remembered statistic.
+    one, two = [], []
+    for r, _ in vals:
+        f = r.get("favoured_side_pct", {})
+        if f.get("3") is not None:
+            one.append(f["3"])
+        if f.get("6") is not None:
+            two.append(f["6"])
+    out["wait_baseline"] = {
+        "one_candle": {"n": len(one), "median_favoured_pct": med(one),
+                       "better_than_now_pct": (
+                           round(sum(1 for x in one if x > 0) / len(one) * 100, 1)
+                           if one else None)},
+        "two_candles": {"n": len(two), "median_favoured_pct": med(two),
+                        "better_than_now_pct": (
+                            round(sum(1 for x in two if x > 0) / len(two) * 100, 1)
+                            if two else None)},
+    }
     return out
