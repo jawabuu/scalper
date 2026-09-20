@@ -3158,3 +3158,71 @@ def test_every_poll_independent_protection_is_in_the_protected_set():
     block = src[i:src.index("for oid in ids", i)]
     for field in ("floor_stop_id", "adaptive_trail_id", "native_trail_id"):
         assert field in block, f"{field} can be swept"
+
+
+# ── The native trail replaces the ratchet ────────────────────────────────────
+# Measured on LSK live 2026-09-20: the ratchet exited at +6.64% ROI after FIVE
+# cancel/replace cycles. One native trail at the same 3% ROI callback would
+# have exited at +6.89% — 0.025% apart, with ONE order and no polling.
+#
+# Each ratchet step is also a window where the old stop is cancelled and the
+# new one is unconfirmed, and a placement can return an id without resting
+# (牛来 2026-09-20). Removing it removes risk as well as churn.
+
+def _run_up(ratchet, rois=(6, 8, 10, 12, 14)):
+    from dataclasses import replace
+    from bot.futures_guard import price_for_roi
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.38075)],
+                        price=0.38075)
+    g = _guardian(fake, cfg=replace(_armed_cfg(), ratchet_enabled=ratchet))
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    for roi in rois:
+        fake._price = price_for_roi(pos, roi)
+        g.run_cycle()
+    stops = [o["id"] for o in fake.created if o["type"] == "STOP_MARKET"]
+    return g, fake, stops
+
+
+def test_the_ratchet_is_off_by_default():
+    from bot.futures_guard import GuardConfig
+    assert GuardConfig().ratchet_enabled is False
+
+
+def test_a_resting_trail_stops_the_repositioning():
+    _, fake, stops = _run_up(ratchet=False)
+    assert len(stops) == 1, f"repositioned {len(stops) - 1} time(s) anyway"
+    assert len(fake.cancelled) <= 1
+
+
+def test_the_ratchet_still_works_when_switched_on():
+    """The old behaviour has to stay reachable, or the switch is a lie."""
+    _, fake, stops = _run_up(ratchet=True)
+    assert len(stops) > 1, "the ratchet did not reposition"
+    assert len(fake.cancelled) > 1
+
+
+def test_turning_the_ratchet_off_does_not_cost_the_fixed_stop():
+    """
+    REGRESSION, found by running the cycle rather than by the suite: the
+    supersede sweep cancelled the fixed stop while state.stop_order_id still
+    named it — the position lost its stop AND the record disagreed with the
+    exchange. The sweep exists to retry a cancel that failed at ARMING, so it
+    must only run when the trail actually replaced something.
+    """
+    from dataclasses import replace
+    from bot.futures_guard import price_for_roi
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.38075)],
+                        price=0.38075)
+    g = _guardian(fake, arm_at_entry=True, adaptive=True)
+    g.cfg = replace(g.cfg, ratchet_enabled=False)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    for roi in (2, 4, 6, 8, 10):
+        fake._price = price_for_roi(pos, roi)
+        g.run_cycle()
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.stop_order_id, "no fixed stop on record"
+    assert st.stop_order_id not in [o for o, _ in fake.cancelled], \
+        "the fixed stop was swept while the state still claimed it"
+    assert st.adaptive_trail_id and st.native_trail_id

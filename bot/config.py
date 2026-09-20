@@ -559,6 +559,12 @@ class BotConfig:
     scan_exclude_symbols: list = field(default_factory=lambda: [
         x.strip().upper() for x in
         (_env("SCAN_EXCLUDE_SYMBOLS", "") or "").split(",") if x.strip()])
+    # Reposition the fixed stop as the peak rises. Superseded by the native
+    # trail, which trails on the exchange rather than on a poll. LSK live
+    # 2026-09-20: the ratchet exited at +6.64% after five cancel/replace
+    # cycles; one native trail at the same callback gives +6.89%.
+    guard_ratchet_enabled: bool = field(default_factory=lambda: _env_bool(
+        "GUARD_RATCHET_ENABLED", False))
     guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(
         "GUARD_ARM_AT_ENTRY", True))
     # Start with SPOT trading halted. Useful when a container is redeployed

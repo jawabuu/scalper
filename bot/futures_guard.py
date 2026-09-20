@@ -220,6 +220,10 @@ class GuardConfig:
     #   ILV  armed +4.0% -> would exit ~+2.0% instead of  +5.06%   (-3 pts)
     # One winner is clipped; the one disaster is cut short.
     rescue_trail_callback_pct: float = 0.1
+    # Reposition the fixed stop as the peak rises. OFF: a resting native trail
+    # does the same job tick-by-tick, with one order instead of a cancel and a
+    # place per step. Set GUARD_RATCHET_ENABLED=true to restore it.
+    ratchet_enabled: bool = False
     arm_at_entry: bool = True
     # Which price triggers a stop. Binance defaults to CONTRACT_PRICE — the
     # LAST TRADED price on this book, wick included. MARK_PRICE is an index

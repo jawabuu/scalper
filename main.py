@@ -111,6 +111,7 @@ if __name__ == "__main__":
         fail_fast_max_peak_roi=cfg.guard_fail_fast_max_peak_roi,
         fail_fast_loss_roi=cfg.guard_fail_fast_loss_roi,
         rescue_trail_callback_pct=cfg.guard_rescue_trail_callback_pct,
+        ratchet_enabled=cfg.guard_ratchet_enabled,
         arm_at_entry=cfg.guard_arm_at_entry,
         stop_working_type=cfg.guard_stop_working_type,
         profit_floor_enabled=cfg.guard_profit_floor_enabled,

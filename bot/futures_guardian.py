@@ -2424,14 +2424,41 @@ class FuturesGuardian:
         # `armed_replaced_stop` is set only where the trail genuinely takes a
         # fixed stop's place, so the guard now means what it always intended:
         # the trail owns protection BECAUSE it replaced the stop.
-        if state.native_trail_id and getattr(state, "armed_replaced_stop", False):
-            # Binance owns the trail, so no repositioning — but a fixed stop
-            # whose cancel FAILED at arming would otherwise sit untouched until
-            # the position closed, still able to fire at a level the trade has
-            # long left behind. Retry the sweep each cycle; it is a no-op once
-            # nothing is superseded.
-            self._cancel_superseded_stops(pos, keep=state.native_trail_id,
-                                          state=state)
+        # BINANCE OWNS THE TRAIL once one is resting AND a fixed stop already
+        # exists. The second clause is what keeps v3.56.0's fix intact: the
+        # initial protective stop still has to be placed on the first cycle,
+        # because a trail armed AT ENTRY has replaced nothing yet.
+        #
+        # After that, repositioning is pointless and costly. Measured on LSK
+        # live 2026-09-20: the ratchet fired at +6.64% ROI after FIVE
+        # cancel/replace cycles; a single native trail at the same 3% ROI
+        # callback would have exited at +6.89% — 0.025% apart, with ONE order
+        # and no polling. Each ratchet step is also a window where the old
+        # stop is cancelled and the new one is unconfirmed, and a placement
+        # can return an id without resting (牛来 2026-09-20).
+        #
+        # The ratchet predates working native trails. It was the only trailing
+        # the bot had; it is now a third answer to a question the exchange
+        # already answers tick-by-tick.
+        _trail_owns = bool(state.native_trail_id) and (
+            getattr(state, "armed_replaced_stop", False)
+            or bool(state.stop_order_id))
+        if not getattr(self.cfg, "ratchet_enabled", False) and _trail_owns:
+            # Binance owns the trail, so no repositioning.
+            #
+            # The supersede sweep runs ONLY when the trail actually replaced a
+            # fixed stop. Its purpose is to retry a cancel that FAILED at
+            # arming, so a stale stop does not sit at a level the trade has
+            # long left behind.
+            #
+            # Under arm-at-entry the trail replaced NOTHING: the fixed stop is
+            # live protection that is meant to coexist with it. Sweeping there
+            # cancelled the fixed stop while state.stop_order_id still named
+            # it — the position lost the stop AND the record disagreed with
+            # the exchange. Caught by running the cycle, not by the suite.
+            if getattr(state, "armed_replaced_stop", False):
+                self._cancel_superseded_stops(pos, keep=state.native_trail_id,
+                                              state=state)
             with self._lock:
                 self._states[pos.symbol] = state
             return
