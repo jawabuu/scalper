@@ -18,6 +18,9 @@ class FakeExchange:
     def __init__(self, positions=None, orders=None, price=100.0):
         self._positions = positions or []
         self._orders = orders or []
+        self._algo = []
+        # Set True to have the NEXT trailing stop return an id without resting.
+        self.reject_next_algo = False
         self._price = price
         self.created = []
         self.cancelled = []
@@ -55,9 +58,36 @@ class FakeExchange:
                "amount": amount, "params": params or {}}
         self.created.append(rec)
         self.call_log.append(("create", oid))
+        # Conditional and trailing stops rest in the ALGO book, not the
+        # unified one. The fake has to model that: the guardian now CONFIRMS
+        # an armed trail is resting there before cancelling live protection,
+        # because the algo endpoint returns 200 with an id and rejects the
+        # order asynchronously (牛来 2026-09-20). A fake with no algo book
+        # would make every confirmation fail and hide the behaviour under test.
+        if self.reject_next_algo and str(type).upper() == "TRAILING_STOP_MARKET":
+            # Binance accepts the CALL and refuses the ORDER: an id comes
+            # back, nothing rests. This is the 牛来 2026-09-20 shape.
+            self.reject_next_algo = False
+            return rec
+        if str(type).upper() in ("TRAILING_STOP_MARKET", "STOP_MARKET",
+                                 "TAKE_PROFIT_MARKET"):
+            self._algo.append({
+                "algoId": oid,
+                "symbol": str(symbol).split(":")[0].replace("/", "").upper(),
+                "algoType": "CONDITIONAL", "type": type, "side": side})
         return rec
 
+    def fapiPrivateGetOpenAlgoOrders(self, params=None):
+        return list(self._algo)
+
+    def reject_algo(self, order_id):
+        """Simulate Binance accepting the CALL and refusing the ORDER."""
+        self._algo = [o for o in self._algo
+                      if str(o.get("algoId")) != str(order_id)]
+
     def cancel_order(self, order_id, symbol):
+        self._algo = [o for o in self._algo
+                      if str(o.get("algoId")) != str(order_id)]
         self.cancelled.append((order_id, symbol))
         self.call_log.append(("cancel", order_id))
 
@@ -1845,8 +1875,8 @@ def _armed_cfg():
                        atr_stop_mult=0.0)
 
 
-def _arm(fake):
-    g = _guardian(fake, cfg=_armed_cfg())
+def _arm(fake, adaptive=False):
+    g = _guardian(fake, cfg=_armed_cfg(), adaptive=adaptive)
     g.run_cycle()
     pos = g.fetch_positions()[0]
     fake._price = price_for_roi(pos, 8.0)
@@ -3002,3 +3032,83 @@ def test_the_replacement_flag_survives_a_restart():
     src = inspect.getsource(fs)
     assert '"armed_replaced_stop": s.armed_replaced_stop' in src
     assert 'st.armed_replaced_stop = bool(raw.get("armed_replaced_stop"))' in src
+
+
+# ── A rejected armed trail must not cost the position its protection ─────────
+# 牛来 2026-09-20 06:55:37. The algo endpoint returns 200 with an id and
+# refuses the order AFTERWARDS — every TRAIL-RESPONSE in the logs reads
+# status=None, so _accepted_id, written for exactly this, passes everything.
+# One second later the adaptive trail was cancelled as "superseded" in favour
+# of an order Binance had rejected, and the position held NOTHING for 27
+# seconds while five profit-floor attempts were refused with -2021.
+
+def test_a_rejected_armed_trail_keeps_the_adaptive_trail():
+    from bot.futures_guard import price_for_roi
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23411)],
+                        price=0.23411)
+    g = _guardian(fake, cfg=_armed_cfg(), adaptive=True)
+    g.run_cycle()                                   # adopt + adaptive trail
+    st = g._states["DOGE/USDT:USDT"]
+    adaptive = st.adaptive_trail_id
+    assert adaptive, "fixture must have an adaptive trail to protect"
+    fake.reject_next_algo = True                    # the arming attempt fails
+    fake._price = price_for_roi(g.fetch_positions()[0], 8.0)
+    g.run_cycle()
+    assert st.adaptive_trail_id == adaptive, \
+        "live protection was cancelled for an order that does not exist"
+    assert adaptive not in [o for o, _ in fake.cancelled]
+
+
+def test_an_unconfirmed_trail_does_not_claim_it_replaced_the_stop():
+    """
+    armed_replaced_stop suppresses the fixed stop. Setting it for a trail that
+    never rested would leave the position with neither.
+    """
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23411)],
+                        price=0.23411)
+    from bot.futures_guard import price_for_roi
+    g = _guardian(fake, cfg=_armed_cfg(), adaptive=True)
+    g.run_cycle()
+    st = g._states["DOGE/USDT:USDT"]
+    fake.reject_next_algo = True
+    fake._price = price_for_roi(g.fetch_positions()[0], 8.0)
+    g.run_cycle()
+    assert st.armed_replaced_stop is False
+
+
+def test_a_confirmed_trail_still_supersedes_normally():
+    """The fix must not break arming when the order really is resting."""
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.23411)],
+                        price=0.23411)
+    g = _arm(fake, adaptive=True)
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.native_trail_id
+    assert st.adaptive_trail_id is None, "confirmed arming should supersede"
+
+
+def test_a_lagging_book_keeps_the_trail_recorded_and_retries():
+    """
+    The book can lag a placement by a cycle. Discarding the id then would mean
+    arming never sticks — so the trail is RECORDED either way and only the
+    cancels wait for confirmation.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.manage_position)
+    i = src.index("if trail_id:")
+    j = src.index("if trail_id and superseded_ok:")
+    assert "state.native_trail_id = trail_id" in src[i:j], \
+        "the id must be recorded before the confirmation gate"
+
+
+def test_confirmation_failure_is_treated_like_rejection():
+    """An unreadable book and a refused order must reach the same safe end."""
+    from bot.futures_guardian import FuturesGuardian
+
+    class _Boom(FakeExchange):
+        def fapiPrivateGetOpenAlgoOrders(self, params=None):
+            raise RuntimeError("algo book unavailable")
+    fake = _Boom(positions=[_raw_pos("long", entry=0.23411)], price=0.23411)
+    g = _arm(fake, adaptive=True)
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.adaptive_trail_id, "protection must be kept when unconfirmable"

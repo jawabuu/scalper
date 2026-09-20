@@ -1335,6 +1335,55 @@ class FuturesGuardian:
     # is not acceptance.
     DEAD_STATUSES = {"REJECTED", "EXPIRED", "CANCELED", "CANCELLED"}
 
+    def _confirm_resting(self, pos: FuturesPosition, order_id: str,
+                         what: str) -> bool:
+        """
+        Is this order ACTUALLY in the algo book?
+
+        `_accepted_id` decides from `order["status"]`, and on the algo endpoint
+        that field is empty on every response — every TRAIL-RESPONSE in the
+        logs reads `status=None`. Rejection there is ASYNCHRONOUS: the call
+        returns 200 with an id, and the order is refused afterwards. So the
+        guard written to catch exactly this passes everything.
+
+        牛来 2026-09-20 06:55:37: the armed trail came back with an id, was
+        logged as "locks in ~+2% ROI", and Binance's order history shows it
+        REJECTED. One second later the adaptive trail was cancelled as
+        "superseded" in favour of an order that did not exist. The position
+        held nothing for 27 seconds until a floor finally landed at +1.1%,
+        after five -2021 refusals, having peaked at +7.3%.
+
+        Returns True only on POSITIVE confirmation. An unreadable book returns
+        False, which keeps the existing protection in place — being unable to
+        confirm and being rejected must lead to the same safe outcome.
+        """
+        if not order_id:
+            return False
+        try:
+            wanted = str(order_id)
+            unified = str(getattr(pos, "symbol", "") or "")
+            base = unified.split(":")[0].replace("/", "").upper()
+            for o in (self._algo_orders() or []):
+                if not isinstance(o, dict):
+                    continue
+                sym = str(o.get("symbol") or "").upper()
+                if sym and sym != base and sym != unified.upper():
+                    continue
+                for key in ("algoId", "orderId", "id", "clientAlgoId"):
+                    if str(o.get(key) or "") == wanted:
+                        return True
+            log.error(
+                f"{pos.symbol}: {what} id={wanted} is NOT in the algo book — "
+                f"the exchange accepted the call and refused the order. "
+                f"Existing protection is being KEPT.")
+            self._record(pos.symbol, "order_not_resting", f"{what} {wanted}")
+            return False
+        except Exception as e:
+            log.warning(
+                f"{pos.symbol}: could not confirm {what} is resting "
+                f"({_safe_err(e)}) — keeping existing protection.")
+            return False
+
     def _accepted_id(self, pos: FuturesPosition, order: dict, what: str) -> str | None:
         """
         The order id, but only if the exchange actually took the order.
@@ -2391,7 +2440,40 @@ class FuturesGuardian:
                           f"keeping the fixed stop")
                 self._record(pos.symbol, "trail_failed", str(e))
 
+            # GATE THE CANCELS, NOT THE RECORD.
+            #
+            # The response cannot tell us whether the order took: status is
+            # empty on every algo reply and rejection arrives afterwards.
+            # 牛来 2026-09-20 06:55:37 came back with an id, was logged as
+            # protection, and Binance rejected it — one second later the
+            # adaptive trail was cancelled as "superseded" in favour of
+            # nothing, and the position held no trail for 27 seconds.
+            #
+            # But the book can also simply LAG a placement by a cycle, and
+            # discarding the id then would mean arming never sticks. So the
+            # trail stays recorded either way — a phantom id is caught by the
+            # audit — and only the CANCELS wait for positive confirmation.
+            # Unconfirmed means keep what is already protecting the position
+            # and try the supersede again next cycle.
+            superseded_ok = bool(trail_id) and self._confirm_resting(
+                pos, trail_id, "ARMED trailing stop")
+            if trail_id and not superseded_ok:
+                log.warning(
+                    f"{pos.symbol}: the armed trail is not visible in the algo "
+                    f"book yet — KEEPING the adaptive trail and the fixed stop "
+                    f"until it is. No protection is removed on an unconfirmed "
+                    f"placement.")
+
             if trail_id:
+                # RECORDED regardless of confirmation. A phantom id is caught
+                # by the audit; discarding a real one because the book lagged
+                # a cycle would mean arming never sticks at all.
+                state.native_trail_id = trail_id
+                self._all_stop_ids.setdefault(pos.symbol, [])
+                if trail_id not in self._all_stop_ids[pos.symbol]:
+                    self._all_stop_ids[pos.symbol].append(trail_id)
+
+            if trail_id and superseded_ok:
                 # The armed trail SUPERSEDES the adaptive one — it is tighter
                 # (GUARD_TRAIL_CALLBACK_ROI, typically 0.15% of price, against
                 # the adaptive trail's stop-distance ~1.5%), so the wide one
@@ -2430,15 +2512,12 @@ class FuturesGuardian:
                         f"{pos.symbol}: armed with NO fixed stop id on record "
                         f"(state lost, or the order listing could not see it). "
                         f"Any existing stop is untracked.")
-                state.native_trail_id = trail_id
                 state.stop_order_id = None
                 # The trail has now REPLACED a fixed stop, which is what lets
-                # manage_position hand protection over to it.
+                # manage_position hand protection over to it. Set ONLY on the
+                # confirmed path: an unconfirmed trail has replaced nothing,
+                # and claiming otherwise would suppress the fixed stop.
                 state.armed_replaced_stop = True
-                # Track the trail too, so close-time cleanup cancels it.
-                self._all_stop_ids.setdefault(pos.symbol, [])
-                if trail_id not in self._all_stop_ids[pos.symbol]:
-                    self._all_stop_ids[pos.symbol].append(trail_id)
                 # Report the callbackRate actually sent, not the raw config
                 # value — printing trail_callback_pct made a correctly-placed
                 # 0.25% trail look like a 1.0% one.

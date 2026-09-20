@@ -1717,11 +1717,17 @@ def test_arming_cancels_the_adaptive_trail_rather_than_stacking():
     import inspect
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian.manage_position)
-    i = src.index("if trail_id:")
+    # Sliced to the SUPERSEDE block, not a guessed number of characters. The
+    # cancels are now gated on _confirm_resting, so the comment explaining why
+    # sits between "if trail_id:" and the cancel itself.
+    i = src.index("if trail_id and superseded_ok:")
     block = src[i:i + 1400]
     assert "state.adaptive_trail_id" in block
     assert "superseded by the" in block
     assert "state.adaptive_trail_id = None" in block
+    # And it must never run on an unconfirmed placement.
+    assert "superseded_ok" in src
+    assert "_confirm_resting(" in src
 
 
 def test_the_adaptive_trail_is_not_placed_once_a_trail_is_armed():
