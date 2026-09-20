@@ -74,7 +74,8 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
          stop_ids: dict | None = None,
          pending_cancels: dict | None = None,
          wallet_start: float | None = None,
-         asset_basis: dict | None = None) -> bool:
+         asset_basis: dict | None = None,
+         wallet_start_basis: str = "") -> bool:
     """Persist the state that matters across a restart."""
     payload = {
         "schema": SCHEMA,
@@ -140,6 +141,9 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
         # Cost basis per non-USDT asset, recorded once. Persisted so a restart
         # cannot re-base the fee reserve at a new price and invent P&L.
         "asset_basis": dict(asset_basis or {}),
+        # "account" once wallet_start includes the fee reserve. Absent means
+        # the value predates v3.61.1 and is USDT-only.
+        "wallet_start_basis": str(wallet_start_basis or ""),
     }
     return _atomic_write(path, payload)
 

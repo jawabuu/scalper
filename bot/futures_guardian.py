@@ -2650,6 +2650,10 @@ class FuturesGuardian:
             self._asset_basis = dict(data.get("asset_basis") or {})
         except Exception:
             self._asset_basis = {}
+        # A baseline written before v3.61.1 is in USDT-only units. Comparing it
+        # against an account-value wallet_now invents a gain of exactly the
+        # reserve, so it is migrated once rather than left to mislead.
+        self._wallet_start_basis = str(data.get("wallet_start_basis") or "")
         if data.get("wallet_start") and self.wallet_start is None:
             self.wallet_start = float(data["wallet_start"])
         with self._lock:
@@ -2759,6 +2763,8 @@ class FuturesGuardian:
                            pending_cancels=pending,
                            wallet_start=self.wallet_start,
                            asset_basis=getattr(self, "_asset_basis", {}),
+                           wallet_start_basis=getattr(
+                               self, "_wallet_start_basis", ""),
                            safety=getattr(self, "_safety_snapshot", lambda: {})())
 
     def run_cycle(self):
@@ -2804,9 +2810,36 @@ class FuturesGuardian:
                 else:
                     self._balance_outliers = 0
             self._wallet_balance_cached = val
+            if (self.wallet_start and val > 0
+                    and getattr(self, "_wallet_start_basis", "") != "account"):
+                # One-time migration. The stored baseline is USDT-only; the
+                # cards now compare it against USDT + reserve, which invents a
+                # gain of exactly the reserve. Add the reserve once.
+                try:
+                    res = float(self.account_value().get("reserve") or 0.0)
+                except Exception:
+                    res = 0.0
+                if res:
+                    prev = self.wallet_start
+                    self.wallet_start = float(prev) + res
+                    log.warning(
+                        f"Migrated the reconciliation baseline to account-value "
+                        f"units: {prev:.2f} -> {self.wallet_start:.2f} "
+                        f"(+{res:.2f} fee reserve). Without this the account "
+                        f"return read high by exactly the reserve.")
+                self._wallet_start_basis = "account"
+                self.save_state()
             if self.wallet_start is None and val > 0:
-                self.wallet_start = val
-                log.info(f"Reconciliation baseline: wallet {val:.2f} USDT")
+                # ACCOUNT-VALUE units, matching what the cards read. Recording
+                # it in USDT-only units while wallet_now included the reserve
+                # produced a phantom gain of exactly the reserve: live showed
+                # ACCOUNT RETURN +3.01% and gap +$2.86 on a $2.86 BNB balance.
+                av = self.account_value().get("value") or val
+                self.wallet_start = float(av)
+                self._wallet_start_basis = "account"
+                log.info(f"Reconciliation baseline: account value "
+                         f"{av:.2f} USDT (wallet {val:.2f} + reserve "
+                         f"{av - val:.2f})")
         except Exception as e:
             log.debug(f"balance fetch failed: {e}")
 
@@ -4102,14 +4135,43 @@ class FuturesGuardian:
                     for a in (assets or []) if isinstance(a, dict)}
             prices = fee_reserve_basis(
                 seen, self._asset_basis, self._fee_asset_prices())
-            value, per, unpriced = resolve_account_value(bal, prices)
-            if not value:
+            # Build the total as USDT + NON-USDT, never by summing the whole
+            # assets[] array.
+            #
+            # v3.61.0 summed everything and shipped a doubling bug: demo read
+            # +100.00% with gap +$5000 on a 5000 wallet, i.e. wallet_now came
+            # back as 10000. Any payload that lists USDT twice, or carries a
+            # total row alongside the per-asset rows, double-counts the margin
+            # balance — which is the largest number there.
+            #
+            # resolve_usdt_balance is the one resolver sizing already trusts,
+            # so taking USDT from it and adding only the reserve makes the
+            # total impossible to double-count by construction.
+            _, per, unpriced = resolve_account_value(bal, prices)
+            if not per:
+                # No usable assets array. The USDT figure is still correct, but
+                # say so — a silent "account_value" would imply the reserve was
+                # measured and found to be zero.
                 out["source"] = "usdt-only (no assets array)"
                 out["value"] = out["usdt"]
                 out["reserve"] = 0.0
                 return out
-            out.update(value=value, per_asset=per, unpriced=unpriced)
-            out["reserve"] = round(value - out["usdt"], 8)
+            stable = ("USDT", "BUSD", "USDC", "FDUSD")
+            reserve = 0.0
+            for name, d in (per or {}).items():
+                if str(name).upper() in stable:
+                    continue
+                v = (d or {}).get("usdt")
+                if v:
+                    reserve += float(v)
+            out.update(per_asset=per, unpriced=unpriced)
+            out["reserve"] = round(reserve, 8)
+            out["value"] = round(out["usdt"] + reserve, 8)
+            if not out["value"]:
+                out["source"] = "usdt-only (no assets array)"
+                out["value"] = out["usdt"]
+                out["reserve"] = 0.0
+                return out
             if unpriced:
                 out["source"] = f"account_value (unpriced: {','.join(unpriced)})"
             return out

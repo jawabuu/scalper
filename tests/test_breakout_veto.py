@@ -6710,3 +6710,81 @@ def test_the_return_cards_read_account_value():
     src = inspect.getsource(api)
     assert src.count("wallet_now=_account_wallet(_guardian)") == 3
     assert "g.account_value()" in src
+
+
+# ── v3.61.0 shipped two card bugs; both are pinned here ─────────────────────
+# DEMO showed ACCOUNT RETURN +100.00% with gap +$5000 on a $5000 wallet, i.e.
+# wallet_now came back as 10000 — resolve_account_value summed the whole
+# assets[] array, so a payload listing USDT twice doubled the margin balance.
+# LIVE showed +3.01% with gap +$2.86 on a $2.86 BNB balance — the baseline was
+# stored in USDT-only units while the card read USDT + reserve, so the reserve
+# was counted on one side only.
+
+def _av_guardian(rate=749.40, cached=0.0):
+    from bot.futures_guardian import FuturesGuardian
+    g = FuturesGuardian.__new__(FuturesGuardian)
+    g._asset_basis = {}
+    g._wallet_balance_cached = cached
+    g._fee_asset_rate = lambda a: rate if a == "BNB" else None
+    return g
+
+
+def test_a_duplicated_usdt_row_cannot_double_the_account():
+    """The demo bug: summing assets[] doubled the largest number there."""
+    g = _av_guardian()
+    dup = {"info": {"totalWalletBalance": "5000.0", "assets": [
+        {"asset": "USDT", "walletBalance": "5000.0"},
+        {"asset": "USDT", "walletBalance": "5000.0"}]}}
+    assert g.account_value(dup)["value"] == 5000.0
+
+
+def test_a_total_row_beside_the_asset_rows_cannot_inflate_it():
+    g = _av_guardian()
+    bal = {"info": {"totalWalletBalance": "86.28", "assets": [
+        {"asset": "USDT", "walletBalance": "86.28"},
+        {"asset": "USDT", "walletBalance": "86.28"},
+        {"asset": "BNB", "walletBalance": "0.00381285"}]}}
+    r = g.account_value(bal)
+    assert round(r["value"], 2) == 89.14
+    assert round(r["reserve"], 2) == 2.86
+
+
+def test_the_total_is_usdt_plus_reserve_not_a_sum_of_everything():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian.account_value)
+    assert 'out["value"] = round(out["usdt"] + reserve, 8)' in src
+
+
+def test_the_baseline_is_recorded_in_account_value_units():
+    """Mismatched units invent a gain of exactly the reserve."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert 'av = self.account_value().get("value") or val' in src
+    assert 'self._wallet_start_basis = "account"' in src
+
+
+def test_a_legacy_baseline_is_migrated_once():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert 'getattr(self, "_wallet_start_basis", "") != "account"' in src
+    assert "Migrated the reconciliation baseline" in src
+
+
+def test_the_basis_marker_is_persisted():
+    import inspect
+    import bot.futures_state as fs
+    import bot.futures_guardian as fg
+    assert '"wallet_start_basis": str(wallet_start_basis or "")' in \
+        inspect.getsource(fs)
+    assert 'self._wallet_start_basis = str(data.get("wallet_start_basis") or "")' \
+        in inspect.getsource(fg)
+
+
+def test_an_unusable_assets_array_says_so_rather_than_implying_zero_reserve():
+    g = _av_guardian(cached=86.28)
+    r = g.account_value({"info": {"assets": "not-a-list"}})
+    assert r["value"] == 86.28
+    assert "usdt-only" in r["source"]
