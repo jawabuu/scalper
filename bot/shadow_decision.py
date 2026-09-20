@@ -234,6 +234,9 @@ class ShadowDecision:
     # rows loadable.
     structure_intact: float = 0.0
     composed_score: float = 0.0
+    # Which iteration the floating `model` alias pointed at when this row was
+    # written. See ShadowLogger._capture_model_release.
+    model_release: str = None
     weights: dict = None
     enter_threshold: float = 0.0
 
@@ -329,13 +332,15 @@ class ShadowDecisionLogger:
     trade is worse than no instrumentation.
     """
 
-    def __init__(self, path: str = DEFAULT_PATH, model: str = "jev",
+    def __init__(self, path: str = DEFAULT_PATH, model: str = "jev-latest",
                  max_per_minute: int = MAX_PER_MINUTE, client=None):
         self.path = Path(path)
         self.model = model
         self.max_per_minute = max_per_minute
         self._client = client              # injected in tests
         self._client_broken = False
+        # Which iteration the alias pointed at — see _capture_model_release.
+        self._model_release: str | None = None
         self._lock = threading.Lock()
         self._recent: list[float] = []
         self.dropped_for_rate = 0
@@ -351,7 +356,13 @@ class ShadowDecisionLogger:
             return True
 
     def _get_client(self):
-        if self._client is not None or self._client_broken:
+        # Breaker FIRST. It was previously reached only when self._client was
+        # still None, so a client that constructed fine and then had its model
+        # name rejected went on being handed out: the flag latched and gated
+        # nothing.
+        if self._client_broken:
+            return None
+        if self._client is not None:
             return self._client
         if not os.environ.get("TYPESAFE_API_KEY"):
             log.warning("shadow decision: TYPESAFE_API_KEY is not set — "
@@ -366,7 +377,40 @@ class ShadowDecisionLogger:
                         f"— disabled, nothing will be logged.")
             self._client_broken = True
             return None
+        self._capture_model_release()
         return self._client
+
+    def _capture_model_release(self) -> None:
+        """
+        Record WHICH ITERATION the model alias currently points at.
+
+        Every name GET /v1/models offers is a floating alias — there is no
+        dated id to pin — so `model` is identical on every row forever, even
+        across a silent swap of the thing behind it. That defeats the whole
+        point of recording raw components: rows judged by different models
+        would be re-fitted together with nothing to separate them.
+
+        `release_date` belongs to whatever the alias resolves to today, so it
+        moves when the alias moves. Group by it offline: constant across the
+        file means the comparison is clean, a change means you have found the
+        boundary instead of averaging across it.
+
+        One request per process start, not per judgement. Never fatal — a
+        missing stamp costs provenance, not judgements.
+
+        NOTE the API returns a full timestamp here despite its own schema
+        documenting YYYY-MM-DD, and types the field as a bare str, so it
+        arrives unvalidated. Stored verbatim; treat it as an opaque key.
+        """
+        try:
+            self._model_release = next(
+                (m.release_date for m in self._client.models.list().models
+                 if m.name == self.model), None)
+        except Exception as e:
+            log.warning(f"shadow decision: could not read the release stamp "
+                        f"for {self.model!r} ({type(e).__name__}: {e}) — "
+                        f"judgements continue, rows carry no model_release.")
+            self._model_release = None
 
     @staticmethod
     def _questions() -> dict:
@@ -413,8 +457,21 @@ class ShadowDecisionLogger:
             rec = self._parse(symbol, side, bot_decision, state,
                               entry_order_id, result)
         except Exception as e:
-            log.warning(f"shadow decision: {symbol} judgement failed "
-                        f"({type(e).__name__}: {e}) — logged as UNKNOWN.")
+            # A rejected model name is a CONFIG error, not a transient one:
+            # retrying cannot fix it, and the client constructs fine because
+            # the name is only validated server-side, per call. Without this
+            # the loop fires up to max_per_minute doomed requests a minute
+            # indefinitely, each one landing here as an UNKNOWN row.
+            if "Unknown model" in str(e):
+                self._client_broken = True
+                log.error(f"shadow decision: SHADOW_MODEL={self.model!r} was "
+                          f"rejected by the API — shadow logging DISABLED for "
+                          f"this process. Valid names come from "
+                          f"client.models.list(); 'jev' alone is the family, "
+                          f"not an id.")
+            else:
+                log.warning(f"shadow decision: {symbol} judgement failed "
+                            f"({type(e).__name__}: {e}) — logged as UNKNOWN.")
             rec = ShadowDecision(
                 ts=time.time(), symbol=symbol, side=side,
                 bot_decision=bot_decision, jev_verdict="UNKNOWN",
@@ -422,6 +479,7 @@ class ShadowDecisionLogger:
                 regime_aligned=0.0,
                 reasons=[f"jev call failed: {type(e).__name__}: {e}"],
                 entry_order_id=entry_order_id, model=self.model,
+                model_release=self._model_release,
                 fingerprint=FINGERPRINT, inputs_seen=state)
         self._write(rec)
 
@@ -455,6 +513,7 @@ class ShadowDecisionLogger:
             reasons=_reasons(verdict, conviction, exhausted, aligned),
             entry_order_id=entry_order_id,
             model=str(getattr(result, "model", self.model)),
+            model_release=self._model_release,
             fingerprint=FINGERPRINT, inputs_seen=state)
 
     def _write(self, rec: ShadowDecision):

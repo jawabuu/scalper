@@ -177,6 +177,84 @@ def test_a_client_that_raises_still_logs_an_unknown_row(tmp_path):
     assert "502" in line["reasons"][0]
 
 
+# ── The model NAME — never exercised before v3.69.0 ─────────────────────────
+#
+# Every test here injects a fake client, and the real one is constructed with
+# a name the API only validates SERVER-side, per call. So SHADOW_MODEL=jev sat
+# in config and .env.example through every green run and first failed in
+# production, 400 "Unknown model: jev". These pin the two things that made it
+# both possible and expensive.
+
+def test_the_default_model_is_not_the_bare_family_name():
+    # "jev" is the family. Every id the API accepts carries a suffix.
+    from bot.config import BotConfig
+    assert ShadowDecisionLogger().model != "jev"
+    assert ShadowDecisionLogger().model.startswith("jev-")
+    assert BotConfig().shadow_model.startswith("jev-")
+
+
+def test_the_default_model_is_not_the_preview_channel():
+    # Stability beats quality for a measurement rig: preview can move or
+    # vanish mid-run, and rows either side would be silently incomparable.
+    from bot.config import BotConfig
+    assert "preview" not in ShadowDecisionLogger().model
+    assert "preview" not in BotConfig().shadow_model
+
+
+def test_a_rejected_model_name_disables_the_logger_instead_of_retrying(tmp_path):
+    # A config error cannot be fixed by retrying. Before this, every candidate
+    # fired another doomed request — up to SHADOW_MAX_PER_MINUTE a minute,
+    # forever — each landing as an UNKNOWN row.
+    path = tmp_path / "shadow.jsonl"
+    c = _Client(raises=RuntimeError("400 Unknown model: jev"))
+    logger = ShadowDecisionLogger(path=str(path), client=c)
+    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    assert logger._client_broken, "a rejected model name must trip the breaker"
+    logger.decide_async("Y/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    time.sleep(0.2)
+    assert len(c.calls) == 1, "no further calls after the name was rejected"
+
+
+def test_a_transient_failure_does_NOT_disable_the_logger(tmp_path):
+    # The mirror of the above: a 502 is worth retrying and must not latch.
+    path = tmp_path / "shadow.jsonl"
+    c = _Client(raises=RuntimeError("502 Bad Gateway"))
+    logger = ShadowDecisionLogger(path=str(path), client=c)
+    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    assert not logger._client_broken
+    logger.decide_async("Y/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: len(c.calls) == 2)
+
+
+def test_every_row_records_which_iteration_the_alias_pointed_at(tmp_path):
+    # `model` is a floating alias and reads identically forever, including
+    # across a silent swap. model_release is what separates the eras when the
+    # weights are re-fitted offline.
+    path = tmp_path / "shadow.jsonl"
+    c = _Client()
+    logger = ShadowDecisionLogger(path=str(path), client=c)
+    logger._model_release = "2026-09-10T18:38:01.391457+00:00"
+    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="ENTER")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    line = json.loads(path.read_text().strip().splitlines()[0])
+    assert line["model_release"] == "2026-09-10T18:38:01.391457+00:00"
+
+
+def test_an_unreadable_release_stamp_costs_provenance_not_judgements(tmp_path):
+    # Losing the stamp must never cost a judgement.
+    path = tmp_path / "shadow.jsonl"
+    c = _Client(raises=RuntimeError("502"))
+    logger = ShadowDecisionLogger(path=str(path), client=c)
+    assert logger._model_release is None
+    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    line = json.loads(path.read_text().strip().splitlines()[0])
+    assert line["model_release"] is None
+    assert line["jev_verdict"] == "UNKNOWN"
+
+
 def test_a_missing_component_is_logged_as_unknown_not_guessed(tmp_path):
     """
     There is no verdict STRING to mis-parse any more. The equivalent risk is a

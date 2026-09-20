@@ -521,8 +521,16 @@ class BotConfig:
     # long-term.
     shadow_enabled: bool = field(default_factory=lambda: _env_bool(
         "SHADOW_ENABLED", False))
+    # "jev" is the model FAMILY, not an id the API accepts — sending it bare
+    # returns 400 "Unknown model: jev" on every call. Valid names carry a
+    # suffix; GET /v1/models offers exactly two, both floating aliases:
+    #   jev-latest   — current general model, the SDK's own default
+    #   jev-preview  — "should be better in most ways" (unquantified)
+    # Deliberately NOT preview: for a measurement rig stability beats quality,
+    # and a preview channel can move or vanish mid-run. Evaluating preview is
+    # a deliberate A/B with the channel recorded per row, not a default.
     shadow_model: str = field(default_factory=lambda: _env(
-        "SHADOW_MODEL", "jev"))
+        "SHADOW_MODEL", "jev-latest"))
     shadow_path: str = field(default_factory=lambda: _env(
         "SHADOW_PATH", "logs/shadow_decisions.jsonl"))
     # Ceiling on jev calls per minute from the shadow logger specifically —
