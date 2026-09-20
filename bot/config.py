@@ -529,6 +529,8 @@ class BotConfig:
     # Deliberately NOT preview: for a measurement rig stability beats quality,
     # and a preview channel can move or vanish mid-run. Evaluating preview is
     # a deliberate A/B with the channel recorded per row, not a default.
+    # The alias is resolved server-side: rows record the concrete version the
+    # response returns (e.g. jev-1.13.0), not the alias sent.
     shadow_model: str = field(default_factory=lambda: _env(
         "SHADOW_MODEL", "jev-latest"))
     shadow_path: str = field(default_factory=lambda: _env(

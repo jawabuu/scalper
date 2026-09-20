@@ -17,15 +17,43 @@ import pytest
 from bot.shadow_decision import (
     ShadowDecisionLogger, ShadowDecision, read_decisions, summarize,
     FINGERPRINT, _QUESTION_SPECS, _candidate_state, _reasons,
-    VALID_VERDICTS,
+    VALID_VERDICTS, _noul_confidence, _component_confidence,
 )
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
 class _Ans:
+    """
+    DEPRECATED, kept only for rows that do not care about answer shape.
+
+    This fake accepted ANY keyword, so tests happily gave nouls a
+    `confidence` attribute that the real NoulAnswer has never had. That is
+    exactly how `confidence` stayed 0.0 on every production row while this
+    file was green — the assertion read a field the test itself invented.
+    Prefer _Noul and _Score below, which match the SDK schema.
+    """
     def __init__(self, **kw):
         self.__dict__.update(kw)
+
+
+class _Noul:
+    """Mirrors typesafe_sdk NoulAnswer: `noul` only. NO confidence field."""
+    __slots__ = ("type", "noul")
+
+    def __init__(self, noul):
+        self.type = "noul"
+        self.noul = float(noul)
+
+
+class _Score:
+    """Mirrors typesafe_sdk ScoreAnswer: `score` AND `confidence`."""
+    __slots__ = ("type", "score", "confidence")
+
+    def __init__(self, score, confidence):
+        self.type = "score"
+        self.score = float(score)
+        self.confidence = float(confidence)
 
 
 class _Result:
@@ -51,14 +79,12 @@ class _Result:
             structure_intact = 0.9 if want_enter else 0.2
         self.model = "jev-test"
         self.choices = {}
-        self.scores = {"conviction": _Ans(score=conviction,
-                                          confidence=confidence)}
+        self.scores = {"conviction": _Score(conviction, confidence)}
+        # Nouls carry NO confidence — it is derived from distance off 0.5.
         self.nouls = {
-            "looks_exhausted": _Ans(noul=looks_exhausted,
-                                    confidence=confidence),
-            "regime_aligned": _Ans(noul=regime_aligned, confidence=confidence),
-            "structure_intact": _Ans(noul=structure_intact,
-                                     confidence=confidence)}
+            "looks_exhausted": _Noul(looks_exhausted),
+            "regime_aligned": _Noul(regime_aligned),
+            "structure_intact": _Noul(structure_intact)}
 
 
 class _Client:
@@ -228,33 +254,6 @@ def test_a_transient_failure_does_NOT_disable_the_logger(tmp_path):
     assert _wait_for(lambda: len(c.calls) == 2)
 
 
-def test_every_row_records_which_iteration_the_alias_pointed_at(tmp_path):
-    # `model` is a floating alias and reads identically forever, including
-    # across a silent swap. model_release is what separates the eras when the
-    # weights are re-fitted offline.
-    path = tmp_path / "shadow.jsonl"
-    c = _Client()
-    logger = ShadowDecisionLogger(path=str(path), client=c)
-    logger._model_release = "2026-09-10T18:38:01.391457+00:00"
-    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="ENTER")
-    assert _wait_for(lambda: path.exists() and path.read_text().strip())
-    line = json.loads(path.read_text().strip().splitlines()[0])
-    assert line["model_release"] == "2026-09-10T18:38:01.391457+00:00"
-
-
-def test_an_unreadable_release_stamp_costs_provenance_not_judgements(tmp_path):
-    # Losing the stamp must never cost a judgement.
-    path = tmp_path / "shadow.jsonl"
-    c = _Client(raises=RuntimeError("502"))
-    logger = ShadowDecisionLogger(path=str(path), client=c)
-    assert logger._model_release is None
-    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
-    assert _wait_for(lambda: path.exists() and path.read_text().strip())
-    line = json.loads(path.read_text().strip().splitlines()[0])
-    assert line["model_release"] is None
-    assert line["jev_verdict"] == "UNKNOWN"
-
-
 def test_a_missing_component_is_logged_as_unknown_not_guessed(tmp_path):
     """
     There is no verdict STRING to mis-parse any more. The equivalent risk is a
@@ -296,13 +295,67 @@ def test_the_weights_and_threshold_are_recorded_on_every_row(tmp_path):
 def test_confidence_is_the_weakest_component_not_an_average(tmp_path):
     """A verdict from four judgements is only as good as its weakest input."""
     path = tmp_path / "s.jsonl"
-    r = _Result(verdict="enter")
-    r.nouls["regime_aligned"] = _Ans(noul=0.9, confidence=0.2)
+    r = _Result(verdict="enter", confidence=0.9)
+    # 0.55 is barely off the midpoint -> the weakest component by far.
+    r.nouls["regime_aligned"] = _Noul(0.55)
     logger = ShadowDecisionLogger(path=str(path), client=_Client(r))
     logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="ENTER")
     assert _wait_for(lambda: path.exists() and path.read_text().strip())
     line = json.loads(path.read_text().strip().splitlines()[-1])
-    assert line["confidence"] == 0.2
+    assert line["confidence"] == 0.1, "must take the weakest, not the average"
+
+
+# ── Confidence was a DEAD FIELD until v3.70.0 ───────────────────────────────
+#
+# NoulAnswer has no `confidence` attribute and never did. _parse read one with
+# a silent `or 0.0` fallback, and three of the four questions are nouls, so
+# min() took that zero: `confidence` was 0.0 on EVERY row ever written while
+# reading like a real measurement. These pin the derivation and, more
+# importantly, that the field VARIES.
+
+def test_confidence_is_not_constant_across_differing_judgements(tmp_path):
+    # The regression that matters. A field identical on every row measures
+    # nothing, however plausible its value looks.
+    path = tmp_path / "s.jsonl"
+    for noul in (0.5, 0.75, 0.99):
+        r = _Result(verdict="enter", confidence=0.9)
+        r.nouls["regime_aligned"] = _Noul(noul)
+        ShadowDecisionLogger(path=str(path), client=_Client(r)).decide_async(
+            "X/USDT:USDT", "short", _row(), bot_decision="ENTER")
+        assert _wait_for(lambda n=noul: path.exists() and
+                         len(path.read_text().strip().splitlines()) ==
+                         [0.5, 0.75, 0.99].index(n) + 1)
+    got = [json.loads(l)["confidence"]
+           for l in path.read_text().strip().splitlines()]
+    assert len(set(got)) == 3, f"confidence must vary with the answers: {got}"
+    assert got == sorted(got), "and rise as the nouls move off the midpoint"
+
+
+def test_a_noul_at_the_midpoint_is_zero_confidence():
+    # 0.5 is the model saying it cannot tell. That is the row worth flagging.
+    assert _noul_confidence(0.5) == 0.0
+
+
+def test_a_confident_no_counts_as_much_as_a_confident_yes():
+    # Symmetric on purpose: only the middle is uninformative.
+    assert _noul_confidence(0.05) == _noul_confidence(0.95)
+    assert _noul_confidence(0.05) == 0.9
+
+
+def test_an_answer_with_no_usable_confidence_raises_not_zeroes(tmp_path):
+    # The `or 0.0` fallback is what let a missing field read as a real
+    # measurement. A component whose confidence cannot be established is a
+    # parse failure and belongs in the UNKNOWN path.
+    with pytest.raises(ValueError):
+        _component_confidence(_Ans(type="mystery"))
+
+
+def test_nouls_carry_no_confidence_attribute():
+    # Pins the fake to the SDK schema. If NoulAnswer ever gains a confidence
+    # field, this fails and _component_confidence should be revisited.
+    from typesafe_sdk._schemas.models import NoulAnswer, ScoreAnswer
+    assert "confidence" not in NoulAnswer.model_fields
+    assert "confidence" in ScoreAnswer.model_fields
 
 
 def test_an_invalid_bot_decision_is_rejected_before_any_call(tmp_path):

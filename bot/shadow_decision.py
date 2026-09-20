@@ -209,6 +209,43 @@ VALID_VERDICTS = ("ENTER", "SKIP", "UNKNOWN")
 VALID_BOT_DECISIONS = ("ENTER", "SKIP")
 
 
+def _noul_confidence(noul: float) -> float:
+    """
+    A noul IS its own confidence — there is no separate field on NoulAnswer
+    (only ScoreAnswer and ChoiceAnswer carry one). Per the API's own schema:
+    values near 1 favour yes, near 0 favour no, and near 0.5 indicate
+    uncertainty. So distance off the midpoint, doubled onto 0–1:
+
+        0.50 -> 0.0    0.75 -> 0.5    0.95 -> 0.9    0.05 -> 0.9
+
+    Symmetric on purpose: a confident NO is as usable a judgement as a
+    confident YES. Only the middle is uninformative.
+
+    Before v3.70.0 this did not exist and _parse read a `confidence` attribute
+    off nouls with a silent `or 0.0` fallback. Three of the four questions are
+    nouls, so min() took that zero and `confidence` was 0.0 on EVERY row ever
+    written — a dead field that read like a measurement.
+    """
+    return round(2.0 * abs(float(noul) - 0.5), 4)
+
+
+def _component_confidence(answer) -> float:
+    """
+    Confidence for one answer, by its actual type. Raises if neither shape is
+    present: a component whose confidence cannot be established is a parse
+    failure and belongs in the UNKNOWN path, NOT silently floored to zero.
+    """
+    noul = getattr(answer, "noul", None)
+    if noul is not None:
+        return _noul_confidence(noul)
+    conf = getattr(answer, "confidence", None)
+    if conf is None:
+        raise ValueError(
+            f"answer {type(answer).__name__} carries neither `noul` nor "
+            f"`confidence` — cannot establish component confidence")
+    return float(conf)
+
+
 @dataclass
 class ShadowDecision:
     """One row of logs/shadow_decisions.jsonl. Field names match JEV-BRIEF.md
@@ -234,9 +271,6 @@ class ShadowDecision:
     # rows loadable.
     structure_intact: float = 0.0
     composed_score: float = 0.0
-    # Which iteration the floating `model` alias pointed at when this row was
-    # written. See ShadowLogger._capture_model_release.
-    model_release: str = None
     weights: dict = None
     enter_threshold: float = 0.0
 
@@ -339,8 +373,6 @@ class ShadowDecisionLogger:
         self.max_per_minute = max_per_minute
         self._client = client              # injected in tests
         self._client_broken = False
-        # Which iteration the alias pointed at — see _capture_model_release.
-        self._model_release: str | None = None
         self._lock = threading.Lock()
         self._recent: list[float] = []
         self.dropped_for_rate = 0
@@ -377,40 +409,7 @@ class ShadowDecisionLogger:
                         f"— disabled, nothing will be logged.")
             self._client_broken = True
             return None
-        self._capture_model_release()
         return self._client
-
-    def _capture_model_release(self) -> None:
-        """
-        Record WHICH ITERATION the model alias currently points at.
-
-        Every name GET /v1/models offers is a floating alias — there is no
-        dated id to pin — so `model` is identical on every row forever, even
-        across a silent swap of the thing behind it. That defeats the whole
-        point of recording raw components: rows judged by different models
-        would be re-fitted together with nothing to separate them.
-
-        `release_date` belongs to whatever the alias resolves to today, so it
-        moves when the alias moves. Group by it offline: constant across the
-        file means the comparison is clean, a change means you have found the
-        boundary instead of averaging across it.
-
-        One request per process start, not per judgement. Never fatal — a
-        missing stamp costs provenance, not judgements.
-
-        NOTE the API returns a full timestamp here despite its own schema
-        documenting YYYY-MM-DD, and types the field as a bare str, so it
-        arrives unvalidated. Stored verbatim; treat it as an opaque key.
-        """
-        try:
-            self._model_release = next(
-                (m.release_date for m in self._client.models.list().models
-                 if m.name == self.model), None)
-        except Exception as e:
-            log.warning(f"shadow decision: could not read the release stamp "
-                        f"for {self.model!r} ({type(e).__name__}: {e}) — "
-                        f"judgements continue, rows carry no model_release.")
-            self._model_release = None
 
     @staticmethod
     def _questions() -> dict:
@@ -479,7 +478,6 @@ class ShadowDecisionLogger:
                 regime_aligned=0.0,
                 reasons=[f"jev call failed: {type(e).__name__}: {e}"],
                 entry_order_id=entry_order_id, model=self.model,
-                model_release=self._model_release,
                 fingerprint=FINGERPRINT, inputs_seen=state)
         self._write(rec)
 
@@ -497,7 +495,10 @@ class ShadowDecisionLogger:
         # a verdict assembled from four judgements is only as trustworthy as
         # its weakest input, and averaging would hide exactly the case worth
         # abstaining on.
-        confs = [float(getattr(o, "confidence", 0.0) or 0.0)
+        #
+        # Nouls have no confidence FIELD — it is derived from how far off 0.5
+        # they sit. See _noul_confidence.
+        confs = [_component_confidence(o)
                  for o in (conv,
                            result.nouls["looks_exhausted"],
                            result.nouls["regime_aligned"],
@@ -513,7 +514,6 @@ class ShadowDecisionLogger:
             reasons=_reasons(verdict, conviction, exhausted, aligned),
             entry_order_id=entry_order_id,
             model=str(getattr(result, "model", self.model)),
-            model_release=self._model_release,
             fingerprint=FINGERPRINT, inputs_seen=state)
 
     def _write(self, rec: ShadowDecision):
