@@ -625,17 +625,26 @@ def _halt_trader(start=5000.0):
     return a
 
 
-def test_clearing_a_halt_rebases_the_baseline():
+def test_clearing_a_halt_rebases_the_HALT_reference_not_the_day():
     """
-    reset_halt cleared the reason but left day_start_balance alone, so the next
-    cycle recomputed the same drawdown and halted again. The halt appeared to
-    clear and immediately returned.
+    reset_halt cleared the reason but left the baseline alone, so the next
+    cycle recomputed the same drawdown and halted again — it appeared to clear
+    and immediately returned.
+
+    It used to fix that by moving day_start_balance. That field is what the
+    TODAY card measures from, so moving it restated the day's return as a side
+    effect of clearing a halt. The halt now carries its OWN base and peak, and
+    only those move.
     """
     a = _halt_trader()
+    day_base = a.state.day_start_balance
     a._check_daily_drawdown(4700.0)
     assert a.state.halted_reason
     a.reset_halt(balance=4700.0)
-    assert a.state.day_start_balance == pytest.approx(4700.0)
+    assert a.state.halt_base_balance == pytest.approx(4700.0)
+    assert a.state.halt_peak_balance == pytest.approx(4700.0)
+    assert a.state.day_start_balance == pytest.approx(day_base), \
+        "clearing a halt must not restate the day"
     a._check_daily_drawdown(4700.0)
     assert a.state.halted_reason is None, "halt re-fired straight after clearing"
 
@@ -938,3 +947,41 @@ def test_every_session_defaults_to_on():
     cfg = AutoTradeConfig()
     assert set(cfg.sessions) == {"AS", "EU", "OV", "US"}
     assert all(v == "L1S1" for v in cfg.sessions.values())
+
+
+def test_both_halt_implementations_use_the_same_reference():
+    """
+    There are TWO daily-limit checks: check_safety (candidate flow) and
+    _check_daily_drawdown (independent of it). v3.57.0's trailing change
+    updated only the first, so the second went on measuring from the day's
+    OPEN — and re-fired immediately after every reset, because a reset
+    deliberately no longer moves day_start_balance.
+    """
+    import inspect
+    from bot.auto_trader import AutoTrader, check_safety
+    for src in (inspect.getsource(AutoTrader._check_daily_drawdown),
+                inspect.getsource(check_safety)):
+        assert "halt_peak_balance" in src
+        assert "halt_base_balance" in src
+
+
+def test_the_independent_check_trails_the_high_too():
+    a = _halt_trader()
+    start = a.state.day_start_balance
+    a._check_daily_drawdown(start * 1.02)          # high set at +2%
+    assert a.state.halted_reason is None
+    # 4800 is only -4.0% from the OPEN — inside the 5% limit — but -5.9% from
+    # the high. Measured from the open this keeps trading; from the peak it
+    # stops. That difference IS the trailing behaviour.
+    a._check_daily_drawdown(start * 0.96)
+    assert a.state.halted_reason, "gave back the day's gains and kept trading"
+    assert "from the high" in a.state.halted_reason
+    assert "-4.0% on the day" in a.state.halted_reason
+
+
+def test_the_independent_check_does_not_restate_the_day():
+    a = _halt_trader()
+    day_base = a.state.day_start_balance
+    a._check_daily_drawdown(day_base * 0.9)
+    assert a.state.halted_reason
+    assert a.state.day_start_balance == pytest.approx(day_base)

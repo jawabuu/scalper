@@ -6290,7 +6290,7 @@ def test_a_day_that_gives_back_its_gains_is_halted():
     """The case the old rule missed entirely: never below the open."""
     b, why = _walk([100, 104, 103, 102, 101, 100.5])
     assert b == 100.5, "should halt on the giveback"
-    assert "from today's high" in why
+    assert "from the high" in why
     assert "104.00" in why
 
 
@@ -6794,3 +6794,91 @@ def test_an_unusable_assets_array_says_so_rather_than_implying_zero_reserve():
     r = g.account_value({"info": {"assets": "not-a-list"}})
     assert r["value"] == 86.28
     assert "usdt-only" in r["source"]
+
+
+# ── Clearing a halt must resume trading, and must not restate the day ───────
+# reset_halt rebased day_start_balance, which was right when the limit
+# measured from the OPEN. v3.57.0 made it trail the high-water mark and left
+# this alone, so the drawdown from the unchanged peak was still over the limit
+# and the next cycle halted again — the exact no-op the method was written to
+# fix, reintroduced by that change.
+#
+# day_start_balance is also what the TODAY card measures from, so moving it
+# would silently restate the day's return as a side effect of clearing a halt.
+# Two concerns, two fields.
+
+def _halted(limit=1.0, start=90.77):
+    from bot.auto_trader import SafetyState, check_safety
+    cfg = _safety_cfg(limit)
+    st = SafetyState(day_start_balance=start, day_peak_balance=start,
+                     halt_base_balance=start, halt_peak_balance=start,
+                     day_key="k")
+    for b in (start, start * 1.005, start * 0.998, start * 0.9945):
+        ok, _ = check_safety(st, cfg, balance=b, open_positions=0,
+                             symbol="X", current_rsi=50.0, side="short")
+        if not ok:
+            return st, cfg, b
+    raise AssertionError("the fixture never halted")
+
+
+def _resume(st, cfg, bal):
+    from bot.auto_trader import check_safety
+    return check_safety(st, cfg, balance=bal, open_positions=0,
+                        symbol="X", current_rsi=50.0, side="short")
+
+
+def test_clearing_a_halt_actually_resumes_trading():
+    st, cfg, bal = _halted()
+    st.halted_reason = None
+    st.halt_base_balance = bal
+    st.halt_peak_balance = bal          # what reset_halt now does
+    ok, why = _resume(st, cfg, bal)
+    assert ok, f"halted again immediately: {why}"
+
+
+def test_rebasing_the_base_alone_is_not_enough():
+    """The regression: the peak is what the limit trails."""
+    st, cfg, bal = _halted()
+    st.halted_reason = None
+    st.halt_base_balance = bal          # peak deliberately left stale
+    ok, _ = _resume(st, cfg, bal)
+    assert not ok, "this is the no-op the fix exists to prevent"
+
+
+def test_clearing_a_halt_leaves_the_day_card_untouched():
+    st, cfg, bal = _halted()
+    day_base, day_peak = st.day_start_balance, st.day_peak_balance
+    st.halted_reason = None
+    st.halt_base_balance = st.halt_peak_balance = bal
+    _resume(st, cfg, bal)
+    assert st.day_start_balance == day_base, "the day's return was restated"
+    assert st.day_peak_balance == day_peak
+
+
+def test_the_allowance_after_a_reset_is_bounded():
+    """One FURTHER allowance, not an exemption."""
+    st, cfg, bal = _halted()
+    st.halted_reason = None
+    st.halt_base_balance = st.halt_peak_balance = bal
+    assert _resume(st, cfg, bal)[0]
+    ok, why = _resume(st, cfg, bal * 0.985)     # another 1.5% down
+    assert not ok and "daily loss limit" in why
+
+
+def test_reset_halt_moves_the_halt_fields_and_not_the_day_fields():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.reset_halt)
+    assert "self.state.halt_base_balance = float(bal)" in src
+    assert "self.state.halt_peak_balance = float(bal)" in src
+    assert "self.state.day_start_balance = float(bal)" not in src
+    assert "self.state.day_peak_balance" not in src
+
+
+def test_the_halt_reference_survives_a_restart():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    for f in ('"halt_base_balance"', '"halt_peak_balance"',
+              's.halt_base_balance = float(data.get("halt_base_balance") or 0.0)'):
+        assert f in src, f

@@ -615,9 +615,17 @@ class SafetyState:
     # rollover is the real 00:00 balance; one taken at a mid-day restart is
     # just "the balance when the process woke up" and must not be presented as
     # the day's starting figure.
-    # The day's high-water mark. The daily loss limit trails this, not the
-    # opening balance, so a day that gives back its gains stops.
+    # The day's high-water mark, for reporting. Never reset by an operator
+    # action, so the TODAY card keeps measuring from real midnight.
     day_peak_balance: float = 0.0
+    # The HALT's own reference, deliberately SEPARATE from the day figures.
+    #
+    # reset_halt has to move a baseline or the next cycle recomputes the same
+    # drawdown and halts again. But day_start_balance is what the TODAY card
+    # measures from, so moving that would silently restate the day's return as
+    # a side effect of clearing a halt. Two concerns, two fields.
+    halt_base_balance: float = 0.0
+    halt_peak_balance: float = 0.0
     day_baseline_at: float = 0.0
     day_baseline_source: str = ""      # rollover | restart | operator
     day_key: str = ""
@@ -662,6 +670,8 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
         state.day_key = key
         state.day_start_balance = balance
         state.day_peak_balance = balance      # the peak resets with the day
+        state.halt_base_balance = balance
+        state.halt_peak_balance = balance
         started = day_start_ts(now)
         state.day_started_at = started
         state.day_baseline_at = now
@@ -813,18 +823,27 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
     # The peak is seeded at the open and updated on every check, so it cannot
     # start below the balance the day began with.
     if halt_on and cfg.daily_loss_limit_pct and state.day_start_balance > 0:
+        # Seed the halt's reference from the day's open the first time.
+        if not state.halt_base_balance:
+            state.halt_base_balance = float(state.day_start_balance)
         if balance > 0:
+            # Reported high: the real day, untouched by operator actions.
             state.day_peak_balance = max(
                 float(state.day_peak_balance or 0.0),
                 float(state.day_start_balance), float(balance))
-        peak = float(state.day_peak_balance or state.day_start_balance)
+            # The halt's high, which a reset is allowed to move.
+            state.halt_peak_balance = max(
+                float(state.halt_peak_balance or 0.0),
+                float(state.halt_base_balance), float(balance))
+        peak = float(state.halt_peak_balance or state.halt_base_balance
+                     or state.day_start_balance)
         drawdown = (peak - balance) / peak * 100
         if drawdown >= cfg.daily_loss_limit_pct:
             # As a RETURN, so "-3.0% on the day" reads the way it should.
             from_open = (balance - state.day_start_balance) / state.day_start_balance * 100
             state.halted_reason = (
-                f"daily loss limit hit: down {drawdown:.1f}% from today's "
-                f"high {peak:.2f} (open {state.day_start_balance:.2f}, "
+                f"daily loss limit hit: down {drawdown:.1f}% from the high "
+                f"{peak:.2f} (day open {state.day_start_balance:.2f}, "
                 f"{from_open:+.1f}% on the day) — auto-trade halted until "
                 f"tomorrow or a manual reset"
             )
@@ -997,6 +1016,8 @@ class AutoTrader:
             "day_start_balance": self.state.day_start_balance,
             "day_started_at": getattr(self.state, "day_started_at", 0.0),
             "day_peak_balance": getattr(self.state, "day_peak_balance", 0.0),
+            "halt_base_balance": getattr(self.state, "halt_base_balance", 0.0),
+            "halt_peak_balance": getattr(self.state, "halt_peak_balance", 0.0),
             "day_baseline_at": getattr(self.state, "day_baseline_at", 0.0),
             "day_baseline_source": getattr(self.state, "day_baseline_source", ""),
             "day_key": self.state.day_key,
@@ -1022,6 +1043,8 @@ class AutoTrader:
         s.day_start_balance = float(data.get("day_start_balance") or 0.0)
         s.day_started_at = float(data.get("day_started_at") or 0.0)
         s.day_peak_balance = float(data.get("day_peak_balance") or 0.0)
+        s.halt_base_balance = float(data.get("halt_base_balance") or 0.0)
+        s.halt_peak_balance = float(data.get("halt_peak_balance") or 0.0)
         s.day_baseline_at = float(data.get("day_baseline_at") or 0.0)
         s.day_baseline_source = str(data.get("day_baseline_source") or "")
         s.day_key = data.get("day_key") or ""
@@ -1275,13 +1298,29 @@ class AutoTrader:
             except Exception:
                 bal = None
         if bal and bal > 0:
-            old_base = self.state.day_start_balance
-            self.state.day_start_balance = float(bal)
+            # Move the HALT's reference only.
+            #
+            # The peak has to move too. v3.57.0 made the limit trail the
+            # high-water mark and left this rebasing the base alone, so the
+            # drawdown from the unchanged peak was still over the limit and
+            # the next cycle halted again — exactly the no-op this method was
+            # written to fix, reintroduced by that change.
+            #
+            # And day_start_balance is NOT touched: it is what the TODAY card
+            # measures from, so moving it would silently restate the day's
+            # return as a side effect of clearing a halt.
+            old_base = self.state.halt_base_balance or self.state.day_start_balance
+            old_peak = self.state.halt_peak_balance or old_base
+            self.state.halt_base_balance = float(bal)
+            self.state.halt_peak_balance = float(bal)
             _log.warning(
-                f"Halt cleared and baseline REBASED {old_base:.2f} -> {bal:.2f}. "
-                f"The next {self.cfg.daily_loss_limit_pct:g}% is measured from "
-                f"here, so this grants one further allowance.")
-            self._record("reset", f"halt cleared, baseline rebased to {bal:.2f}")
+                f"Halt cleared. The HALT reference is rebased "
+                f"{old_base:.2f}/{old_peak:.2f} -> {bal:.2f} (base/peak), so "
+                f"the next {self.cfg.daily_loss_limit_pct:g}% is measured from "
+                f"here — one further allowance. The TODAY card is unchanged: "
+                f"it still measures from {self.state.day_start_balance:.2f}.")
+            self._record("reset", f"halt cleared, halt reference rebased "
+                                  f"to {bal:.2f}; day baseline untouched")
         else:
             _log.warning(
                 "Halt cleared but the balance could not be read, so the "
@@ -1687,11 +1726,29 @@ class AutoTrader:
         start = self.state.day_start_balance
         if start <= 0:
             return
-        dd = (start - balance) / start * 100
+        # SAME REFERENCE AS check_safety. This is the second implementation of
+        # the daily limit, and v3.57.0's trailing change only updated the
+        # other one — so this path went on measuring from the day's OPEN and
+        # re-firing immediately after a reset, because a reset deliberately no
+        # longer moves day_start_balance.
+        if not self.state.halt_base_balance:
+            self.state.halt_base_balance = float(start)
+        if balance > 0:
+            self.state.day_peak_balance = max(
+                float(self.state.day_peak_balance or 0.0), float(start),
+                float(balance))
+            self.state.halt_peak_balance = max(
+                float(self.state.halt_peak_balance or 0.0),
+                float(self.state.halt_base_balance), float(balance))
+        peak = float(self.state.halt_peak_balance
+                     or self.state.halt_base_balance or start)
+        dd = (peak - balance) / peak * 100
         if dd >= self.cfg.daily_loss_limit_pct:
+            on_day = (balance - start) / start * 100
             self.state.halted_reason = (
-                f"daily loss limit hit: down {dd:.1f}% from {start:.2f} — "
-                f"auto-trade halted until tomorrow (UTC) or a manual reset")
+                f"daily loss limit hit: down {dd:.1f}% from the high "
+                f"{peak:.2f} (day open {start:.2f}, {on_day:+.1f}% on the "
+                f"day) — auto-trade halted until tomorrow or a manual reset")
             _log.error(f"AUTO-TRADE HALTED: {self.state.halted_reason}")
             self._record("halted", self.state.halted_reason)
 
