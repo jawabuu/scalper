@@ -20,6 +20,8 @@ roi_pct() and price_for_roi() so the rest of the logic is side-agnostic.
 """
 from __future__ import annotations
 
+import math
+
 import logging
 from dataclasses import dataclass, field
 
@@ -143,6 +145,20 @@ class GuardConfig:
     # price callback means a different ROI give-back at 10x than at 20x, so the
     # same config behaves differently per account. 0 = use trail_callback_pct.
     trail_callback_roi: float = 0.0
+    # Volatility floor for the ARMED trail's callback, as a multiple of the
+    # coin's own movement (the larger of ATR and recent true range). Without
+    # it the callback is ROI/leverage bounded only by Binance's 0.1%-5%, which
+    # at 20x put STG's trail at a quarter of its ATR. 0 disables the floor and
+    # restores the pre-v3.72.0 behaviour.
+    #
+    # 0.75 matches AUTO_CALLBACK_ATR_MULT, the multiplier the ENTRY path has
+    # used for this same judgement all along — the two systems disagreeing is
+    # what produced a 0.45% entry callback and a 0.15% armed one on one coin.
+    trail_callback_atr_mult: float = 0.75
+    # Profit the trail must still lock in once its callback has been floored
+    # by volatility. Sets how much later a volatile position arms: the trail
+    # waits until peak >= callback_give_back + this. See effective_arm_roi.
+    min_trail_lock_roi: float = 2.0
     use_native_trail: bool = True
     # ── Volatility-scaled initial stop ──────────────────────────────────
     # 0 disables (fixed initial_stop_roi is used). When set, the initial stop
@@ -437,44 +453,146 @@ def adopt_state(pos: FuturesPosition, orders: list[dict], current_roi: float,
 _ROI_EPS = 1e-6
 
 
-def is_armed(state: GuardState, cfg: GuardConfig) -> bool:
-    """Has the peak reached the arming threshold (float-tolerant)?"""
-    return state.peak_roi >= (cfg.arm_roi - _ROI_EPS)
+def effective_arm_roi(cfg: GuardConfig, leverage: float = 0.0,
+                      atr_pct: float | None = None,
+                      recent_tr_pct: float | None = None) -> float:
+    """
+    The peak ROI at which arming a trail actually locks in profit.
+
+    Normally just cfg.arm_roi. But a callback floored to sit outside the
+    coin's movement costs callback_roi_at() in ROI terms, and at high leverage
+    that can EXCEED the arm level — at 20x a 0.6% ATR needs a 0.45% callback,
+    which is 9% ROI against a +5% arm. Arming there would set the trail below
+    entry.
+
+    The old code refused to arm at all in that case and kept the fixed stop.
+    That is the wrong resolution: it strips the trail from exactly the
+    volatile positions that most need one, and it was only ever reachable
+    before v3.72.0 at extreme leverage because the unfloored callback was
+    small enough to hide the problem.
+
+    Arming LATER resolves it honestly. Wait until the peak can support a
+    noise-width callback AND still leave min_trail_lock_roi of profit. STG
+    peaked at +23.2% ROI: under this rule it would have armed at +11% with a
+    0.45% callback instead of at +5% with a 0.15% one, and the trail would
+    have held rather than firing on the next ordinary candle.
+    """
+    base = float(getattr(cfg, "arm_roi", 0.0) or 0.0)
+    if not leverage:
+        return base
+    give_back = callback_roi_at(leverage, cfg, atr_pct, recent_tr_pct)
+    needed = give_back + float(getattr(cfg, "min_trail_lock_roi", 0.0) or 0.0)
+    return max(base, needed)
 
 
-def trail_callback_price_pct(leverage: float, cfg: GuardConfig) -> float:
+def is_armed(state: GuardState, cfg: GuardConfig, leverage: float = 0.0,
+             atr_pct: float | None = None,
+             recent_tr_pct: float | None = None) -> bool:
+    """
+    Has the peak reached the arming threshold (float-tolerant)?
+
+    Leverage and volatility are optional: omitted, this is the pre-v3.72.0
+    behaviour against cfg.arm_roi, so callers that do not know a position's
+    volatility are never blocked.
+    """
+    return state.peak_roi >= (
+        effective_arm_roi(cfg, leverage, atr_pct, recent_tr_pct) - _ROI_EPS)
+
+
+def trail_vol_floor_pct(cfg: GuardConfig, atr_pct: float | None,
+                        recent_tr_pct: float | None) -> float:
+    """
+    The narrowest callback that is still OUTSIDE the coin's own movement.
+
+    Takes the LARGER of ATR and recent true range, mirroring the entry path's
+    _callback_for: ATR(14) understates an accelerating move, and it is the
+    accelerating ones the scanner selects. Returns 0 when disabled or when no
+    volatility is known — never guesses a floor from nothing.
+    """
+    if not cfg.trail_callback_atr_mult:
+        return 0.0
+    vol = max((v for v in (atr_pct, recent_tr_pct)
+               if v is not None and v > 0), default=0.0)
+    return vol * cfg.trail_callback_atr_mult if vol else 0.0
+
+
+def trail_callback_price_pct(leverage: float, cfg: GuardConfig,
+                             atr_pct: float | None = None,
+                             recent_tr_pct: float | None = None) -> float:
     """
     The callbackRate to send Binance, as a PRICE percentage.
 
     When trail_callback_roi is set the give-back is specified in ROI terms and
     converted here, so the same config gives the same ROI give-back whatever
-    leverage the account uses. Clamped to Binance's 0.1%-5% range.
+    leverage the account uses.
+
+    THEN FLOORED BY VOLATILITY (v3.72.0). ROI/leverage alone says nothing
+    about whether the resulting price distance is meaningful for the coin, and
+    the only other bound was Binance's 0.1%-5%, which is about what the
+    exchange accepts, not about what the market does. At 19.8x a 3% ROI target
+    gave STG a 0.15% callback — a QUARTER of its ATR (0.604%) and a sixth of
+    its recent range (0.916%) — while the entry path had independently chosen
+    0.45% for the same coin seconds earlier. A trail inside the instrument's
+    ordinary breathing fires on a normal candle, and STG's did: peak +23.2%
+    ROI at 14:55:56, closed at a loss at 14:55:59.
+
+    Note the coupling this corrects. Holding give-back constant in ROI terms
+    makes the PRICE trail tighter as leverage rises (0.60% at 5x, 0.15% at
+    20x), so the higher the leverage the more certainly the trail sits inside
+    noise — the opposite of what is wanted, and why this surfaced on the demo
+    account's Binance-default 20x rather than at 10x.
+
+    Callers that know the position's volatility should pass it. Omitting it
+    reproduces the pre-v3.72.0 behaviour, so a caller without context is
+    never blocked — it simply gets no floor.
     """
     if cfg.trail_callback_roi and leverage > 0:
         pct = cfg.trail_callback_roi / leverage
     else:
         pct = cfg.trail_callback_pct
-    return max(0.1, min(5.0, round(pct, 2)))
+    floor = trail_vol_floor_pct(cfg, atr_pct, recent_tr_pct)
+    if floor > pct:
+        # Round the floor UP to Binance's 2dp callbackRate precision. Plain
+        # round() would take 0.453 to 0.45 and hand back a callback fractionally
+        # INSIDE the floor — a floor that rounding can violate is not one.
+        pct = math.ceil(floor * 100.0) / 100.0
+    else:
+        pct = round(pct, 2)
+    return max(0.1, min(5.0, pct))
 
 
-def callback_roi_at(leverage: float, cfg: GuardConfig) -> float:
+def callback_roi_at(leverage: float, cfg: GuardConfig,
+                    atr_pct: float | None = None,
+                    recent_tr_pct: float | None = None) -> float:
     """The native trail's give-back expressed in ROI% for a given leverage."""
-    return trail_callback_price_pct(leverage, cfg) * max(leverage, 0.0)
+    return trail_callback_price_pct(
+        leverage, cfg, atr_pct, recent_tr_pct) * max(leverage, 0.0)
 
 
-def trail_locks_in(leverage: float, cfg: GuardConfig) -> float:
+def trail_locks_in(leverage: float, cfg: GuardConfig,
+                   atr_pct: float | None = None,
+                   recent_tr_pct: float | None = None) -> float:
     """
     ROI the stop lands at the moment the trail arms.
 
     Positive means arming locks in profit. Zero or negative means the trail
     engages at or below entry — the flaw the callback<arm invariant exists to
     prevent, but here it depends on leverage so it is evaluated per position.
+
+    Takes the SAME volatility as the callback it describes. If it did not, a
+    floored callback would still be reported as locking in the unfloored
+    amount, and the invariant below would pass on a trail that cannot hold
+    what it claims. That is worse than the original bug: a wrong number that
+    looks checked.
     """
-    return cfg.arm_roi - callback_roi_at(leverage, cfg)
+    return cfg.arm_roi - callback_roi_at(leverage, cfg, atr_pct, recent_tr_pct)
 
 
 def desired_stop_roi(state: GuardState, cfg: GuardConfig,
-                     initial_stop_override: float | None = None) -> float:
+                     initial_stop_override: float | None = None,
+                     leverage: float = 0.0,
+                     atr_pct: float | None = None,
+                     recent_tr_pct: float | None = None) -> float:
     """
     The ROI level the protective stop should sit at, given the peak seen so far.
 
@@ -484,7 +602,7 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
     validate), the first armed level is strictly positive — the trade is locked
     into profit the moment the trail engages.
     """
-    if is_armed(state, cfg):
+    if is_armed(state, cfg, leverage, atr_pct, recent_tr_pct):
         return state.peak_roi - cfg.callback_roi
 
     # Breakeven step: the trade has shown a real gain, so stop giving it back
@@ -530,7 +648,9 @@ def should_replace_stop(state: GuardState, new_stop_roi: float,
 
 def evaluate(pos: FuturesPosition, price: float, state: GuardState,
              cfg: GuardConfig,
-             initial_stop_override: float | None = None
+             initial_stop_override: float | None = None,
+             atr_pct: float | None = None,
+             recent_tr_pct: float | None = None
              ) -> tuple[GuardState, float | None, str]:
     """
     Full per-tick decision for one position (pure — no exchange calls).
@@ -540,8 +660,13 @@ def evaluate(pos: FuturesPosition, price: float, state: GuardState,
     current_roi = roi_pct(pos, price)
     state = update_peak(state, current_roi)
 
-    new_stop_roi = desired_stop_roi(state, cfg, initial_stop_override)
-    newly_armed = (not state.armed) and is_armed(state, cfg)
+    # The position's own leverage: the arm threshold depends on it, because a
+    # noise-width callback costs more ROI the higher the leverage.
+    leverage = float(getattr(pos, "effective_leverage", 0.0) or 0.0)
+    new_stop_roi = desired_stop_roi(state, cfg, initial_stop_override,
+                                    leverage, atr_pct, recent_tr_pct)
+    newly_armed = (not state.armed) and is_armed(
+        state, cfg, leverage, atr_pct, recent_tr_pct)
     if newly_armed:
         state.armed = True
 

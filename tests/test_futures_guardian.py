@@ -113,7 +113,7 @@ class FakeExchange:
 
 
 def _guardian(fake, dry_run=False, cfg=None, adaptive=False,
-              arm_at_entry=False):
+              arm_at_entry=False, vol_floor=False):
     """
     These tests exercise the FIXED-STOP mechanics: placement, ratcheting,
     replacement, arming, the refusal fallback. The adaptive trail (v3.15.0,
@@ -138,6 +138,15 @@ def _guardian(fake, dry_run=False, cfg=None, adaptive=False,
         cfg = replace(cfg, adaptive_trail_enabled=False)
     if not arm_at_entry:
         cfg = replace(cfg, arm_at_entry=False)
+    if not vol_floor:
+        # The volatility floor (v3.72.0, default ON in production) widens the
+        # armed callback to sit outside the coin's movement, which changes
+        # both the callback sent and WHEN a position arms. Disabled here for
+        # the same reason as the two above: these are the fixed-stop path's
+        # tests, and the fake exchange's synthetic candles produce a ~10% ATR
+        # that no real coin carries. Floor behaviour has its own tests in
+        # test_futures_guard.py.
+        cfg = replace(cfg, trail_callback_atr_mult=0.0)
     g.cfg = cfg.validate()
     g.demo = True
     g.dry_run = dry_run
@@ -586,8 +595,12 @@ def test_guardian_stops_repositioning_once_native_trail_is_armed():
 def test_trail_refused_when_it_would_lock_in_no_profit():
     """
     callbackRate is a PRICE percent, so its ROI cost scales with leverage. At
-    high leverage a 1% callback can exceed the arm level, which would engage the
-    trail at or below entry — that must be refused and the fixed stop kept.
+    high leverage a 1% callback can exceed the arm level, which would engage
+    the trail at or below entry — that must be refused and the fixed stop kept.
+
+    v3.72.0: the give-back is now measured against the position's ACTUAL peak
+    rather than cfg.arm_roi. At a peak sitting exactly on the arm level the
+    refusal still holds, which is what this pins.
     """
     from bot.futures_guard import GuardConfig
     cfg = GuardConfig(initial_stop_roi=10, arm_roi=10, callback_roi=5,
@@ -596,11 +609,34 @@ def test_trail_refused_when_it_would_lock_in_no_profit():
     g = _guardian(fake, cfg=cfg)
     g.run_cycle()
     pos = g.fetch_positions()[0]
-    fake._price = price_for_roi(pos, 20.0)
+    fake._price = price_for_roi(pos, 10.0)          # peak == arm level
     g.run_cycle()
 
     assert not [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"]
     assert g._states["DOGE/USDT:USDT"].native_trail_id is None
+
+
+def test_a_peak_well_past_the_arm_level_DOES_get_its_trail():
+    """
+    The counterpart, and a behaviour change. The old code measured the lock
+    against cfg.arm_roi, so a position that had run to +20% ROI was refused a
+    trail that would have locked in +10% — it judged against the arm level
+    instead of the profit actually in hand. Measuring against the peak fixes
+    that, and it is the same change that lets a volatility-floored callback
+    arm once the position has earned the room.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(initial_stop_roi=10, arm_roi=10, callback_roi=5,
+                      trail_callback_pct=1.0)     # 10% ROI give-back at 10x
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake, cfg=cfg)
+    g.run_cycle()
+    pos = g.fetch_positions()[0]
+    fake._price = price_for_roi(pos, 20.0)          # peak far past the arm
+    g.run_cycle()
+
+    assert [o for o in fake.created if o["type"] == "TRAILING_STOP_MARKET"], \
+        "a +20% peak with a 10% give-back locks in +10% — that trail is viable"
 
 
 def test_long_trail_sells():
@@ -1199,6 +1235,30 @@ def test_trail_callback_gives_same_roi_at_any_leverage():
     for lev in (5, 10, 20):
         px = trail_callback_price_pct(lev, cfg)
         assert px * lev == pytest.approx(5.0, abs=0.6)
+
+
+def test_the_guardian_floor_follows_the_entry_paths_multiplier():
+    """
+    The two systems that size a callback must not drift apart again. Defaulting
+    the guardian to a literal 0.75 matched only the OTHER setting's DEFAULT —
+    set AUTO_CALLBACK_ATR_MULT in compose and the guardian would have silently
+    kept 0.75, which is the disagreement the floor exists to close.
+    """
+    cfg = _cfg_with({"AUTO_CALLBACK_ATR_MULT": "1.25"})
+    assert cfg.guard_trail_callback_atr_mult == pytest.approx(1.25)
+    assert cfg.auto_callback_atr_mult == pytest.approx(1.25)
+
+
+def test_an_explicit_guardian_multiplier_still_wins():
+    cfg = _cfg_with({"AUTO_CALLBACK_ATR_MULT": "1.25",
+                     "GUARD_TRAIL_CALLBACK_ATR_MULT": "0.5"})
+    assert cfg.guard_trail_callback_atr_mult == pytest.approx(0.5)
+
+
+def test_the_floor_can_be_disabled_even_when_the_entry_path_uses_one():
+    cfg = _cfg_with({"AUTO_CALLBACK_ATR_MULT": "1.25",
+                     "GUARD_TRAIL_CALLBACK_ATR_MULT": "0"})
+    assert cfg.guard_trail_callback_atr_mult == 0.0
 
 
 def test_trail_callback_clamped_to_exchange_range():

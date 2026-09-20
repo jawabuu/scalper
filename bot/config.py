@@ -287,6 +287,35 @@ class BotConfig:
     # price percentage Binance wants using each position's own leverage, so the
     # behaviour is identical at 10x and 20x. 0 = fall back to the price percent.
     guard_trail_callback_roi: float = field(default_factory=lambda: _env_float("GUARD_TRAIL_CALLBACK_ROI", 0.0))
+    # Volatility floor for the ARMED trail's callback, as a multiple of the
+    # coin's own movement (larger of ATR and recent true range).
+    #
+    # ON by default. Before v3.72.0 the armed callback was ROI/leverage with
+    # no volatility input at all, bounded only by Binance's 0.1%-5% — a limit
+    # on what the EXCHANGE accepts, not on what the market does. At 19.8x that
+    # put STG's trail at 0.15%: a quarter of its ATR, while the ENTRY path had
+    # independently chosen 0.45% for the same coin. The trail fired on an
+    # ordinary candle three seconds after a +23% peak.
+    #
+    # 0.75 deliberately matches AUTO_CALLBACK_ATR_MULT so the two systems that
+    # size a callback finally use one yardstick. 0 restores the old behaviour.
+    # Defaults to AUTO_CALLBACK_ATR_MULT rather than to a literal, so the two
+    # systems that size a callback cannot silently drift apart again. Hardcoding
+    # 0.75 here matched only the OTHER setting's default: change
+    # AUTO_CALLBACK_ATR_MULT in compose and the guardian would have kept 0.75,
+    # reintroducing exactly the disagreement this floor exists to close.
+    guard_trail_callback_atr_mult: float = field(default_factory=lambda: _env_float(
+        "GUARD_TRAIL_CALLBACK_ATR_MULT",
+        _env_float("AUTO_CALLBACK_ATR_MULT", 0.75)))
+    # Profit the trail must still lock in AFTER its callback has been floored
+    # by volatility. A floored callback can cost more ROI than GUARD_ARM_ROI
+    # at high leverage (at 20x a 0.6% ATR needs 0.45%, which is 9% ROI against
+    # a +5% arm), and the old code responded by refusing to arm at all —
+    # stripping the trail from the volatile positions that most need one.
+    # Instead the position now arms LATER, once its peak can support a
+    # noise-width callback and still leave this much profit.
+    guard_min_trail_lock_roi: float = field(default_factory=lambda: _env_float(
+        "GUARD_MIN_TRAIL_LOCK_ROI", 2.0))
     # Volatility-scaled stop + sizing. 0 disables (fixed stop, flat % margin).
     # When set, stop = mult x ATR and the position is sized so the loss at that
     # stop equals ENTRY_RISK_PCT of the wallet — constant risk across coins.

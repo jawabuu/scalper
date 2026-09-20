@@ -37,7 +37,7 @@ from .futures_guard import (
     roi_pct, price_for_roi, stop_side,
     adopt_state, is_protective_stop, evaluate,
     callback_roi_at, trail_locks_in, is_armed, atr_stop_roi,
-    trail_callback_price_pct,
+    trail_callback_price_pct, trail_vol_floor_pct,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -1106,6 +1106,32 @@ class FuturesGuardian:
             pass
         return ctx
 
+    def _vol_for(self, pos: FuturesPosition) -> tuple:
+        """
+        (atr_pct, recent_tr_pct) for sizing this position's trail callback.
+
+        Prefers the ENTRY context — those are the exact figures the entry path
+        sized its own callback from, so both systems reason about one coin
+        from one set of numbers. Falls back to the live ATR for positions the
+        guardian adopted rather than opened (externals, restarts), which have
+        no entry context at all.
+
+        Returns (None, None) when nothing is known. The floor then does not
+        apply, which is the honest outcome: a floor guessed from no volatility
+        would be a number with no meaning behind it.
+        """
+        ctx = (self._pos_meta.get(pos.symbol, {}) or {}).get("entry_context") or {}
+
+        def num(v):
+            try:
+                v = float(v)
+                return v if v > 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        atr = num(ctx.get("atr_pct")) or num(self.atr_pct(pos.symbol))
+        return atr, num(ctx.get("recent_tr_pct"))
+
     def note_entry_context(self, symbol: str, ctx: dict):
         """
         Record exact entry conditions from whoever opened the position.
@@ -1617,15 +1643,38 @@ class FuturesGuardian:
                 f"id={oid}")
             return oid
 
-        cb = trail_callback_price_pct(lev, self.cfg)
-        locked = trail_locks_in(lev, self.cfg)
+        atr_pct, recent_tr_pct = self._vol_for(pos)
+        cb = trail_callback_price_pct(lev, self.cfg, atr_pct, recent_tr_pct)
+        # Measure the lock against the position's ACTUAL peak, not cfg.arm_roi.
+        # Since v3.72.0 a volatile position arms at effective_arm_roi(), which
+        # is higher than cfg.arm_roi precisely so a noise-width callback still
+        # leaves profit. Judging it against cfg.arm_roi would refuse exactly
+        # the trails that deferral was introduced to make viable.
+        _st = self._states.get(pos.symbol)
+        _peak = float(getattr(_st, "peak_roi", 0.0) or 0.0) if _st else 0.0
+        _give_back = callback_roi_at(lev, self.cfg, atr_pct, recent_tr_pct)
+        locked = max(_peak, self.cfg.arm_roi) - _give_back
+        floor = trail_vol_floor_pct(self.cfg, atr_pct, recent_tr_pct)
+        unfloored = trail_callback_price_pct(lev, self.cfg)
+        if floor and cb > unfloored:
+            log.warning(
+                f"{pos.symbol}: armed callback raised {unfloored:.2f}% -> "
+                f"{cb:.2f}% by the volatility floor "
+                f"({self.cfg.trail_callback_atr_mult:g}x "
+                f"{max(v for v in (atr_pct, recent_tr_pct) if v):.2f}%). "
+                f"At {lev:.0f}x the unfloored trail would have sat inside the "
+                f"coin's own movement and fired on an ordinary candle. "
+                f"Give-back is now {callback_roi_at(lev, self.cfg, atr_pct, recent_tr_pct):.0f}% ROI, "
+                f"above the {self.cfg.trail_callback_roi:g}% target.")
         if locked <= 0:
             log.warning(
                 f"{pos.symbol}: arming a {cb}% trail at {lev:.0f}x gives back "
-                f"{callback_roi_at(lev, self.cfg):.0f}% ROI, but the arm level is "
-                f"+{self.cfg.arm_roi:.0f}% — the trail would engage at "
+                f"{_give_back:.0f}% ROI, but the peak is only "
+                f"+{max(_peak, self.cfg.arm_roi):.0f}% — the trail would engage at "
                 f"{locked:+.0f}% ROI (at or below entry). Keeping the fixed stop "
-                f"instead. Raise GUARD_ARM_ROI or lower GUARD_TRAIL_CALLBACK_PCT."
+                f"instead. This is now reachable only when the volatility floor "
+                f"needs more room than the position has yet earned; it resolves "
+                f"itself as the peak rises."
             )
             return None
 
@@ -1644,7 +1693,7 @@ class FuturesGuardian:
         self._log_trail_activation(pos, order, oid, cb, "ARMED trail")
         log.info(
             f"{pos.symbol}: ARMED native trailing stop (callback {cb}% price = "
-            f"{callback_roi_at(lev, self.cfg):.0f}% ROI at {lev:.0f}x), locks in "
+            f"{callback_roi_at(lev, self.cfg, atr_pct, recent_tr_pct):.0f}% ROI at {lev:.0f}x), locks in "
             f"~{locked:+.0f}% ROI. id={oid}"
         )
         return oid
@@ -2423,9 +2472,11 @@ class FuturesGuardian:
         stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
         _peak_before = state.peak_roi
+        _atr_pct, _recent_tr_pct = self._vol_for(pos)
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
-            initial_stop_override=_stop_roi_used)
+            initial_stop_override=_stop_roi_used,
+            atr_pct=_atr_pct, recent_tr_pct=_recent_tr_pct)
 
         # peak_roi is MONOTONIC, so one bad price pins it for the life of the
         # position and every later decision is taken against it. 牛来 reached a
@@ -2602,8 +2653,8 @@ class FuturesGuardian:
                 # 0.25% trail look like a 1.0% one.
                 self._record(pos.symbol, "trail_armed",
                              f"native trailing stop, callback "
-                             f"{trail_callback_price_pct(pos.effective_leverage, self.cfg):.2f}% price "
-                             f"({callback_roi_at(pos.effective_leverage, self.cfg):.0f}% ROI)")
+                             f"{trail_callback_price_pct(pos.effective_leverage, self.cfg, *self._vol_for(pos)):.2f}% price "
+                             f"({callback_roi_at(pos.effective_leverage, self.cfg, *self._vol_for(pos)):.0f}% ROI)")
                 with self._lock:
                     self._states[pos.symbol] = state
                 return
@@ -3419,7 +3470,21 @@ class FuturesGuardian:
                 peak = getattr(st, "peak_roi", None) if st else None
                 if peak is not None and peak > 0:
                     give_back = peak - final_roi
-                    cb_roi = callback_roi_at(leverage, self.cfg) if leverage else None
+                    # Same volatility the trail was actually sized with, or
+                    # the diagnosis compares the give-back against a callback
+                    # that was never used.
+                    _ctx = ((self._pos_meta.get(symbol, {}) or {})
+                            .get("entry_context") or {})
+                    def _n(v):
+                        try:
+                            v = float(v)
+                            return v if v > 0 else None
+                        except (TypeError, ValueError):
+                            return None
+                    cb_roi = (callback_roi_at(leverage, self.cfg,
+                                              _n(_ctx.get("atr_pct")),
+                                              _n(_ctx.get("recent_tr_pct")))
+                              if leverage else None)
                     resting = {k: v for k, v in (
                         ("fixed", getattr(st, "stop_order_id", None)),
                         ("floor", getattr(st, "floor_stop_id", None)),

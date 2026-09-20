@@ -312,3 +312,143 @@ def test_step_respects_the_atr_derived_initial_stop():
                             initial_stop_override=7.5) == pytest.approx(-7.5)
     assert desired_stop_roi(GuardState(peak_roi=3.5), cfg,
                             initial_stop_override=7.5) == pytest.approx(0.0)
+
+
+# ── Volatility floor on the armed trail's callback (v3.72.0) ────────────────
+#
+# STG 2026-09-20 is why this exists. At 19.8x a 3% ROI target produced a 0.15%
+# callback — a QUARTER of the coin's 0.604% ATR and a sixth of its 0.916%
+# recent range — while the ENTRY path had independently chosen 0.45% for the
+# same coin seconds earlier. Peak +23.2% ROI at 14:55:56; closed at -8.08% at
+# 14:55:59, three seconds later, on an ordinary candle.
+#
+# The only bound before this was Binance's 0.1%-5%, which describes what the
+# EXCHANGE accepts, not what the market does.
+
+from bot.futures_guard import (                                    # noqa: E402
+    trail_vol_floor_pct, trail_callback_price_pct, callback_roi_at,
+    effective_arm_roi, is_armed,
+)
+
+
+def _vcfg(**kw):
+    base = dict(arm_roi=5.0, trail_callback_roi=3.0,
+                trail_callback_atr_mult=0.75, min_trail_lock_roi=2.0)
+    base.update(kw)
+    return GuardConfig(**base)
+
+
+def test_the_stg_callback_is_no_longer_inside_the_coins_own_movement():
+    cfg = _vcfg()
+    atr, rtr, lev = 0.604, 0.916, 19.7876
+    assert trail_callback_price_pct(lev, cfg) == pytest.approx(0.15, abs=0.01)
+    floored = trail_callback_price_pct(lev, cfg, atr, rtr)
+    assert floored > atr, "the callback must sit OUTSIDE ATR, not inside it"
+    assert floored == pytest.approx(0.69, abs=0.01)   # 0.75 x 0.916
+
+
+def test_the_floor_takes_the_larger_of_atr_and_recent_range():
+    # ATR(14) understates an accelerating move, and the scanner selects
+    # accelerating moves. Mirrors the entry path's _callback_for.
+    cfg = _vcfg()
+    assert trail_vol_floor_pct(cfg, 0.4, 1.2) == pytest.approx(0.9)
+    assert trail_vol_floor_pct(cfg, 1.2, 0.4) == pytest.approx(0.9)
+
+
+def test_no_volatility_known_means_no_floor_invented():
+    # A floor guessed from nothing is a number with no meaning behind it.
+    cfg = _vcfg()
+    assert trail_vol_floor_pct(cfg, None, None) == 0.0
+    assert trail_callback_price_pct(20, cfg) == trail_callback_price_pct(
+        20, cfg, None, None)
+
+
+def test_the_floor_never_NARROWS_a_callback():
+    # A calm coin must keep the ROI-derived callback, not be pulled down to a
+    # tiny ATR. The floor is a floor, never a target.
+    cfg = _vcfg(trail_callback_roi=20.0)
+    wide = trail_callback_price_pct(10, cfg)
+    assert trail_callback_price_pct(10, cfg, 0.05, 0.05) == wide
+
+
+def test_the_floor_can_be_switched_off_for_the_old_behaviour():
+    cfg = _vcfg(trail_callback_atr_mult=0.0)
+    assert trail_callback_price_pct(19.8, cfg, 0.604, 0.916) == pytest.approx(
+        0.15, abs=0.01)
+
+
+def test_the_floor_still_respects_the_exchange_maximum():
+    # Binance caps callbackRate at 5%; a wild coin must not produce a rejected
+    # order, which would leave the position with no trail at all.
+    cfg = _vcfg()
+    assert trail_callback_price_pct(10, cfg, 40.0, None) <= 5.0
+
+
+def test_a_floored_trail_arms_LATER_instead_of_being_refused():
+    """
+    The interaction that matters. A noise-width callback costs more ROI at
+    high leverage than the +5% arm level, so the pre-v3.72.0 code refused to
+    arm at all and kept the fixed stop — stripping the trail from exactly the
+    volatile positions that most need one.
+    """
+    cfg = _vcfg()
+    lev, atr = 19.7876, 0.604
+    give_back = callback_roi_at(lev, cfg, atr, 0.916)
+    arm_at = effective_arm_roi(cfg, lev, atr, 0.916)
+    assert give_back > cfg.arm_roi, "the premise: give-back exceeds the arm level"
+    assert arm_at == pytest.approx(give_back + cfg.min_trail_lock_roi)
+    # STG peaked at +23.2%, so under this rule it WOULD have armed.
+    assert is_armed(GuardState(peak_roi=23.2), cfg, lev, atr, 0.916)
+    assert not is_armed(GuardState(peak_roi=5.0), cfg, lev, atr, 0.916)
+
+
+def test_arming_later_still_locks_in_at_least_the_minimum():
+    cfg = _vcfg()
+    lev, atr, rtr = 19.7876, 0.604, 0.916
+    arm_at = effective_arm_roi(cfg, lev, atr, rtr)
+    locked = arm_at - callback_roi_at(lev, cfg, atr, rtr)
+    assert locked >= cfg.min_trail_lock_roi
+
+
+def test_a_calm_coin_arms_at_the_normal_level():
+    # Deferral must not become the default — it applies only where the floor
+    # actually binds.
+    cfg = _vcfg()
+    assert effective_arm_roi(cfg, 10.0, 0.05, 0.05) == pytest.approx(cfg.arm_roi)
+
+
+def test_without_leverage_the_arm_level_is_unchanged():
+    # Callers that do not know a position's leverage keep the old behaviour.
+    cfg = _vcfg()
+    assert effective_arm_roi(cfg) == pytest.approx(cfg.arm_roi)
+
+
+def test_the_give_back_report_matches_the_callback_actually_sent():
+    # trail_locks_in and callback_roi_at must take the SAME volatility as the
+    # callback they describe, or a floored trail is reported as locking in the
+    # unfloored amount — a wrong number that looks checked.
+    cfg = _vcfg()
+    lev, atr = 19.7876, 0.604
+    cb = trail_callback_price_pct(lev, cfg, atr, None)
+    assert callback_roi_at(lev, cfg, atr, None) == pytest.approx(cb * lev)
+
+
+def test_higher_leverage_no_longer_buys_a_tighter_price_trail():
+    """
+    The coupling this corrects: ROI/leverage alone made the PRICE trail
+    tighter as leverage rose (0.60% at 5x, 0.15% at 20x), so the higher the
+    leverage the more certainly the trail sat inside noise.
+    """
+    cfg = _vcfg()
+    atr = 0.604
+    unfloored = [trail_callback_price_pct(L, cfg) for L in (5, 10, 20)]
+    assert unfloored == sorted(unfloored, reverse=True), \
+        "the premise: without a floor, more leverage means a tighter trail"
+    assert unfloored[-1] < atr, "and at 20x it lands inside the coin's ATR"
+
+    widths = [trail_callback_price_pct(L, cfg, atr, None) for L in (5, 10, 20)]
+    # The width is max(roi/leverage, floor): the ROI term still dominates at
+    # low leverage, and the floor takes over exactly where the old behaviour
+    # went inside noise. What matters is that it stops shrinking.
+    assert widths[1] == widths[2], f"floor should pin the high end: {widths}"
+    assert all(w >= 0.75 * atr for w in widths)
