@@ -98,7 +98,20 @@ def group_stats(trades: list[dict]) -> dict:
         return {"n": 0, "confidence": "insufficient"}
 
     rois = [_roi(t) for t in scored]
-    wins = [r for r in rois if r > 0]
+    # A WIN IS NET OF FEES. Counting _roi() alone made the two cards disagree
+    # about the same trade: LSK 2026-09-20 13:46:53 showed +1.59% and was
+    # counted a win here, while TODAY (which uses _realised) counted it a loss
+    # — realised +2.1282, fees 2.6698, net -0.5416. A winner that costs 0.54
+    # is not one, and at ~1% of margin per round trip the distinction decides
+    # a large share of trades.
+    #
+    # Falls back to ROI only when no net figure exists, so older records
+    # without net_pnl_usdt still score rather than vanishing.
+    def _is_win(t):
+        v = _realised(t)
+        return (v > 0) if v is not None else ((_roi(t) or 0) > 0)
+
+    wins = [t for t in scored if _is_win(t)]
     realised = [_realised(t) for t in scored if _realised(t) is not None]
     peaks = [float(t.get("peak_roi") or 0) for t in scored]
     margins = [m for m in (_margin(t) for t in scored) if m]

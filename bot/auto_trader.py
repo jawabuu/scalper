@@ -110,6 +110,8 @@ class AutoTradeConfig:
     # own round-trip fee: 68 entries below 0.3% ATR won 26.5% and lost 747
     # USDT, while 0.7-1.5% won 82.4% and made 285.
     min_atr_pct: float = 0.0
+    # 0 = off. See the gate in evaluate_candidate.
+    max_atr_pct: float = 0.0
     short_rsi_min: float = 78.0
 
     # ── Trailing callback ───────────────────────────────────────────────
@@ -364,6 +366,19 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
             return AutoDecision(False, symbol, side,
                                 reason=f"ATR {a}% below the {cfg.min_atr_pct}% "
                                        f"floor — too quiet to clear fees")
+
+    # The ceiling, OFF by default (0). A coin can be too fast to protect, not
+    # just too quiet to pay for. AKE demo 2026-09-20 had ATR 3.661% and moved
+    # 0.38% of PRICE PER SECOND after the fill — at 18.6x that is 7% of margin
+    # per second, so the first stop lands well past the intended level however
+    # fast the guardian polls. No reduce-only order can exist before the fill,
+    # so this is the only lever that reaches it.
+    if cfg.max_atr_pct:
+        a = atr_pct if atr_pct is not None else row.get("atr_pct")
+        if a is not None and float(a) > cfg.max_atr_pct:
+            return AutoDecision(False, symbol, side,
+                                reason=f"ATR {a}% above the {cfg.max_atr_pct}% "
+                                       f"ceiling — too fast to protect")
 
     rsi = row.get("rsi")
     if rsi is None:

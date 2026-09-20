@@ -6882,3 +6882,153 @@ def test_the_halt_reference_survives_a_restart():
     for f in ('"halt_base_balance"', '"halt_peak_balance"',
               's.halt_base_balance = float(data.get("halt_base_balance") or 0.0)'):
         assert f in src, f
+
+
+# ── The adaptive trail is the only loss cap — verify it rests ────────────────
+# AKE demo 2026-09-20 13:21:22: the call returned an id and TRAIL-RESPONSE
+# logged kept=0.1027323; Binance's order history says REJECTED. The bot
+# recorded a refused order as live protection and the position closed at
+# -119.68% ROI. Rejected because a BUY trail needs its activation AT OR BELOW
+# the current price and the default came back 0.014% ABOVE mark.
+
+def test_an_unconfirmed_adaptive_trail_marks_the_position_unprotected():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_adaptive_trail)
+    assert '_confirm_resting(pos, oid, "ADAPTIVE trail")' in src
+    assert "state.unprotected_reason = (" in src
+    assert "UNPROTECTED" in src
+
+
+def test_the_id_is_recorded_even_when_unconfirmed():
+    """
+    Clearing it would make the next cycle place another trail, and an
+    unreadable algo book would then place one EVERY cycle — 40 orders in a
+    short run when this was first written. Record once, report loudly.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_adaptive_trail)
+    i = src.index("state.adaptive_trail_id = oid")
+    j = src.index('_confirm_resting(pos, oid, "ADAPTIVE trail")')
+    assert i < j, "the id must be recorded BEFORE the confirmation gate"
+
+
+def test_a_confirmed_adaptive_trail_says_so():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_adaptive_trail)
+    assert "CONFIRMED RESTING" in src
+
+
+# ── A coin can be too FAST to protect, not only too quiet to pay for ─────────
+
+def _atr_cfg(mx=0.0, mn=0.0):
+    from dataclasses import replace
+    from bot.auto_trader import AutoTradeConfig
+    return replace(AutoTradeConfig(), max_atr_pct=mx, min_atr_pct=mn)
+
+
+def test_the_atr_ceiling_is_off_by_default():
+    from bot.auto_trader import AutoTradeConfig
+    from bot.config import BotConfig
+    assert AutoTradeConfig().max_atr_pct == 0.0
+    assert BotConfig().auto_max_atr_pct == 0.0
+
+
+def test_the_ceiling_refuses_a_coin_that_is_too_fast():
+    import inspect
+    import bot.auto_trader as at
+    src = inspect.getsource(at.evaluate_candidate)
+    assert "cfg.max_atr_pct" in src
+    assert "too fast to protect" in src
+    i = src.index("cfg.max_atr_pct")
+    assert "float(a) > cfg.max_atr_pct" in src[i:i + 300]
+
+
+def test_a_missing_atr_does_not_trip_the_ceiling():
+    """The FLOOR refuses on a missing ATR; the ceiling must not."""
+    import inspect
+    import bot.auto_trader as at
+    src = inspect.getsource(at.evaluate_candidate)
+    i = src.index("cfg.max_atr_pct")
+    assert "a is not None and" in src[i:i + 300]
+
+
+def test_the_ceiling_is_wired_from_the_env():
+    import inspect
+    import bot.config as botcfg
+    import main
+    assert '"AUTO_MAX_ATR_PCT"' in inspect.getsource(botcfg)
+    assert "max_atr_pct=cfg.auto_max_atr_pct" in inspect.getsource(main)
+
+
+# ── The income window must not inherit the previous trade on the same symbol ─
+# AVAAI demo 2026-09-20: trade 1 closed 12:30:10 (+35.08), trade 2 was sized
+# 12:30:22 — 12 seconds later, inside the 120s INCOME_LOOKBACK_PAD_S. The
+# ledger returned +32.5135 for trade 2. Binance's closing order says
+# Total PNL -2.56773 and the wallet moved -5.30. The bot booked a 32 USDT
+# profit on a losing trade, overruling two other sources to do it.
+
+def test_the_income_window_is_clamped_to_after_the_previous_close():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert "self._last_close_ms.get(symbol)" in src
+    assert "income_since = int(prev) + 1" in src
+
+
+def test_the_close_time_is_stamped_for_the_next_trade():
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert "self._last_close_ms[symbol] = int(time.time() * 1000)" in src
+
+
+def test_the_clamp_only_tightens_the_window():
+    """A previous close OLDER than the pad must not widen it."""
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._record_closed_trade)
+    assert "if prev and prev >= income_since:" in src
+
+
+# ── A win is net of fees ─────────────────────────────────────────────────────
+# LSK 2026-09-20 13:46:53: realised +2.1282, fees 2.6698, net -0.5416. The
+# WIN RATE card counted it a win while TODAY counted it a loss. At ~1% of
+# margin per round trip that distinction decides a large share of trades.
+
+def _t(roi, net=None, realised=None):
+    d = {"final_roi": roi, "peak_roi": max(roi, 0), "margin_usdt": 100.0}
+    if realised is not None:
+        d["realised_pnl_usdt"] = realised
+    if net is not None:
+        d["net_pnl_usdt"] = net
+    return d
+
+
+def test_a_gross_winner_that_is_net_negative_is_not_a_win():
+    from bot.analysis import group_stats
+    trades = [_t(1.59, net=-0.5416, realised=2.1282)] + [_t(-5.0, net=-6.0)] * 6
+    assert group_stats(trades)["win_rate"] == 0.0
+
+
+def test_a_genuine_net_winner_still_counts():
+    from bot.analysis import group_stats
+    trades = [_t(5.0, net=3.0, realised=4.0)] + [_t(-5.0, net=-6.0)] * 3
+    assert group_stats(trades)["win_rate"] == 25.0
+
+
+def test_a_record_with_no_net_figure_falls_back_to_roi():
+    """Older trades predate net_pnl_usdt; they must still score, not vanish."""
+    from bot.analysis import group_stats
+    trades = [_t(2.0)] + [_t(-5.0, net=-6.0)] * 3
+    r = group_stats(trades)
+    assert r["n"] == 4 and r["win_rate"] == 25.0
+
+
+def test_both_cards_now_agree_on_what_a_win_is():
+    import inspect
+    import bot.analysis as an
+    src = inspect.getsource(an.group_stats)
+    assert "_realised(t)" in src, "WIN RATE must use the net figure"

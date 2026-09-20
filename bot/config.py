@@ -563,6 +563,13 @@ class BotConfig:
     # trail, which trails on the exchange rather than on a poll. LSK live
     # 2026-09-20: the ratchet exited at +6.64% after five cancel/replace
     # cycles; one native trail at the same callback gives +6.89%.
+    # Refuse candidates ABOVE this ATR. 0 = off, which is the default: the
+    # operator accepts the adverse-move risk for now and will enable it once
+    # there is data. AKE demo 2026-09-20 had ATR 3.661% and moved 0.38% of
+    # PRICE PER SECOND after the fill — faster than any poll can protect, and
+    # at 18.6x that is 7% of margin per second.
+    auto_max_atr_pct: float = field(default_factory=lambda: _env_float(
+        "AUTO_MAX_ATR_PCT", 0.0))
     guard_ratchet_enabled: bool = field(default_factory=lambda: _env_bool(
         "GUARD_RATCHET_ENABLED", False))
     guard_arm_at_entry: bool = field(default_factory=lambda: _env_bool(

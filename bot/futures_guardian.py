@@ -451,6 +451,13 @@ class FuturesGuardian:
         # Raw fetch_balance payload, for account_value(). Empty until the
         # first poll, which is why account_value degrades to USDT-only.
         self._last_balance_payload: dict = {}
+        # Adaptive-trail placement attempts per symbol, so an unreadable algo
+        # book cannot make every cycle place another order.
+        self._adaptive_attempts: dict = {}
+        # Close time per symbol, ms. Bounds the income query so a re-entry
+        # inside INCOME_LOOKBACK_PAD_S cannot inherit the previous trade's
+        # realised P&L and commission.
+        self._last_close_ms: dict = {}
         # Cost basis per non-USDT asset, restored from state on load.
         self._asset_basis: dict = {}
         self._actions: list[dict] = []   # recent actions, for the dashboard
@@ -1791,10 +1798,40 @@ class FuturesGuardian:
             oid = self._place_native_trail(pos, rescue=True, callback_pct=cb)
             if not oid:
                 return
+            # VERIFY IT IS ACTUALLY RESTING — but RECORD IT EITHER WAY.
+            #
+            # The algo endpoint returns 200 with an id and refuses the order
+            # afterwards. AKE demo 2026-09-20 13:21:22 came back with an id
+            # and TRAIL-RESPONSE kept=0.1027323; Binance's order history says
+            # REJECTED. The adaptive trail is the ONLY loss cap between the
+            # fill and the fixed stop, and the bot recorded a refused order as
+            # live protection. That position closed at -119.68% ROI.
+            #
+            # Rejected because a BUY trail needs its activation AT OR BELOW the
+            # current price: the default came back 0.014% ABOVE mark, on a
+            # market moving 0.38% of price per SECOND.
+            #
+            # The id is still recorded, deliberately. Clearing it would make
+            # the next cycle place another trail, and an unreadable algo book
+            # would then place one every cycle forever. What changes is that
+            # the failure is now LOUD and the position is marked unprotected,
+            # instead of a refused order being counted as a loss cap.
             state.adaptive_trail_id = oid
             self._all_stop_ids.setdefault(pos.symbol, []).append(oid)
+            if not self._confirm_resting(pos, oid, "ADAPTIVE trail"):
+                state.unprotected_reason = (
+                    "the adaptive trail was accepted as a call and refused as "
+                    "an order — no exchange-side loss cap is resting")
+                log.error(
+                    f"{pos.symbol}: UNPROTECTED — {state.unprotected_reason}. "
+                    f"Until the fixed stop lands this position has NO cap. "
+                    f"id={oid}")
+                self._record(pos.symbol, "UNPROTECTED",
+                             f"adaptive trail refused id={oid}")
+                return
             log.warning(
-                f"{pos.symbol}: ADAPTIVE TRAIL placed, callback {cb}% of price "
+                f"{pos.symbol}: ADAPTIVE TRAIL placed AND CONFIRMED RESTING, "
+                f"callback {cb}% of price "
                 f"= {abs(stop_roi):.1f}% ROI at {lev:.0f}x. Exchange-managed, "
                 f"tick-by-tick — it does not depend on the guardian's poll.")
             self._record(pos.symbol, "adaptive_trail",
@@ -1802,6 +1839,9 @@ class FuturesGuardian:
         except Exception as e:
             log.error(f"{pos.symbol}: adaptive trail failed, fixed stop "
                       f"remains: {_safe_err(e)}")
+
+    # How many times a position may re-place an unconfirmed adaptive trail.
+    ADAPTIVE_MAX_ATTEMPTS = 2
 
     PROTECTION_AUDIT_INTERVAL_S = 30.0
 
@@ -3249,6 +3289,26 @@ class FuturesGuardian:
                 # A small margin in case the fill preceded the recorded stamp.
                 income_since = int((float(floor_ts) - self.INCOME_LOOKBACK_PAD_S)
                                    * 1000)
+                # NEVER REACH BACK PAST THE PREVIOUS CLOSE ON THIS SYMBOL.
+                #
+                # The 120s pad exists because the entry commission is charged
+                # at the fill, before the first poll. But re-entering the same
+                # symbol inside that window makes the query sum the PREVIOUS
+                # trade's rows into this one.
+                #
+                # AVAAI demo 2026-09-20: trade 1 closed 12:30:10 (+35.08),
+                # trade 2 was sized 12:30:22 — 12 seconds later. The ledger
+                # returned +32.5135 for trade 2. Binance's own closing order
+                # says Total PNL -2.56773, and the wallet moved -5.30. The bot
+                # booked a 32 USDT profit on a losing trade, and the log shows
+                # it overruling two other sources to do it.
+                prev = self._last_close_ms.get(symbol)
+                if prev and prev >= income_since:
+                    income_since = int(prev) + 1
+                    log.info(
+                        f"{symbol}: income window clamped to after the previous "
+                        f"close on this symbol — the {self.INCOME_LOOKBACK_PAD_S:.0f}s "
+                        f"pad would have summed that trade's rows into this one.")
             else:
                 income_since = None
             led_pnl, led_comm, led_found = self._income_for_position(
@@ -3506,6 +3566,14 @@ class FuturesGuardian:
             f"final={rec['final_roi']}% realised="
             f"{'n/a' if realised is None else f'{realised:+.4f}'}"
         )
+
+        # Bound the NEXT income query on this symbol. A re-entry inside
+        # INCOME_LOOKBACK_PAD_S would otherwise inherit these rows — AVAAI
+        # demo 2026-09-20 booked +32.51 on a trade Binance says lost 2.57.
+        try:
+            self._last_close_ms[symbol] = int(time.time() * 1000)
+        except Exception:
+            pass
 
     def close_position(self, symbol: str) -> dict:
         """

@@ -308,6 +308,7 @@ if __name__ == "__main__":
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     sessions=cfg.auto_sessions,
                     min_atr_pct=cfg.auto_min_atr_pct,
+            max_atr_pct=cfg.auto_max_atr_pct,
                     short_rsi_min=cfg.auto_short_rsi_min,
                     callback_ratio=cfg.auto_callback_ratio,
                     callback_atr_mult=cfg.auto_callback_atr_mult,
