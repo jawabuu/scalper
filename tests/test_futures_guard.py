@@ -452,3 +452,36 @@ def test_higher_leverage_no_longer_buys_a_tighter_price_trail():
     # went inside noise. What matters is that it stops shrinking.
     assert widths[1] == widths[2], f"floor should pin the high end: {widths}"
     assert all(w >= 0.75 * atr for w in widths)
+
+
+def test_arm_at_entry_must_use_the_DEFERRED_level_not_the_configured_one():
+    """
+    v3.73.1. Arm-at-entry derives its activation from the arm level and places
+    the trail BEFORE any peak exists. Using cfg.arm_roi there meant a trail
+    activating at +5% that then gave back 7.5% — engaging BELOW entry, the
+    exact failure deferral exists to prevent — so _place_native_trail refused
+    it and GUARD_ARM_AT_ENTRY silently became a no-op on every coin where the
+    floor binds. On the live config (10x, mult 1.25, AUTO_MIN_ATR_PCT=0.5)
+    that is EVERY coin.
+    """
+    cfg = _vcfg(trail_callback_atr_mult=1.25)
+    lev, atr = 10.0, 0.5
+    give_back = callback_roi_at(lev, cfg, atr, None)
+    assert give_back > cfg.arm_roi, "the premise, on the live config"
+    arm_at = effective_arm_roi(cfg, lev, atr, None)
+    assert arm_at - give_back >= cfg.min_trail_lock_roi, \
+        "activating at the deferred level must still lock in profit"
+
+
+def test_the_live_and_demo_containers_now_floor_differently():
+    """
+    AUTO_CALLBACK_ATR_MULT is 1.25 live and 0.75 demo, and since v3.72.1 the
+    guardian floor follows it. That is intended, but it means the two
+    containers are no longer running the same experiment — worth failing here
+    if anyone assumes they are.
+    """
+    live = _vcfg(trail_callback_atr_mult=1.25)
+    demo = _vcfg(trail_callback_atr_mult=0.75)
+    atr = 0.6
+    assert trail_callback_price_pct(10, live, atr, None) != \
+        trail_callback_price_pct(10, demo, atr, None)

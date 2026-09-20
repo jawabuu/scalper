@@ -37,7 +37,7 @@ from .futures_guard import (
     roi_pct, price_for_roi, stop_side,
     adopt_state, is_protective_stop, evaluate,
     callback_roi_at, trail_locks_in, is_armed, atr_stop_roi,
-    trail_callback_price_pct, trail_vol_floor_pct,
+    trail_callback_price_pct, trail_vol_floor_pct, effective_arm_roi,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -1120,7 +1120,8 @@ class FuturesGuardian:
         apply, which is the honest outcome: a floor guessed from no volatility
         would be a number with no meaning behind it.
         """
-        ctx = (self._pos_meta.get(pos.symbol, {}) or {}).get("entry_context") or {}
+        meta = getattr(self, "_pos_meta", None) or {}
+        ctx = (meta.get(pos.symbol, {}) or {}).get("entry_context") or {}
 
         def num(v):
             try:
@@ -1129,7 +1130,14 @@ class FuturesGuardian:
             except (TypeError, ValueError):
                 return None
 
-        atr = num(ctx.get("atr_pct")) or num(self.atr_pct(pos.symbol))
+        atr = num(ctx.get("atr_pct"))
+        if atr is None:
+            # Never fatal: this runs on adoption paths that can precede full
+            # state init, and a missing ATR costs a floor, not a position.
+            try:
+                atr = num(self.atr_pct(pos.symbol))
+            except Exception:
+                atr = None
         return atr, num(ctx.get("recent_tr_pct"))
 
     def note_entry_context(self, symbol: str, ctx: dict):
@@ -1653,7 +1661,12 @@ class FuturesGuardian:
         _st = self._states.get(pos.symbol)
         _peak = float(getattr(_st, "peak_roi", 0.0) or 0.0) if _st else 0.0
         _give_back = callback_roi_at(lev, self.cfg, atr_pct, recent_tr_pct)
-        locked = max(_peak, self.cfg.arm_roi) - _give_back
+        # The effective arm level, not the configured one: arm-at-entry places
+        # this trail BEFORE any peak exists, with its activation already set to
+        # the deferred level, so judging it against cfg.arm_roi would refuse a
+        # trail that activates exactly where it locks in profit.
+        _arm_at = effective_arm_roi(self.cfg, lev, atr_pct, recent_tr_pct)
+        locked = max(_peak, _arm_at) - _give_back
         floor = trail_vol_floor_pct(self.cfg, atr_pct, recent_tr_pct)
         unfloored = trail_callback_price_pct(lev, self.cfg)
         if floor and cb > unfloored:
@@ -1794,6 +1807,17 @@ class FuturesGuardian:
         arm_roi = float(getattr(self.cfg, "arm_roi", 0) or 0)
         if arm_roi <= 0:
             return
+        # The activation must use the position's EFFECTIVE arm level, not the
+        # configured one. Since v3.72.0 a volatility-floored callback can cost
+        # more ROI than cfg.arm_roi, and a trail activating at +5% that then
+        # gives back 7.5% engages BELOW entry — the exact failure deferral
+        # exists to prevent. Deriving from cfg.arm_roi made _place_native_trail
+        # refuse on every coin where the floor binds, silently turning
+        # GUARD_ARM_AT_ENTRY into a no-op and pushing every position onto the
+        # poll-driven path.
+        _atr_pct, _recent_tr_pct = self._vol_for(pos)
+        arm_roi = effective_arm_roi(
+            self.cfg, pos.effective_leverage, _atr_pct, _recent_tr_pct)
         activation = self._activation_at_roi(pos, arm_roi)
         if not activation:
             log.warning(f"{pos.symbol}: cannot derive the arm level from "
