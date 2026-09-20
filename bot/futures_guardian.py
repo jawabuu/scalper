@@ -192,6 +192,60 @@ def resolve_usdt_balance(bal: dict) -> tuple[float, str]:
     return 0.0, "unresolved"
 
 
+def resolve_account_value(bal: dict, prices: dict | None = None) -> tuple:
+    """
+    The whole account in USDT: every asset's walletBalance at its own price.
+
+    DISTINCT FROM THE SIZING BALANCE, on purpose.
+
+    Sizing must use USDT ALONE. ENTRY_RISK_PCT means a fraction of the capital
+    that can absorb a loss, and BNB held to pay fees cannot take a trading
+    loss — counting it would size every position against money that is not at
+    risk.
+
+    Account VALUE is the other question: "am I up or down". Fees paid in BNB
+    leave the BNB balance and never touch USDT, so a USDT-only figure cannot
+    see them at all. On an account funded 4500 USDT + 500 BNB, every fee is
+    invisible to the USDT wallet and the trade record drifts from it forever —
+    part of what the header reports as wallet_gap.
+
+    `prices` maps asset -> USDT price; USDT and the stablecoins are 1.0.
+    An asset with no price is REPORTED, not silently dropped, because a
+    missing price understates the account rather than failing loudly.
+
+    Returns (value, per_asset, unpriced).
+    """
+    info = (bal or {}).get("info") or {}
+    assets = info.get("assets") if isinstance(info, dict) else None
+    if not isinstance(assets, list):
+        return 0.0, {}, []
+    prices = dict(prices or {})
+    for stable in ("USDT", "BUSD", "USDC", "FDUSD"):
+        prices.setdefault(stable, 1.0)
+    total = 0.0
+    per: dict = {}
+    unpriced: list = []
+    for a in assets:
+        if not isinstance(a, dict):
+            continue
+        name = str(a.get("asset") or "").upper()
+        try:
+            amt = float(a.get("walletBalance") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not name or amt == 0:
+            continue
+        rate = prices.get(name)
+        if rate is None:
+            unpriced.append(name)
+            per[name] = {"amount": amt, "usdt": None}
+            continue
+        usd = amt * float(rate)
+        per[name] = {"amount": amt, "usdt": round(usd, 8)}
+        total += usd
+    return round(total, 8), per, unpriced
+
+
 def resolve_price(exchange, symbol: str) -> tuple[float, str]:
     """
     Current price for a symbol, from whichever field the endpoint provides.
@@ -3418,6 +3472,7 @@ class FuturesGuardian:
         """
         fn = getattr(self.exchange, "fapiPrivateGetIncome", None)
         if fn is None:
+            self._last_funding = 0.0
             return 0.0, 0.0, False
         try:
             params = {"symbol": self.exchange.market_id(symbol), "limit": 200}
@@ -3426,9 +3481,10 @@ class FuturesGuardian:
             rows = fn(params) or []
         except Exception as e:
             log.debug(f"{symbol}: income lookup failed: {e}")
+            self._last_funding = 0.0
             return 0.0, 0.0, False
 
-        pnl = comm = 0.0
+        pnl = comm = fund = 0.0
         unconverted = 0.0
         fee_src = ""
         seen = False
@@ -3442,6 +3498,16 @@ class FuturesGuardian:
                 continue
             if kind == "REALIZED_PNL":
                 pnl += val
+                seen = True
+            elif kind == "FUNDING_FEE":
+                # Binance breaks Realized PNL into Closing PNL + Funding Fee +
+                # Trading Fee, and this component was never read. Scalps rarely
+                # straddle a funding stamp so it is usually zero — but when it
+                # lands it moved the wallet and nothing recorded it, which is
+                # one of the contributions to wallet_gap.
+                #
+                # SIGNED, not abs(): funding is received as often as paid.
+                fund += val
                 seen = True
             elif kind == "COMMISSION":
                 # The ASSET matters. Paying fees in BNB makes `income` a BNB
@@ -3470,7 +3536,15 @@ class FuturesGuardian:
                 f"asset could not be converted — fees are understated for "
                 f"this trade.")
         self._last_fee_source = fee_src or "ledger"
-        return round(pnl, 8), round(comm, 8), seen
+        if fund:
+            log.info(f"{symbol}: funding {fund:+.6f} folded into realised "
+                     f"(closing {pnl:+.6f})")
+        self._last_funding = round(fund, 8)
+        # Binance's own position card sums Closing PNL + Funding Fee into
+        # Realized PNL, so the realised figure carries funding too. Keeping it
+        # out was why a funded position moved the wallet by more than the
+        # trade record explained.
+        return round(pnl + fund, 8), round(comm, 8), seen
 
     def estimate_fees(self, notional: float) -> float:
         """

@@ -541,6 +541,41 @@ def create_app(engine) -> FastAPI:
         snap["available"] = True
         return snap
 
+    @app.get("/api/shadow")
+    def api_shadow(limit: int = 500, symbol: str = "", verdict: str = "",
+                   since: float = 0.0, user: dict = Depends(_require_auth)):
+        """
+        The shadow decision log — jev's advisory ENTER/SKIP verdict on every
+        AUTO-ENTRY candidate, entered or refused, recorded before the outcome
+        was known. Per JEV-BRIEF.md §5b: modelled on /api/scan, same four
+        rules — auth required, never 500, degrade to enabled: false, and
+        read-only (a GET here never calls the model, only reads the log
+        bot/shadow_decision.py already wrote).
+        """
+        shadow = getattr(_auto, "shadow", None) if _auto is not None else None
+        if shadow is None:
+            return {"enabled": False, "decisions": [], "summary": {},
+                    "message": "Shadow decision log not enabled on this "
+                              "instance (SHADOW_ENABLED)"}
+        try:
+            from .shadow_decision import read_decisions, summarize
+            decisions = read_decisions(
+                shadow.path, limit=limit, symbol=symbol or None,
+                verdict=verdict or None, since=since or None)
+            closed = (_guardian.closed_trades()
+                     if _guardian is not None else [])
+            summary = summarize(decisions, closed)
+        except Exception as e:
+            log.exception("shadow decision read failed")
+            return {"enabled": True, "decisions": [], "summary": {},
+                    "error": f"{type(e).__name__}: {e}"}
+        return {
+            "enabled": True,
+            "decisions": decisions,
+            "summary": summary,
+            "config": {"model": shadow.model, "path": str(shadow.path)},
+        }
+
     @app.get("/api/scan")
     def scan(user: dict = Depends(_require_auth)):
         """

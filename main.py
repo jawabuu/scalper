@@ -351,6 +351,21 @@ if __name__ == "__main__":
                                   f"entries will use the scan snapshot")
                         auto.stream = None
                 auto.peer_eval = _PEER_EVAL
+                if cfg.shadow_enabled:
+                    try:
+                        from bot.shadow_decision import ShadowDecisionLogger
+                        auto.shadow = ShadowDecisionLogger(
+                            path=cfg.shadow_path, model=cfg.shadow_model,
+                            max_per_minute=cfg.shadow_max_per_minute)
+                        log.warning(
+                            f"Shadow decision log ON (model={cfg.shadow_model}, "
+                            f"path={cfg.shadow_path}) — advisory only, "
+                            f"per JEV-BRIEF.md. Read via GET /api/shadow.")
+                    except Exception as e:
+                        log.error(f"Shadow decision log failed to start: {e} "
+                                  f"— auto-trade continues without it.",
+                                  exc_info=True)
+                        auto.shadow = None
                 set_auto_trader(auto)
 
                 def _auto_loop():

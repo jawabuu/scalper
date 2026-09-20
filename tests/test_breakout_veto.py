@@ -6252,3 +6252,152 @@ def test_the_reset_endpoint_imports_every_name_it_uses():
                if n in {"DAY_TZ_OFFSET_H", "day_report", "_DAY_BASELINE"}
                and n not in imported}
     assert not missing, f"used but never imported here: {sorted(missing)}"
+
+
+# ── The daily loss limit trails the day's HIGH ───────────────────────────────
+# Measured from the open, a day that runs +3% and bleeds back to breakeven has
+# "lost nothing" and keeps trading, having handed back the whole day. Measured
+# from the peak, it stops. On a day that only falls, peak == open and the two
+# are identical — never looser, only tighter on days that were ahead.
+
+def _safety_cfg(limit=3.0):
+    from dataclasses import replace
+    from bot.auto_trader import AutoTradeConfig
+    return replace(AutoTradeConfig(), daily_loss_limit_pct=limit,
+                   daily_halt_enabled=True, max_open_positions=6)
+
+
+def _walk(path, limit=3.0, start=100.0):
+    """Returns the balance it halted at, or None."""
+    from bot.auto_trader import SafetyState, check_safety
+    cfg = _safety_cfg(limit)
+    st = SafetyState(day_start_balance=start, day_peak_balance=start, day_key="k")
+    for b in path:
+        ok, why = check_safety(st, cfg, balance=b, open_positions=0,
+                               symbol="X/USDT:USDT", current_rsi=50.0, side="short")
+        if not ok:
+            return b, why
+    return None, None
+
+
+def test_a_day_that_gives_back_its_gains_is_halted():
+    """The case the old rule missed entirely: never below the open."""
+    b, why = _walk([100, 104, 103, 102, 101, 100.5])
+    assert b == 100.5, "should halt on the giveback"
+    assert "from today's high" in why
+    assert "104.00" in why
+
+
+def test_a_day_that_only_falls_behaves_exactly_as_before():
+    """peak == open, so the trailing rule is identical there."""
+    b, _ = _walk([100, 99, 98, 97.0])
+    assert b == 97.0
+
+
+def test_a_giveback_under_the_limit_does_not_halt():
+    b, _ = _walk([100, 103, 102, 101, 100.2])      # 2.72% off the peak
+    assert b is None
+
+
+def test_the_peak_never_starts_below_the_opening_balance():
+    from bot.auto_trader import SafetyState, check_safety
+    st = SafetyState(day_start_balance=100.0, day_peak_balance=0.0, day_key="k")
+    check_safety(st, _safety_cfg(), balance=99.0, open_positions=0,
+                 symbol="X", current_rsi=50.0, side="short")
+    assert st.day_peak_balance == 100.0
+
+
+def test_the_peak_resets_with_the_day():
+    from bot.auto_trader import SafetyState, roll_day, day_start_ts
+    import time
+    st = SafetyState(day_start_balance=100.0, day_peak_balance=140.0, day_key="old")
+    st = roll_day(st, 90.0, day_start_ts(time.time()) + 3)
+    assert st.day_peak_balance == 90.0, "a new day cannot inherit yesterday's high"
+
+
+def test_the_message_reports_the_days_return_with_the_right_sign():
+    _, why = _walk([100, 99, 98, 97.0])
+    assert "-3.0% on the day" in why, why
+
+
+def test_the_peak_survives_a_restart():
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader)
+    assert '"day_peak_balance": getattr(self.state, "day_peak_balance", 0.0)' in src
+    assert 's.day_peak_balance = float(data.get("day_peak_balance") or 0.0)' in src
+
+
+# ── Account value vs sizing balance ─────────────────────────────────────────
+# Fund the account 4500 USDT + 500 BNB and every fee leaves the BNB balance,
+# never touching USDT. A USDT-only figure therefore cannot see fees at all,
+# and the trade record drifts from the wallet forever — part of wallet_gap.
+#
+# But sizing must stay USDT-only: ENTRY_RISK_PCT means a fraction of capital
+# that can absorb a LOSS, and the fee reserve cannot take one.
+
+def _bal(bnb="0.8", usdt="4500.0"):
+    return {"info": {"totalWalletBalance": usdt, "assets": [
+        {"asset": "USDT", "walletBalance": usdt},
+        {"asset": "BNB", "walletBalance": bnb}]}}
+
+
+def test_account_value_includes_the_fee_reserve():
+    from bot.futures_guardian import resolve_account_value
+    v, per, un = resolve_account_value(_bal(), {"BNB": 625.0})
+    assert v == 5000.0
+    assert per["BNB"]["usdt"] == 500.0
+    assert un == []
+
+
+def test_sizing_stays_usdt_only():
+    """Sizing against the fee reserve would risk money that cannot lose."""
+    from bot.futures_guardian import resolve_usdt_balance
+    sz, _ = resolve_usdt_balance(_bal())
+    assert sz == 4500.0
+
+
+def test_a_bnb_fee_is_invisible_to_sizing_and_visible_to_account_value():
+    from bot.futures_guardian import resolve_account_value, resolve_usdt_balance
+    before, _, _ = resolve_account_value(_bal("0.80"), {"BNB": 625.0})
+    after, _, _ = resolve_account_value(_bal("0.64"), {"BNB": 625.0})
+    assert round(after - before, 2) == -100.0
+    assert resolve_usdt_balance(_bal("0.80"))[0] == \
+           resolve_usdt_balance(_bal("0.64"))[0]
+
+
+def test_an_unpriced_asset_is_reported_not_silently_dropped():
+    """Dropping it would UNDERSTATE the account with no signal."""
+    from bot.futures_guardian import resolve_account_value
+    b = _bal()
+    b["info"]["assets"].append({"asset": "XYZ", "walletBalance": "3.0"})
+    v, per, un = resolve_account_value(b, {"BNB": 625.0})
+    assert un == ["XYZ"]
+    assert per["XYZ"]["usdt"] is None
+    assert v == 5000.0
+
+
+def test_stablecoins_need_no_price():
+    from bot.futures_guardian import resolve_account_value
+    b = {"info": {"assets": [{"asset": "USDC", "walletBalance": "10"},
+                             {"asset": "FDUSD", "walletBalance": "5"}]}}
+    assert resolve_account_value(b)[0] == 15.0
+
+
+def test_no_assets_array_yields_zero_rather_than_a_guess():
+    from bot.futures_guardian import resolve_account_value
+    assert resolve_account_value({"info": {"totalWalletBalance": "4500"}})[0] == 0.0
+
+
+def test_funding_is_folded_into_realised_like_binance_does():
+    """
+    Binance's position card sums Closing PNL + Funding Fee into Realized PNL.
+    FUNDING_FEE was never read, so a funded position moved the wallet by more
+    than the trade record explained.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._income_for_position)
+    assert 'kind == "FUNDING_FEE"' in src
+    assert "fund += val" in src                 # SIGNED — funding is received too
+    assert "return round(pnl + fund, 8)" in src

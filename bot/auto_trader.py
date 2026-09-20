@@ -605,6 +605,9 @@ class SafetyState:
     # rollover is the real 00:00 balance; one taken at a mid-day restart is
     # just "the balance when the process woke up" and must not be presented as
     # the day's starting figure.
+    # The day's high-water mark. The daily loss limit trails this, not the
+    # opening balance, so a day that gives back its gains stops.
+    day_peak_balance: float = 0.0
     day_baseline_at: float = 0.0
     day_baseline_source: str = ""      # rollover | restart | operator
     day_key: str = ""
@@ -648,6 +651,7 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
     if state.day_key != key:
         state.day_key = key
         state.day_start_balance = balance
+        state.day_peak_balance = balance      # the peak resets with the day
         started = day_start_ts(now)
         state.day_started_at = started
         state.day_baseline_at = now
@@ -787,13 +791,32 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
     if state.halted_reason:
         return False, state.halted_reason
 
+    # The limit trails the day's HIGH-WATER MARK, not the opening balance.
+    #
+    # Measured from the open, a day that runs +3% and then bleeds back to
+    # breakeven has "lost nothing" and keeps trading, having given back the
+    # entire day. Measured from the peak, the same day stops once it hands
+    # back the limit. On a day that only ever falls, peak == open and the two
+    # are identical — so this is never LOOSER than the old behaviour, only
+    # tighter on days that were ahead.
+    #
+    # The peak is seeded at the open and updated on every check, so it cannot
+    # start below the balance the day began with.
     if halt_on and cfg.daily_loss_limit_pct and state.day_start_balance > 0:
-        drawdown = (state.day_start_balance - balance) / state.day_start_balance * 100
+        if balance > 0:
+            state.day_peak_balance = max(
+                float(state.day_peak_balance or 0.0),
+                float(state.day_start_balance), float(balance))
+        peak = float(state.day_peak_balance or state.day_start_balance)
+        drawdown = (peak - balance) / peak * 100
         if drawdown >= cfg.daily_loss_limit_pct:
+            # As a RETURN, so "-3.0% on the day" reads the way it should.
+            from_open = (balance - state.day_start_balance) / state.day_start_balance * 100
             state.halted_reason = (
-                f"daily loss limit hit: down {drawdown:.1f}% from "
-                f"{state.day_start_balance:.2f} — auto-trade halted until "
-                f"tomorrow (UTC) or a manual reset"
+                f"daily loss limit hit: down {drawdown:.1f}% from today's "
+                f"high {peak:.2f} (open {state.day_start_balance:.2f}, "
+                f"{from_open:+.1f}% on the day) — auto-trade halted until "
+                f"tomorrow or a manual reset"
             )
             return False, state.halted_reason
 
@@ -895,6 +918,9 @@ class AutoTrader:
         self._stream_log_n: int = 0
         # Cross-evaluation peer, set by main.py. None = off.
         self.peer_eval = None
+        # Shadow decision logger (bot/shadow_decision.py), set by main.py.
+        # None = off. Advisory only — it never gates, sizes or delays a trade.
+        self.shadow = None
 
     # -- reporting -------------------------------------------------------
     # Rejections that will NEVER succeed on a retry. Narrow on purpose:
@@ -960,6 +986,7 @@ class AutoTrader:
         return {
             "day_start_balance": self.state.day_start_balance,
             "day_started_at": getattr(self.state, "day_started_at", 0.0),
+            "day_peak_balance": getattr(self.state, "day_peak_balance", 0.0),
             "day_baseline_at": getattr(self.state, "day_baseline_at", 0.0),
             "day_baseline_source": getattr(self.state, "day_baseline_source", ""),
             "day_key": self.state.day_key,
@@ -984,6 +1011,7 @@ class AutoTrader:
         s = self.state
         s.day_start_balance = float(data.get("day_start_balance") or 0.0)
         s.day_started_at = float(data.get("day_started_at") or 0.0)
+        s.day_peak_balance = float(data.get("day_peak_balance") or 0.0)
         s.day_baseline_at = float(data.get("day_baseline_at") or 0.0)
         s.day_baseline_source = str(data.get("day_baseline_source") or "")
         s.day_key = data.get("day_key") or ""
@@ -1379,6 +1407,18 @@ class AutoTrader:
                         f"scan figures alone this would have been entered.")
                 refusals[_refusal_key(decision.reason)] = refusals.get(
                     _refusal_key(decision.reason), 0) + 1
+                # The refusal arm of the shadow log (JEV-BRIEF.md §1): without
+                # this, there is no counterfactual for what jev would have
+                # done with a candidate the bot itself skipped. Fire-and-
+                # forget, same pattern as peer_eval below — never affects the
+                # decision already made.
+                sh = getattr(self, "shadow", None)
+                if sh is not None:
+                    try:
+                        sh.decide_async(symbol, side, row,
+                                       bot_decision="SKIP", snap=snap)
+                    except Exception:
+                        pass
                 continue
             self._skip_reasons.pop(symbol, None)
 
@@ -1481,6 +1521,12 @@ class AutoTrader:
                         "callback_pct": decision.callback_pct,
                         "callback_source": decision.callback_source,
                         "was_reentry": "cooldown overridden" in why,
+                        # The exchange's own order id. Added so the shadow
+                        # decision log (bot/shadow_decision.py, JEV-BRIEF.md
+                        # §5) can join a jev verdict recorded BEFORE this
+                        # order existed to the closed-trade record it later
+                        # becomes — no other field here is a stable join key.
+                        "entry_order_id": res.get("order_id"),
                         "auto": True,
                     })
                 except Exception as e:
@@ -1498,6 +1544,18 @@ class AutoTrader:
                 if pe is not None:
                     try:
                         pe.notify_entry(symbol, side, row, decision.reason)
+                    except Exception:
+                        pass
+                # The ENTER arm of the shadow log (JEV-BRIEF.md §1) — same
+                # candidate, same fire-and-forget pattern as peer_eval just
+                # above, now carrying the real order id so /api/shadow can
+                # join this verdict to the trade it turns into.
+                sh = getattr(self, "shadow", None)
+                if sh is not None:
+                    try:
+                        sh.decide_async(symbol, side, row,
+                                       bot_decision="ENTER", snap=snap,
+                                       entry_order_id=res.get("order_id"))
                     except Exception:
                         pass
                 self._record("entered",

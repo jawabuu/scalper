@@ -508,6 +508,30 @@ class BotConfig:
     # arming). Those assertions are coupling, not regressions, but the change
     # is real and belongs behind a switch for one run.
     # Set GUARD_ARM_AT_ENTRY=true in compose to enable it.
+    # ── Shadow decision log (bot/shadow_decision.py) ─────────────────────
+    # Per JEV-BRIEF.md: for every AUTO-ENTRY candidate — entered OR refused —
+    # ask jev an advisory ENTER/SKIP judgement and log it to
+    # logs/shadow_decisions.jsonl, BEFORE the trade's outcome is known. Never
+    # gates, sizes, or delays anything; read via GET /api/shadow.
+    #
+    # OFF by default: it needs TYPESAFE_API_KEY and `pip install
+    # typesafe-sdk`, and it fires once per candidate the auto-loop resolves —
+    # most cycles, most candidates are refused, so this can mean real request
+    # volume. Watch it for a while before assuming the cost is acceptable
+    # long-term.
+    shadow_enabled: bool = field(default_factory=lambda: _env_bool(
+        "SHADOW_ENABLED", False))
+    shadow_model: str = field(default_factory=lambda: _env(
+        "SHADOW_MODEL", "jev"))
+    shadow_path: str = field(default_factory=lambda: _env(
+        "SHADOW_PATH", "logs/shadow_decisions.jsonl"))
+    # Ceiling on jev calls per minute from the shadow logger specifically —
+    # independent of the entry path's own pacing, since a busy scan can offer
+    # far more refused candidates per cycle than the bot ever places orders
+    # for. Excess candidates are simply not judged that cycle; never queued,
+    # never blocks the loop.
+    shadow_max_per_minute: int = field(default_factory=lambda: _env_int(
+        "SHADOW_MAX_PER_MINUTE", 30))
     # Symbols the futures scan must never surface, comma-separated. Matched on
     # the BASE (SNXX matches SNXX/USDT:USDT), so no need to write the suffix.
     #
