@@ -140,7 +140,7 @@ def save(path: str, *, states: dict, pos_meta: dict, closed_trades: list,
     return _atomic_write(path, payload)
 
 
-def reset(path: str, mode: str) -> str:
+def reset(path: str, mode: str, journal_path: str = "") -> str:
     """
     Clear persisted state before it is loaded.
 
@@ -159,6 +159,34 @@ def reset(path: str, mode: str) -> str:
     mode = (mode or "").strip().lower()
     if mode not in ("history", "all"):
         return ""
+
+    # THE JOURNAL IS WHERE THE TRADES ACTUALLY LIVE.
+    #
+    # Closed trades moved to logs/trades.jsonl when the journal was introduced
+    # (futures_guardian.py:2585 — "the journal is the source of truth"), and
+    # this function was never updated. It kept clearing
+    # data["closed_trades"], a field nothing reads any more, so
+    # FUTURES_STATE_RESET=history reported success while the cards went on
+    # showing every trade. Observed 2026-09-20: 512 trades, +$1605.64 P&L and
+    # -$1124.27 fees survived a history reset intact, while wallet_start —
+    # which IS in the state file — was correctly cleared. The reset half-fired.
+    #
+    # Renamed, never deleted, like the state file, so a stray flag is
+    # recoverable.
+    journal = journal_path or (
+        os.path.join(os.path.dirname(path), "trades.jsonl") if path else "")
+    if journal and os.path.exists(journal):
+        jbak = f"{journal}.{time.strftime('%Y%m%d-%H%M%S')}.bak"
+        try:
+            os.replace(journal, jbak)
+            log.warning(f"FUTURES_STATE_RESET={mode} — archived the trade "
+                        f"journal to {jbak}. The cards read the JOURNAL, so "
+                        f"this is what actually clears P&L, fees and the "
+                        f"trade list.")
+        except Exception as e:
+            log.error(f"could not archive the trade journal at {journal}: {e} "
+                      f"— trade history will SURVIVE this reset.")
+
     if not path or not os.path.exists(path):
         log.warning(f"FUTURES_STATE_RESET={mode} but no state file at {path}")
         return ""
@@ -186,9 +214,9 @@ def reset(path: str, mode: str) -> str:
         data["wallet_start"] = None
         _atomic_write(path, data)
         log.warning(f"FUTURES_STATE_RESET=history — dropped {dropped} closed "
-                    f"trade(s) and the wallet baseline; open positions and the "
-                    f"daily-loss baseline kept. "
-                    f"Previous state archived at {backup}.")
+                    f"trade(s) from the state file, the trade journal, and the "
+                    f"wallet baseline; open positions and the daily-loss "
+                    f"baseline kept. Previous state archived at {backup}.")
         return backup
     except Exception as e:
         log.error(f"could not reset futures state at {path}: {e}")

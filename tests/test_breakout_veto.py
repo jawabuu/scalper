@@ -6401,3 +6401,81 @@ def test_funding_is_folded_into_realised_like_binance_does():
     assert 'kind == "FUNDING_FEE"' in src
     assert "fund += val" in src                 # SIGNED — funding is received too
     assert "return round(pnl + fund, 8)" in src
+
+
+# ── FUTURES_STATE_RESET must clear the JOURNAL ───────────────────────────────
+# Closed trades moved to logs/trades.jsonl when the journal was introduced
+# (futures_guardian.py:2585 — "the journal is the source of truth") and reset()
+# was never updated. It cleared data["closed_trades"], a field nothing reads,
+# so a history reset reported success while the cards kept showing everything.
+# Observed 2026-09-20: 512 trades, +$1605.64 P&L and -$1124.27 fees survived
+# intact, while wallet_start — which IS in the state file — was cleared. The
+# reset half-fired.
+
+def _reset_fixture(trades=512):
+    import json, os, tempfile
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "futures_state.json")
+    j = os.path.join(d, "trades.jsonl")
+    json.dump({"closed_trades": [{"a": 1}] * 3, "wallet_start": 5000.0,
+               "states": {"X/USDT:USDT": {}}, "day_start_balance": 4800.0,
+               "day_peak_balance": 4900.0}, open(p, "w"))
+    open(j, "w").write('{"symbol":"A"}\n' * trades)
+    return d, p, j
+
+
+def test_history_reset_archives_the_trade_journal():
+    import os
+    from bot.futures_state import reset
+    d, p, j = _reset_fixture()
+    reset(p, "history")
+    assert not os.path.exists(j), "the journal is what the cards read"
+    assert any(f.startswith("trades.jsonl") and f.endswith(".bak")
+               for f in os.listdir(d)), "must be archived, never deleted"
+
+
+def test_all_reset_archives_both_files():
+    import os
+    from bot.futures_state import reset
+    d, p, j = _reset_fixture()
+    reset(p, "all")
+    assert not os.path.exists(j) and not os.path.exists(p)
+    baks = [f for f in os.listdir(d) if f.endswith(".bak")]
+    assert len(baks) == 2, baks
+
+
+def test_history_reset_still_keeps_the_daily_baseline():
+    """Deliberate: a reset must not hand the daily halt back its allowance."""
+    import json
+    from bot.futures_state import reset
+    d, p, j = _reset_fixture()
+    reset(p, "history")
+    data = json.load(open(p))
+    assert data["day_start_balance"] == 4800.0
+    assert data["day_peak_balance"] == 4900.0
+    assert data["wallet_start"] is None          # this one DOES reset
+    assert data["states"]                        # open positions kept
+
+
+def test_a_missing_journal_is_not_an_error():
+    import os
+    from bot.futures_state import reset
+    d, p, j = _reset_fixture()
+    os.remove(j)
+    reset(p, "history")                          # must not raise
+
+
+def test_the_journal_is_cleared_even_with_no_state_file():
+    import os
+    from bot.futures_state import reset
+    d, p, j = _reset_fixture()
+    os.remove(p)
+    reset(p, "history")
+    assert not os.path.exists(j), "trades must go even if the state file is gone"
+
+
+def test_main_passes_the_configured_journal_path():
+    import inspect, main
+    src = inspect.getsource(main)
+    assert "journal_path=(" in src
+    assert "cfg.trade_journal_path" in src

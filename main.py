@@ -137,7 +137,12 @@ if __name__ == "__main__":
         if cfg.futures_state_path:
             if cfg.futures_state_reset:
                 from bot import futures_state as _fs
-                _fs.reset(cfg.futures_state_path, cfg.futures_state_reset)
+                _fs.reset(
+                    cfg.futures_state_path, cfg.futures_state_reset,
+                    journal_path=(
+                        cfg.trade_journal_path
+                        or str(Path(cfg.futures_state_path)
+                               .with_name("trades.jsonl"))))
                 log.warning(
                     "FUTURES_STATE_RESET is set — this runs on EVERY restart "
                     "while present. Remove it from the environment once the "
