@@ -115,26 +115,26 @@ _CONVICTION_LEVELS = [
     "Strong. Every structural reading given points the same way, cleanly.",
 ]
 
+# ── ATOMIC QUESTIONS, COMPOSED IN CODE ──────────────────────────────────────
+#
+# There is NO "verdict" question. Asking one composite "would you take this
+# trade?" hands the weighting to the model, and then a change of priorities is
+# a prompt rewrite whose effect on past rows is unknowable.
+#
+# Each question below judges ONE thing. The verdict is assembled from them by
+# `_compose_verdict` using weights that live in this file. When the balance
+# needs to change, you edit a coefficient — and because every component is
+# recorded raw on every row, the weights can be RE-FITTED OFFLINE against
+# outcomes without re-running a single call.
+#
+# That last property is the point. It turns the shadow log from "was jev
+# right?" into "which component carried the signal, and at what weight?".
 _QUESTION_SPECS = {
-    "verdict": (
-        "choice",
-        "Given ONLY the structural readings in `candidate` — no order-book, "
-        "spread, liquidity or trade-size data is available for this "
-        "judgement, and that absence is a known, accepted limitation, not "
-        "something to infer or guess at — would you take this "
-        "`candidate.side` trade on `candidate.symbol`? Judge the "
-        "INTERACTION between the trend, taper/turn/breakout structure and "
-        "regime fields as a single shape: still expanding, or already "
-        "exhausted. Do not simply restate whether RSI or ATR individually "
-        "clear a threshold; those already gated this candidate before you "
-        "were asked.",
-        _VERDICT_CRITERIA,
-    ),
     "conviction": (
         "score",
         "How cleanly do the structural readings in `candidate` agree with "
-        "each other about the direction of this move, regardless of which "
-        "way your verdict went?",
+        "each other about the direction of this move? Judge agreement only — "
+        "not whether the trade is a good one.",
         _CONVICTION_LEVELS,
     ),
     "looks_exhausted": (
@@ -153,7 +153,49 @@ _QUESTION_SPECS = {
         "against it?",
         None,
     ),
+    "structure_intact": (
+        "noul",
+        "Do the taper, turn and breakout readings in `candidate` still "
+        "describe an orderly move, rather than one that has become erratic? "
+        "Judge the shape only — no order-book, spread or trade-size data is "
+        "available, and that absence is a known limitation, not something to "
+        "infer or guess at.",
+        None,
+    ),
 }
+
+# Code-owned weights. Positive means "argues FOR the trade".
+# Starting values are deliberately plain — equal weight on the two readings
+# with a clear direction, half on the softer ones. They are a starting point
+# to be re-fitted from the logged components, NOT a tuned result.
+_WEIGHTS = {
+    "not_exhausted": 1.0,     # 1 - looks_exhausted
+    "regime_aligned": 1.0,
+    "structure_intact": 0.5,
+    "conviction": 0.5,        # normalised from the 0-3 scale
+}
+# Above this, the composed score reads ENTER. Held here, not in the model.
+_ENTER_THRESHOLD = 0.55
+
+
+def _compose_verdict(conviction: float, looks_exhausted: float,
+                     regime_aligned: float, structure_intact: float) -> tuple:
+    """
+    Assemble ENTER/SKIP from the atomic judgements.
+
+    Returns (verdict, score). The score is the weighted mean on 0-1, recorded
+    alongside the raw components so the threshold and the weights can both be
+    re-examined against outcomes later.
+    """
+    parts = {
+        "not_exhausted": 1.0 - float(looks_exhausted),
+        "regime_aligned": float(regime_aligned),
+        "structure_intact": float(structure_intact),
+        "conviction": max(0.0, min(1.0, float(conviction) / 3.0)),
+    }
+    total = sum(_WEIGHTS.values()) or 1.0
+    score = sum(parts[k] * _WEIGHTS[k] for k in parts) / total
+    return ("ENTER" if score >= _ENTER_THRESHOLD else "SKIP"), round(score, 4)
 
 
 def _fingerprint() -> str:
@@ -187,6 +229,13 @@ class ShadowDecision:
     model: str
     fingerprint: str
     inputs_seen: dict
+    # Recorded RAW so the weights and threshold can be re-fitted offline
+    # against outcomes, without re-running a single call. Defaults keep older
+    # rows loadable.
+    structure_intact: float = 0.0
+    composed_score: float = 0.0
+    weights: dict = None
+    enter_threshold: float = 0.0
 
     def agrees_with_bot(self) -> bool | None:
         if self.jev_verdict == "UNKNOWN":
@@ -378,20 +427,31 @@ class ShadowDecisionLogger:
 
     def _parse(self, symbol, side, bot_decision, state, entry_order_id,
               result) -> ShadowDecision:
-        v = result.choices["verdict"]
         conv = result.scores["conviction"]
+        conviction = float(conv.score)
         exhausted = float(result.nouls["looks_exhausted"].noul)
         aligned = float(result.nouls["regime_aligned"].noul)
-        verdict = str(v.choice).upper()
-        if verdict not in VALID_VERDICTS:
-            verdict = "UNKNOWN"
-        conviction = float(conv.score)
+        intact = float(result.nouls["structure_intact"].noul)
+        # THE VERDICT IS COMPOSED HERE, not asked. See _compose_verdict.
+        verdict, score = _compose_verdict(conviction, exhausted, aligned,
+                                          intact)
+        # Confidence is the model's LEAST confident component, not an average:
+        # a verdict assembled from four judgements is only as trustworthy as
+        # its weakest input, and averaging would hide exactly the case worth
+        # abstaining on.
+        confs = [float(getattr(o, "confidence", 0.0) or 0.0)
+                 for o in (conv,
+                           result.nouls["looks_exhausted"],
+                           result.nouls["regime_aligned"],
+                           result.nouls["structure_intact"])]
         return ShadowDecision(
             ts=time.time(), symbol=symbol, side=side,
             bot_decision=bot_decision, jev_verdict=verdict,
-            confidence=float(getattr(v, "confidence", 0.0) or 0.0),
+            confidence=round(min(confs) if confs else 0.0, 4),
             conviction=conviction, looks_exhausted=exhausted,
-            regime_aligned=aligned,
+            regime_aligned=aligned, structure_intact=intact,
+            composed_score=score, weights=dict(_WEIGHTS),
+            enter_threshold=_ENTER_THRESHOLD,
             reasons=_reasons(verdict, conviction, exhausted, aligned),
             entry_order_id=entry_order_id,
             model=str(getattr(result, "model", self.model)),

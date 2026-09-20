@@ -10,6 +10,19 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Shadow decision log (bot/shadow_decision.py) — OPTIONAL, and installed
+# tolerantly on purpose.
+#
+# The module already disables itself with one warning if the import or
+# TYPESAFE_API_KEY is missing, so a trading container must never fail to BUILD
+# over an advisory logger. `|| true` keeps that property: if the package is
+# unavailable or renamed, the image still ships and the bot still trades, with
+# the shadow log simply off.
+#
+# Verify after a build with:  python -c "import typesafe_sdk"
+RUN pip install --no-cache-dir "typesafe-sdk>=0.1" || \
+    echo "typesafe-sdk unavailable — shadow decision log will stay disabled"
+
 # Copy source
 COPY . .
 

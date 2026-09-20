@@ -29,13 +29,36 @@ class _Ans:
 
 
 class _Result:
-    def __init__(self, verdict="enter", confidence=0.8, conviction=2.0,
-                 looks_exhausted=0.2, regime_aligned=0.8):
+    """
+    There is no "verdict" answer any more. jev is asked four ATOMIC questions
+    and the verdict is composed in code by _compose_verdict, so the weighting
+    can be re-fitted offline instead of living in a prompt.
+
+    `verdict` here is a convenience for the tests: it picks component values
+    that compose to the wanted side.
+    """
+    def __init__(self, verdict="enter", confidence=0.8, conviction=None,
+                 looks_exhausted=None, regime_aligned=None,
+                 structure_intact=None):
+        want_enter = str(verdict).lower() != "skip"
+        if conviction is None:
+            conviction = 2.6 if want_enter else 1.0
+        if looks_exhausted is None:
+            looks_exhausted = 0.1 if want_enter else 0.9
+        if regime_aligned is None:
+            regime_aligned = 0.9 if want_enter else 0.15
+        if structure_intact is None:
+            structure_intact = 0.9 if want_enter else 0.2
         self.model = "jev-test"
-        self.choices = {"verdict": _Ans(choice=verdict, confidence=confidence)}
-        self.scores = {"conviction": _Ans(score=conviction, confidence=0.7)}
-        self.nouls = {"looks_exhausted": _Ans(noul=looks_exhausted),
-                     "regime_aligned": _Ans(noul=regime_aligned)}
+        self.choices = {}
+        self.scores = {"conviction": _Ans(score=conviction,
+                                          confidence=confidence)}
+        self.nouls = {
+            "looks_exhausted": _Ans(noul=looks_exhausted,
+                                    confidence=confidence),
+            "regime_aligned": _Ans(noul=regime_aligned, confidence=confidence),
+            "structure_intact": _Ans(noul=structure_intact,
+                                     confidence=confidence)}
 
 
 class _Client:
@@ -92,16 +115,22 @@ def test_the_order_book_gap_is_named_explicitly_not_omitted():
 
 
 def test_every_question_is_asked_in_one_request():
-    assert set(_QUESTION_SPECS) == {"verdict", "conviction", "looks_exhausted",
-                                    "regime_aligned"}
+    assert set(_QUESTION_SPECS) == {"conviction", "looks_exhausted",
+                                    "regime_aligned", "structure_intact"}
+    assert "verdict" not in _QUESTION_SPECS, \
+        "the verdict must be composed in code, not asked of the model"
 
 
-def test_the_verdict_question_offers_an_unknown_option():
-    kind, instructions, criteria = _QUESTION_SPECS["verdict"]
-    assert "unknown" in criteria
-
-
-# ── The writer: fire-and-forget, fail-open ───────────────────────────────────
+def test_every_question_judges_exactly_one_thing():
+    """
+    A composite "would you take this trade?" hands the weighting to the model,
+    and a change of priorities then becomes a prompt rewrite whose effect on
+    past rows is unknowable.
+    """
+    from bot.shadow_decision import _WEIGHTS, _ENTER_THRESHOLD
+    assert set(_WEIGHTS) == {"not_exhausted", "regime_aligned",
+                             "structure_intact", "conviction"}
+    assert 0.0 < _ENTER_THRESHOLD < 1.0
 
 def test_a_successful_call_writes_one_json_line(tmp_path):
     path = tmp_path / "shadow.jsonl"
@@ -148,14 +177,54 @@ def test_a_client_that_raises_still_logs_an_unknown_row(tmp_path):
     assert "502" in line["reasons"][0]
 
 
-def test_an_unrecognised_verdict_string_is_coerced_to_unknown_not_guessed(tmp_path):
-    path = tmp_path / "shadow.jsonl"
-    c = _Client(_Result(verdict="maybe"))
-    logger = ShadowDecisionLogger(path=str(path), client=c)
-    logger.decide_async("X/USDT:USDT", "long", _row(), bot_decision="SKIP")
+def test_a_missing_component_is_logged_as_unknown_not_guessed(tmp_path):
+    """
+    There is no verdict STRING to mis-parse any more. The equivalent risk is a
+    component the model did not return: composing a verdict from three of four
+    answers would silently change the weighting the row claims to use.
+    """
+    class _Partial(_Result):
+        def __init__(self):
+            super().__init__()
+            del self.nouls["structure_intact"]
+
+    path = tmp_path / "s.jsonl"
+    logger = ShadowDecisionLogger(path=str(path), client=_Client(_Partial()))
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="ENTER")
     assert _wait_for(lambda: path.exists() and path.read_text().strip())
-    line = json.loads(path.read_text().strip().splitlines()[0])
+    line = json.loads(path.read_text().strip().splitlines()[-1])
     assert line["jev_verdict"] == "UNKNOWN"
+    assert line["bot_decision"] == "ENTER"
+
+
+def test_the_weights_and_threshold_are_recorded_on_every_row(tmp_path):
+    """
+    Recorded so the composition can be RE-FITTED offline against outcomes
+    without re-running a single call — and so a row composed under different
+    weights is never silently compared against one that was not.
+    """
+    path = tmp_path / "s.jsonl"
+    logger = ShadowDecisionLogger(path=str(path),
+                                  client=_Client(_Result(verdict="enter")))
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="ENTER")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    line = json.loads(path.read_text().strip().splitlines()[-1])
+    assert line["weights"] and line["enter_threshold"] > 0
+    for k in ("conviction", "looks_exhausted", "regime_aligned",
+              "structure_intact", "composed_score"):
+        assert k in line, f"{k} must be recorded raw"
+
+
+def test_confidence_is_the_weakest_component_not_an_average(tmp_path):
+    """A verdict from four judgements is only as good as its weakest input."""
+    path = tmp_path / "s.jsonl"
+    r = _Result(verdict="enter")
+    r.nouls["regime_aligned"] = _Ans(noul=0.9, confidence=0.2)
+    logger = ShadowDecisionLogger(path=str(path), client=_Client(r))
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="ENTER")
+    assert _wait_for(lambda: path.exists() and path.read_text().strip())
+    line = json.loads(path.read_text().strip().splitlines()[-1])
+    assert line["confidence"] == 0.2
 
 
 def test_an_invalid_bot_decision_is_rejected_before_any_call(tmp_path):
