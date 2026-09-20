@@ -3112,3 +3112,49 @@ def test_confirmation_failure_is_treated_like_rejection():
     g = _arm(fake, adaptive=True)
     st = g._states["DOGE/USDT:USDT"]
     assert st.adaptive_trail_id, "protection must be kept when unconfirmable"
+
+
+# ── The superseded sweep must not eat the armed trail ────────────────────────
+# _cancel_superseded_stops protected floor_stop_id and adaptive_trail_id but
+# NOT native_trail_id. Arm-at-entry places the armed trail at adoption, it
+# lands in _all_stop_ids, and the very next fixed-stop placement swept it —
+# 4 seconds later on LSK live 2026-09-20 08:03:23, and on demo at 07:50:12.
+# Both instances, every position. Arm-at-entry never survived its own first
+# cycle, which is why the poll-driven ratchet went on doing all the work.
+#
+# Same class as the SOLV case the method's own docstring records: a sweep that
+# did not know about a protection added after it was written.
+
+def test_the_sweep_keeps_the_armed_trail():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.38075)],
+                        price=0.38075)
+    g = _guardian(fake, arm_at_entry=True, adaptive=True)
+    g.run_cycle()
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.native_trail_id, "arm-at-entry placed nothing"
+    assert st.native_trail_id not in [o for o, _ in fake.cancelled], \
+        "the armed trail was swept by the fixed-stop placement"
+
+
+def test_all_three_protections_coexist_after_the_first_cycle():
+    fake = FakeExchange(positions=[_raw_pos("long", entry=0.38075)],
+                        price=0.38075)
+    g = _guardian(fake, arm_at_entry=True, adaptive=True)
+    g.run_cycle()
+    st = g._states["DOGE/USDT:USDT"]
+    assert st.adaptive_trail_id and st.native_trail_id and st.stop_order_id
+    assert not fake.cancelled, f"nothing should be cancelled: {fake.cancelled}"
+
+
+def test_every_poll_independent_protection_is_in_the_protected_set():
+    """
+    The sweep has now lost the adaptive trail once (SOLV) and the armed trail
+    once (LSK). Both were added to state after the sweep was written.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._cancel_superseded_stops)
+    i = src.index("protected = {")
+    block = src[i:src.index("for oid in ids", i)]
+    for field in ("floor_stop_id", "adaptive_trail_id", "native_trail_id"):
+        assert field in block, f"{field} can be swept"

@@ -2153,11 +2153,23 @@ class FuturesGuardian:
         ids = list(self._all_stop_ids.get(pos.symbol) or [])
         st_ = state if state is not None else self._states.get(pos.symbol)
         # Never superseded: the profit floor is the guarantee that a position
-        # which has been well ahead does not close at a loss, and the adaptive
-        # trail is the protection that does not depend on the guardian's poll.
+        # which has been well ahead does not close at a loss, and the trails
+        # are the protection that does not depend on the guardian's poll.
+        #
+        # native_trail_id was MISSING here, and arm-at-entry made that fatal.
+        # The armed trail is placed at adoption, lands in _all_stop_ids, and
+        # the very next fixed-stop placement swept it — 4 seconds later on
+        # LSK live 2026-09-20 08:03:23, 4 seconds on demo 07:50:12. Both
+        # instances, every position. Arm-at-entry has therefore never survived
+        # its own first cycle, which is why the poll-driven ratchet has gone
+        # on doing all the work.
+        #
+        # Same class of bug as SOLV below: a sweep that did not know about a
+        # protection added after it was written.
         protected = {i for i in (
             getattr(st_, "floor_stop_id", None),
             getattr(st_, "adaptive_trail_id", None),
+            getattr(st_, "native_trail_id", None),
         ) if i} if st_ else set()
         for oid in ids:
             if keep and oid == keep:
