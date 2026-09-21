@@ -1708,6 +1708,53 @@ def test_it_is_not_superseded_when_other_stops_are_cancelled():
     assert "old-stop" in cancelled
 
 
+def test_the_ARM_AT_ENTRY_trail_is_never_swept_as_superseded():
+    """
+    The bug that made arm-at-entry a no-op for its entire life.
+
+    native_trail_id was MISSING from the sweep's protected set. The armed trail
+    is placed at adoption, lands in _all_stop_ids, and the very next
+    fixed-stop placement swept it — LSK live 2026-09-20 08:03:23 four seconds
+    after placement, demo 07:50:12 the same. Both instances, every position.
+    futures_guardian.py records that arm-at-entry "has therefore never
+    survived its own first cycle, which is why the poll-driven ratchet has
+    gone on doing all the work".
+
+    adaptive_trail_id has a test above; native_trail_id did not.
+    """
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    st.native_trail_id = "armed-1"
+    g._states["X/USDT:USDT"] = st
+    g._all_stop_ids["X/USDT:USDT"] = ["armed-1", "old-stop"]
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_superseded_stops(_TrailPos(), keep=None)
+    assert "armed-1" not in cancelled, "the armed trail must survive the sweep"
+    assert "old-stop" in cancelled
+
+
+def test_a_trail_placed_EARLIER_IN_THIS_CYCLE_is_protected():
+    """
+    The SOLV 19:26:49 shape. manage_position mutates a LOCAL state and writes
+    it back later, so a trail placed earlier in the same cycle is invisible in
+    self._states. The sweep must read the state object it is GIVEN, not the
+    stored one, or it cancels a protection one second after placing it.
+    """
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    g._states["X/USDT:USDT"] = GuardState()          # stored: knows nothing
+    local = GuardState()
+    local.native_trail_id = "placed-this-cycle"
+    g._all_stop_ids["X/USDT:USDT"] = ["placed-this-cycle", "old-stop"]
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_superseded_stops(_TrailPos(), keep=None, state=local)
+    assert "placed-this-cycle" not in cancelled
+    assert "old-stop" in cancelled
+
+
 def test_arming_cancels_the_adaptive_trail_rather_than_stacking():
     """
     The armed trail is ~0.15% of price; the adaptive one is the stop distance,
