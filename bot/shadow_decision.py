@@ -101,6 +101,26 @@ MAX_PER_MINUTE = 30
 # not time.
 DEDUP_WINDOW_SEC = 900.0
 
+# Backoff after consecutive SERVER-side failures. 2026-09-21 07:23-07:27:
+# TypeSafe returned 503 "no healthy upstream", then 529 "high traffic ...
+# try again later", then read timeouts, then recovered on its own. Throughout,
+# every candidate kept firing into a service explicitly asking to be left
+# alone, each one writing an UNKNOWN row.
+#
+# This is politeness and log noise, NOT data integrity — the resolver already
+# drops UNKNOWN rows, and the shadow path is advisory, so the pre-existing
+# behaviour was correct, just loud.
+BACKOFF_AFTER = 5            # consecutive server failures before pausing
+BACKOFF_START_S = 30.0
+BACKOFF_MAX_S = 300.0
+
+# Server-side and worth retrying later. NOT 4xx: a 400 is a config error that
+# retrying cannot fix, and "Unknown model" already latches permanently.
+_TRANSIENT_MARKERS = (
+    "500", "502", "503", "504", "529",
+    "timeout", "timed out", "connection", "temporarily",
+)
+
 # Bounds on the dedup map. Age pruning fires at the soft limit; the hard
 # ceiling evicts oldest-first when a single window holds more distinct states
 # than pruning can clear, which age alone cannot bound.
@@ -512,6 +532,10 @@ class ShadowDecisionLogger:
         self.max_per_minute = max_per_minute
         self._client = client              # injected in tests
         self._client_broken = False
+        self._consecutive_failures = 0
+        self._backoff_until = 0.0
+        self._backoff_s = BACKOFF_START_S
+        self.dropped_for_backoff = 0
         # 0 disables dedup entirely — the pre-v3.71.0 behaviour, kept because
         # it changes WHICH candidates get judged, not just how many.
         self.dedup_window = float(dedup_window)
@@ -554,6 +578,56 @@ class ShadowDecisionLogger:
                 return False
             self._seen[(symbol, side)] = (now, sig)
             return True
+
+    @staticmethod
+    def _is_transient(e: Exception) -> bool:
+        """
+        Is this failure worth retrying later?
+
+        Matched on the message rather than the exception type because the SDK
+        maps 503 and 529 onto the same TypeSafeInternalServerError, and a
+        read timeout onto a different class again — the status is the only
+        thing that distinguishes "their fleet is down" from "your request was
+        wrong".
+        """
+        text = str(e).lower()
+        return any(m in text for m in _TRANSIENT_MARKERS)
+
+    def _in_backoff(self) -> bool:
+        """True while pausing after repeated server-side failures."""
+        with self._lock:
+            if self._backoff_until and time.time() < self._backoff_until:
+                self.dropped_for_backoff += 1
+                return True
+            return False
+
+    def _note_failure(self, e: Exception) -> None:
+        """Count a server-side failure and pause once they stack up."""
+        if not self._is_transient(e):
+            return
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures < BACKOFF_AFTER:
+                return
+            # Already paused — do not extend it from the in-flight threads
+            # that were dispatched before the pause began.
+            if self._backoff_until and time.time() < self._backoff_until:
+                return
+            self._backoff_until = time.time() + self._backoff_s
+            log.warning(
+                f"shadow decision: {self._consecutive_failures} consecutive "
+                f"server-side failures — pausing judgements for "
+                f"{self._backoff_s:.0f}s. Never affects the real decision.")
+            self._backoff_s = min(self._backoff_s * 2, BACKOFF_MAX_S)
+
+    def _note_success(self) -> None:
+        """One good response clears the pause and the escalation."""
+        with self._lock:
+            if self._consecutive_failures or self._backoff_until:
+                log.info("shadow decision: judgements recovered.")
+            self._consecutive_failures = 0
+            self._backoff_until = 0.0
+            self._backoff_s = BACKOFF_START_S
 
     def _rate_ok(self) -> bool:
         now = time.time()
@@ -630,6 +704,14 @@ class ShadowDecisionLogger:
                          f"within {self.dedup_window:.0f}s. Never affects the "
                          f"real decision.")
             return
+        if self._in_backoff():
+            if self.dropped_for_backoff in (1, 100) or \
+                    self.dropped_for_backoff % 1000 == 0:
+                log.info(f"shadow decision: {self.dropped_for_backoff} "
+                         f"candidate(s) skipped while backing off from "
+                         f"server-side failures. Never affects the real "
+                         f"decision.")
+            return
         if not self._rate_ok():
             if self.dropped_for_rate in (1, 10) or self.dropped_for_rate % 100 == 0:
                 log.warning(f"shadow decision: rate cap "
@@ -649,6 +731,7 @@ class ShadowDecisionLogger:
             result = self._client.system_one(state, self._questions())
             rec = self._parse(symbol, side, bot_decision, state,
                               entry_order_id, result, triggers)
+            self._note_success()
         except Exception as e:
             # A rejected model name is a CONFIG error, not a transient one:
             # retrying cannot fix it, and the client constructs fine because
@@ -663,8 +746,16 @@ class ShadowDecisionLogger:
                           f"client.models.list(); 'jev' alone is the family, "
                           f"not an id.")
             else:
-                log.warning(f"shadow decision: {symbol} judgement failed "
-                            f"({type(e).__name__}: {e}) — logged as UNKNOWN.")
+                self._note_failure(e)
+                # Log the first few of a run at WARNING, then go quiet: a
+                # provider outage produced one line per candidate, which
+                # buried everything else in the log.
+                if self._consecutive_failures <= BACKOFF_AFTER:
+                    log.warning(f"shadow decision: {symbol} judgement failed "
+                                f"({type(e).__name__}: {e}) — logged as UNKNOWN.")
+                else:
+                    log.debug(f"shadow decision: {symbol} judgement failed "
+                              f"({type(e).__name__}: {e}) — logged as UNKNOWN.")
             rec = ShadowDecision(
                 ts=time.time(), symbol=symbol, side=side,
                 bot_decision=bot_decision, jev_verdict="UNKNOWN",

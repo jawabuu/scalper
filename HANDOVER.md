@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.76.0 backs the shadow logger off during provider outages.
+
 **START AT "THE OPEN PROBLEM: entry timing"** — that is the live work. The
 rest is settled, shelved, or a record of reversals.
 
@@ -160,6 +162,46 @@ alone cannot express the goal.
 - Do NOT use `peak_roi` or `capture` in any of this analysis — peak is
   sampled, not tracked, and under-records by a median 9.55 ROI points on the
   moves that matter.
+
+---
+
+## Shadow backoff on provider outages (v3.76.0)
+
+2026-09-21 07:23-07:27 TypeSafe degraded and recovered on its own:
+
+    503 no healthy upstream            (request id ABSENT — died at their edge)
+    529 high traffic, try again later  (request id PRESENT — shed deliberately)
+    ReadTimeout (timeout=10.0)
+    200 in ~660ms                      recovered
+
+**Not a proxy problem, and the proxy was never involved.** The SDK runs on
+`httpx2`, which reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — not
+`SOCKS_PROXY`, which is what compose sets and only ccxt consumes explicitly.
+A clean, service-specific 503 in ~310ms is an upstream answering promptly; a
+broken proxy gives connection refused, timeouts or 407.
+
+Throughout, every candidate kept firing into a service explicitly asking to
+be left alone, writing one UNKNOWN row and one WARNING each.
+
+`BACKOFF_AFTER=5` consecutive SERVER-side failures now pauses judgements,
+starting at 30s and doubling to a 300s ceiling. One good response clears both
+the pause and the escalation. Replayed against the real sequence: 30
+candidates offered, **5 calls made, 25 skipped**.
+
+Deliberate boundaries:
+
+- **4xx never backs off.** A 400 is a config error waiting cannot fix, and
+  `Unknown model` still latches permanently. Transience is matched on the
+  message because the SDK maps 503 and 529 onto the same exception class.
+- **In-flight threads cannot extend an active pause** — threads dispatched
+  before the pause land after it, and letting each re-arm would stretch 30s
+  indefinitely.
+- After the first `BACKOFF_AFTER` failures the per-candidate line drops to
+  DEBUG. The outage buried everything else in the log.
+
+This is politeness and log noise, **not data integrity** — the resolver
+already drops UNKNOWN rows and the shadow path is advisory. A test pins that
+`decide_async` still returns None for every candidate during an outage.
 
 ---
 

@@ -18,6 +18,7 @@ from bot.shadow_decision import (
     ShadowDecisionLogger, ShadowDecision, read_decisions, summarize,
     FINGERPRINT, _QUESTION_SPECS, _candidate_state, _reasons,
     VALID_VERDICTS, _noul_confidence, _component_confidence,
+    BACKOFF_AFTER, BACKOFF_START_S, BACKOFF_MAX_S,
     _state_signature, _materially_changed,
 )
 
@@ -512,6 +513,109 @@ def test_a_field_appearing_or_vanishing_counts_as_changed():
     full = _candidate_state("X/USDT:USDT", "short", _row(), {})
     gone = _candidate_state("X/USDT:USDT", "short", _row(rsi=None), {})
     assert _materially_changed(_state_signature(full), _state_signature(gone))
+
+
+# ── Backoff on provider outages ─────────────────────────────────────────────
+#
+# 2026-09-21 07:23-07:27: TypeSafe returned 503 "no healthy upstream", then
+# 529 "high traffic ... try again later", then read timeouts, then recovered
+# on its own. Throughout, every candidate kept firing into a service
+# explicitly asking to be left alone, one UNKNOWN row and one WARNING each.
+#
+# Politeness and log noise, NOT data integrity — the resolver drops UNKNOWN
+# rows and the shadow path is advisory.
+
+def _fail(msg):
+    return RuntimeError(msg)
+
+
+def test_repeated_server_failures_pause_judgements(tmp_path):
+    c = _Client(raises=_fail("503 no healthy upstream"))
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0)
+    for i in range(12):
+        logger.decide_async(f"S{i}/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    time.sleep(0.4)
+    assert len(c.calls) <= BACKOFF_AFTER + 2, \
+        f"should stop calling after ~{BACKOFF_AFTER} failures, made {len(c.calls)}"
+    assert logger.dropped_for_backoff > 0
+
+
+def test_a_CONFIG_error_does_not_trigger_backoff_it_LATCHES(tmp_path):
+    # 400 Unknown model is unfixable by waiting; it must disable outright.
+    c = _Client(raises=_fail("400 Unknown model: jev"))
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0)
+    logger.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    assert _wait_for(lambda: logger._client_broken)
+    assert logger._consecutive_failures == 0, "a 4xx is not a transient failure"
+
+
+def test_a_400_that_is_NOT_unknown_model_is_also_not_transient():
+    logger = ShadowDecisionLogger(path="/dev/null")
+    assert not logger._is_transient(_fail("400 Bad Request: malformed state"))
+    assert not logger._is_transient(_fail("401 Unauthorized"))
+
+
+def test_the_outage_statuses_ARE_transient():
+    logger = ShadowDecisionLogger(path="/dev/null")
+    for msg in ("503 no healthy upstream",
+                "529 We are currently experiencing high traffic",
+                "Request timed out (timeout=10.0).",
+                "502 Bad Gateway", "500 Internal Server Error"):
+        assert logger._is_transient(_fail(msg)), msg
+
+
+def test_one_good_response_clears_the_pause(tmp_path):
+    c = _Client(raises=_fail("529 high traffic"))
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0)
+    for i in range(8):
+        logger.decide_async(f"S{i}/USDT:USDT", "short", _row(),
+                            bot_decision="SKIP")
+    time.sleep(0.3)
+    assert logger._backoff_until > 0
+    logger._note_success()
+    assert logger._backoff_until == 0.0
+    assert logger._consecutive_failures == 0
+    assert logger._backoff_s == BACKOFF_START_S, "escalation resets too"
+
+
+def test_the_pause_escalates_then_caps(tmp_path):
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"),
+                                  client=_Client(), dedup_window=0)
+    seen = []
+    for _ in range(12):
+        logger._consecutive_failures = BACKOFF_AFTER
+        logger._backoff_until = 0.0
+        logger._note_failure(_fail("503 no healthy upstream"))
+        seen.append(logger._backoff_s)
+    assert seen[0] < seen[1], "must escalate"
+    assert max(seen) <= BACKOFF_MAX_S, "and cap"
+
+
+def test_in_flight_threads_do_not_extend_an_active_pause(tmp_path):
+    # Threads dispatched before the pause began land afterwards; letting each
+    # one re-arm the backoff would stretch a 30s pause indefinitely.
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"),
+                                  client=_Client(), dedup_window=0)
+    logger._consecutive_failures = BACKOFF_AFTER
+    logger._note_failure(_fail("503 no healthy upstream"))
+    first = logger._backoff_until
+    for _ in range(5):
+        logger._note_failure(_fail("503 no healthy upstream"))
+    assert logger._backoff_until == first
+
+
+def test_backoff_never_touches_the_real_decision(tmp_path):
+    # The whole point: a provider outage must be invisible to trading.
+    c = _Client(raises=_fail("503 no healthy upstream"))
+    logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                                  dedup_window=0)
+    for i in range(20):
+        assert logger.decide_async(f"S{i}/USDT:USDT", "short", _row(),
+                                   bot_decision="SKIP") is None
 
 
 def test_an_invalid_bot_decision_is_rejected_before_any_call(tmp_path):
