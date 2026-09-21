@@ -327,6 +327,19 @@ class BotConfig:
     # noise-width callback and still leave this much profit.
     guard_min_trail_lock_roi: float = field(default_factory=lambda: _env_float(
         "GUARD_MIN_TRAIL_LOCK_ROI", 2.0))
+    # A SECOND dormant trail, activating at GUARD_BREAKEVEN_AT_ROI, so the
+    # promise "once a coin touches +3% it should never close at a loss" does
+    # not depend on a poll. The poll-driven floor loses the race whenever the
+    # retrace is faster than the interval: PHA 2026-09-21 08:29 peaked +3.2%,
+    # every placement was refused -2021 because price had already come back
+    # through the level, and it ran to -10.5% on the ATR stop alone.
+    #
+    # OFF by default: it adds a third resting trailing order, and order
+    # management is the area of this codebase with the worst track record.
+    # Run it on demo first and confirm from the logs that every resting order
+    # is accounted for after each close.
+    guard_floor_trail_enabled: bool = field(default_factory=lambda: _env_bool(
+        "GUARD_FLOOR_TRAIL_ENABLED", False))
     # Volatility-scaled stop + sizing. 0 disables (fixed stop, flat % margin).
     # When set, stop = mult x ATR and the position is sized so the loss at that
     # stop equals ENTRY_RISK_PCT of the wallet — constant risk across coins.

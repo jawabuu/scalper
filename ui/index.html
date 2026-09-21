@@ -3814,6 +3814,8 @@ function renderGuardian(g) {
         </td>
       </tr>`;
     }).join('');
+    const noFloor = syms.filter(k => g.states[k].floor_missing_reason
+                                     && !g.states[k].unprotected_reason);
     const unprot = syms.filter(k => g.states[k].unprotected_reason);
     const banner = unprot.length ? `<div style="background:rgba(255,77,106,0.12);
       border:1px solid rgba(255,77,106,0.45);border-radius:4px;padding:8px 10px;
@@ -3822,7 +3824,18 @@ function renderGuardian(g) {
       ${unprot.map(k => `${k.replace('/USDT:USDT','')}: ${g.states[k].unprotected_reason}`).join('<br>')}
       <br>The guardian will not close a position on its own — close it here or accept the risk.
       </div>` : '';
-    setEl('guard-wrap', banner + `<table><thead><tr>
+    // Weaker than the banner above ON PURPOSE: these positions ARE stopped,
+    // but break-even is not locked. Before this it was an ERROR in the log
+    // and nothing on the dashboard (PHA 2026-09-21 08:29 ran ~2 min with no
+    // floor), because only unprotected_reason was ever exposed.
+    const floorBanner = noFloor.length ? `<div style="background:rgba(255,176,32,0.10);
+      border:1px solid rgba(255,176,32,0.40);border-radius:4px;padding:8px 10px;
+      margin-bottom:10px;font-size:11px;color:var(--amber,#ffb020)">
+      <strong>${noFloor.length} position(s) have NO break-even floor.</strong>
+      ${noFloor.map(k => `${k.replace('/USDT:USDT','')}: ${g.states[k].floor_missing_reason}`).join('<br>')}
+      <br>The stop and trails are resting — profit is simply not locked yet.
+      </div>` : '';
+    setEl('guard-wrap', banner + floorBanner + `<table><thead><tr>
       <th>Pair</th><th>Dir</th><th class="num">ROI now</th><th class="num">Peak ROI</th><th class="num">Low ROI</th>
       <th class="num">Stop @ ROI</th><th>Trail</th><th>24h range</th>
       <th class="num">Margin</th><th></th>

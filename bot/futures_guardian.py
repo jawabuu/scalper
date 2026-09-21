@@ -38,6 +38,7 @@ from .futures_guard import (
     adopt_state, is_protective_stop, evaluate,
     callback_roi_at, trail_locks_in, is_armed, atr_stop_roi,
     trail_callback_price_pct, trail_vol_floor_pct, effective_arm_roi,
+    floor_trail_callback_pct,
 )
 
 log = logging.getLogger("futures_guardian")
@@ -1844,6 +1845,90 @@ class FuturesGuardian:
             f"needed. id={trail_id}")
         self._record(pos.symbol, "armed_at_entry",
                      f"activation {activation} (+{arm_roi:g}% ROI)")
+        self._place_floor_trail(pos, state)
+
+    def _place_floor_trail(self, pos: FuturesPosition, state):
+        """
+        A SECOND dormant trail, activating at breakeven_at_roi.
+
+        Closes the handoff gap that fail-fast's own threshold creates:
+        fail-fast only cuts when peak <= breakeven_at_roi, so ABOVE that level
+        it deliberately steps back — and until arm_roi nothing takes over. PHA
+        2026-09-21 08:29 sat in that gap: peak +3.2%, every poll-driven floor
+        placement refused -2021 because price had already come back through
+        the level, and the position ran to -10.5% with only the -22.5% ATR
+        stop beneath it.
+
+        Dormant and exchange-side, so NO POLL is in the protection path — the
+        same property that makes arm-at-entry work. Placed once, at entry,
+        beside the armed trail.
+
+        Both are reduce-only and rest at different activation prices, so in
+        normal movement only one ever activates and the armed trail supersedes
+        this one when it arms. A single tick that gaps from below
+        breakeven_at_roi to above arm_roi CAN activate both before any poll
+        can intervene — no guardian-side logic can prevent that. The tighter
+        one closes the position and the other is left reduce-only against a
+        flat position, which the exchange will not fill and the sweep cancels.
+        """
+        if not getattr(self.cfg, "floor_trail_enabled", False):
+            return
+        if state.floor_trail_id:
+            return
+        lev = pos.effective_leverage or 1.0
+        activate_roi = float(getattr(self.cfg, "breakeven_at_roi", 0.0) or 0.0)
+        if activate_roi <= 0:
+            return
+        cb, locked = floor_trail_callback_pct(self.cfg, lev)
+        if not cb:
+            return
+        wanted = float(getattr(self.cfg, "breakeven_stop_roi", 0.0) or 0.0)
+        fees_roi = 0.09 * lev
+        if locked < wanted - 0.01:
+            log.warning(
+                f"{pos.symbol}: floor trail can only lock +{locked:g}% ROI, "
+                f"not the +{wanted:g}% asked — Binance will not take a "
+                f"callback under 0.1% of price and {activate_roi:g}%/{lev:.0f}x "
+                f"needs less than that. Raise GUARD_BREAKEVEN_AT_ROI to keep "
+                f"the promise at this leverage.")
+        if locked < fees_roi:
+            log.warning(
+                f"{pos.symbol}: floor trail locks +{locked:g}% ROI but a round "
+                f"trip costs ~{fees_roi:.1f}% ROI at {lev:.0f}x — activating it "
+                f"would still close NET NEGATIVE. It protects against a large "
+                f"loss, not against a small one.")
+        activation = self._activation_at_roi(pos, activate_roi)
+        if activation is None:
+            return
+        # Placed directly rather than through _place_native_trail: that path
+        # computes its OWN callback from the volatility floor and applies the
+        # arm-lock test, both of which are the armed trail's logic, not this
+        # one's.
+        if self.dry_run:
+            trail_id = f"dry-floor-{int(time.time()*1000)}"
+        else:
+            try:
+                qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
+                order = self._create_trail_order(
+                    pos, stop_side(pos), float(qty_str), cb,
+                    activation=activation, activate_now=False)
+            except Exception as e:
+                log.warning(f"{pos.symbol}: floor trail not placed "
+                            f"({_safe_err(e)}) — the armed trail and the fixed "
+                            f"stop are unaffected.")
+                return
+            trail_id = self._accepted_id(pos, order, "FLOOR trail")
+        if not trail_id:
+            return
+        state.floor_trail_id = trail_id
+        self._all_stop_ids.setdefault(pos.symbol, []).append(trail_id)
+        log.warning(
+            f"{pos.symbol}: FLOOR TRAIL resting, activation at {activation} "
+            f"(+{activate_roi:g}% ROI), callback {cb:g}% -> locks "
+            f"+{locked:g}% ROI. Dormant until price reaches it; no poll in "
+            f"the path. id={trail_id}")
+        self._record(pos.symbol, "floor_trail",
+                     f"activation +{activate_roi:g}%, locks +{locked:g}%")
 
     def _ensure_adaptive_trail(self, pos: FuturesPosition, state, stop_roi: float):
         """
@@ -2216,6 +2301,7 @@ class FuturesGuardian:
                 self._floor_unavailable(pos, state, current, usable)
                 return
             state.floor_stop_id = oid
+            state.floor_missing_reason = None
             state.floor_roi = usable
             state.floor_attempts = 0
             self._all_stop_ids.setdefault(pos.symbol, []).append(oid)
@@ -2249,6 +2335,13 @@ class FuturesGuardian:
                 f"at break-even." + (f" exchange said: {err}" if err else ""))
             self._record(pos.symbol, "no_profit_floor",
                          f"peak +{state.peak_roi:.1f}%, no floor resting")
+        # Surface it. The log said ERROR and the dashboard showed nothing,
+        # because only unprotected_reason is exposed and this path never set
+        # it — PHA 2026-09-21 08:29 ran ~2 minutes with no floor, visible in
+        # the log alone.
+        state.floor_missing_reason = (
+            f"no break-even floor (peak +{state.peak_roi:.1f}%, "
+            f"wanted +{wanted:.1f}%, attempt {state.floor_attempts})")
 
     def _cancel_superseded_stops(self, pos: FuturesPosition, keep: str | None,
                                  state=None):
@@ -2283,6 +2376,10 @@ class FuturesGuardian:
             getattr(st_, "floor_stop_id", None),
             getattr(st_, "adaptive_trail_id", None),
             getattr(st_, "native_trail_id", None),
+            # The dormant floor trail. Omitting it here would repeat exactly
+            # the native_trail_id bug: placed at entry, lands in
+            # _all_stop_ids, swept by the next fixed-stop placement.
+            getattr(st_, "floor_trail_id", None),
         ) if i} if st_ else set()
         for oid in ids:
             if keep and oid == keep:
@@ -4559,6 +4656,9 @@ class FuturesGuardian:
                     "stop_order_id": s.stop_order_id,
                     "native_trail_id": s.native_trail_id,
                     "unprotected_reason": s.unprotected_reason,
+                    "floor_missing_reason": s.floor_missing_reason,
+                    "floor_trail_id": s.floor_trail_id,
+                    "floor_attempts": s.floor_attempts,
                     # Sizing, so a surprising position size is visible rather
                     # than something to reconstruct from the exchange UI.
                     "margin_usdt": round(self._pos_meta.get(sym, {}).get("margin", 0.0), 2),

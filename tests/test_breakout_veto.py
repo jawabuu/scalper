@@ -1258,7 +1258,9 @@ def test_every_protective_order_carries_the_working_type():
     assert src.count('"workingType": self.cfg.stop_working_type') == 3
     assert '"workingType": self.cfg.stop_working_type' in \
         inspect.getsource(FuturesGuardian._create_trail_order)
-    assert src.count("self._create_trail_order(") == 2   # armed + rescue
+    # armed + rescue + floor (v3.77.0). All three inherit workingType from
+    # _create_trail_order, so the property under test is unchanged.
+    assert src.count("self._create_trail_order(") == 3
 
 
 def test_the_trade_records_which_price_was_in_force():
@@ -1706,6 +1708,84 @@ def test_it_is_not_superseded_when_other_stops_are_cancelled():
     g._cancel_superseded_stops(_TrailPos(), keep=None)
     assert "trail-1" not in cancelled
     assert "old-stop" in cancelled
+
+
+# ── The dormant FLOOR trail (v3.77.0) ───────────────────────────────────────
+#
+# Closes the handoff gap that fail-fast's own threshold creates: fail-fast
+# only cuts when peak <= breakeven_at_roi, so above that level nothing takes
+# over until arm_roi. PHA 2026-09-21 08:29 sat in it — peak +3.2%, every
+# poll-driven floor placement refused -2021 because price had come back
+# through the level, position ran to -10.5% on the ATR stop alone.
+
+def test_the_floor_trail_is_OFF_by_default():
+    from bot.futures_guard import GuardConfig
+    assert GuardConfig().floor_trail_enabled is False
+
+
+def test_the_floor_trail_is_never_swept_as_superseded():
+    # The native_trail_id bug, exactly: placed at entry, lands in
+    # _all_stop_ids, swept by the next fixed-stop placement.
+    from bot.futures_guard import GuardState
+    g = _trail_guardian()
+    st = GuardState()
+    st.floor_trail_id = "floor-1"
+    g._states["X/USDT:USDT"] = st
+    g._all_stop_ids["X/USDT:USDT"] = ["floor-1", "old-stop"]
+    cancelled = []
+    g._cancel_stop = lambda pos, oid: (cancelled.append(oid), True)[1]
+    g._cancel_superseded_stops(_TrailPos(), keep=None)
+    assert "floor-1" not in cancelled
+    assert "old-stop" in cancelled
+
+
+def test_the_two_dormant_trails_have_DIFFERENT_activations():
+    """
+    The no-stacking guarantee, and its limit.
+
+    Both rest dormant at different activation prices, so in normal movement
+    only one can ever activate. A single tick gapping from below
+    breakeven_at_roi to above arm_roi CAN activate both before any poll can
+    intervene — no guardian-side logic can prevent that, because the guardian
+    is not in the loop at activation time. Both are reduce-only, so the
+    tighter one closes the position and the other cannot fill against a flat
+    position; the sweep cancels it.
+    """
+    from bot.futures_guard import GuardConfig
+    cfg = GuardConfig(breakeven_at_roi=3.0, breakeven_stop_roi=2.0, arm_roi=5.0)
+    assert cfg.breakeven_at_roi < cfg.arm_roi, \
+        "the floor must activate BELOW the armed trail or they are the same order"
+
+
+def test_the_floor_trail_reports_what_it_can_ACTUALLY_lock():
+    """
+    Binance will not take a callbackRate under 0.1% of price. The rate needed
+    is (activation - target) / leverage, which falls under the minimum at high
+    leverage and silently locks LESS than asked.
+    """
+    from bot.futures_guard import GuardConfig, floor_trail_callback_pct
+    cfg = GuardConfig(breakeven_at_roi=3.0, breakeven_stop_roi=2.0)
+    cb10, lock10 = floor_trail_callback_pct(cfg, 10.0)
+    cb20, lock20 = floor_trail_callback_pct(cfg, 20.0)
+    assert cb10 == pytest.approx(0.10) and lock10 == pytest.approx(2.0), \
+        "at 10x the promise is exactly achievable"
+    assert cb20 == pytest.approx(0.10) and lock20 == pytest.approx(1.0), \
+        "at 20x the clamp locks +1%, not the +2% asked"
+    # And +1% ROI does not clear a ~1.8% ROI round trip at 20x.
+    assert lock20 < 0.09 * 20
+
+
+def test_a_floor_trail_that_cannot_be_placed_costs_nothing_else(tmp_path):
+    # It must never take down the armed trail or the fixed stop with it.
+    from bot.futures_guard import GuardState
+    from dataclasses import replace as _replace
+    g = _trail_guardian()
+    g.cfg = _replace(g.cfg, floor_trail_enabled=True)
+    st = GuardState()
+    g._create_trail_order = lambda *a, **kw: (_ for _ in ()).throw(
+        RuntimeError("-2021 Order would immediately trigger"))
+    g._place_floor_trail(_TrailPos(), st)
+    assert st.floor_trail_id is None
 
 
 def test_the_ARM_AT_ENTRY_trail_is_never_swept_as_superseded():
@@ -5153,9 +5233,12 @@ def test_all_three_placement_sites_verify_acceptance():
     import inspect
     from bot.futures_guardian import FuturesGuardian
     src = inspect.getsource(FuturesGuardian)
-    # Four: the fixed stop, each leg of a split stop, the rescue trail and
-    # the armed trail. The split legs were missed on the first pass.
-    assert src.count("self._accepted_id(pos, order,") == 4
+    # Five: the fixed stop, each leg of a split stop, the rescue trail, the
+    # armed trail, and (v3.77.0) the dormant floor trail. The split legs were
+    # missed on the first pass. A new placement site that does NOT verify
+    # acceptance can record an id for a refused order and displace real
+    # protection — which is why this counts rather than spot-checks.
+    assert src.count("self._accepted_id(pos, order,") == 5
     import bot.futures_guardian as fg
     place = inspect.getsource(FuturesGuardian._place_stop)
     split = inspect.getsource(FuturesGuardian._place_split_stops)

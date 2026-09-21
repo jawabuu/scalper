@@ -3133,6 +3133,39 @@ def test_a_rejected_armed_trail_keeps_the_adaptive_trail():
     assert adaptive not in [o for o, _ in fake.cancelled]
 
 
+def test_a_missing_profit_floor_is_VISIBLE_not_just_logged():
+    """
+    PHA 2026-09-21 08:29: the floor was refused (-2021 "would immediately
+    trigger") and the position ran ~2 minutes with no break-even floor. The
+    guardian logged PROTECTION-NO-FLOOR at ERROR and the dashboard showed
+    NOTHING, because snapshot() only ever exposed unprotected_reason and this
+    path never set it.
+    """
+    from bot.futures_guard import GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    st = GuardState(peak_roi=6.0)
+    pos = g.fetch_positions()[0]
+    g._floor_unavailable(pos, st, current=3.2, wanted=2.0,
+                         err="-2021: Order would immediately trigger.")
+    assert st.floor_missing_reason, "the condition must be on the state"
+    assert st.unprotected_reason is None, \
+        "a missing floor is NOT an unprotected position — the stop is resting"
+
+
+def test_the_missing_floor_reaches_the_dashboard_payload():
+    from bot.futures_guard import GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.run_cycle()
+    sym = "DOGE/USDT:USDT"
+    g._states[sym].floor_missing_reason = "no break-even floor (peak +6.0%)"
+    snap = g.snapshot()
+    assert snap["states"][sym]["floor_missing_reason"] == \
+        "no break-even floor (peak +6.0%)"
+    assert "floor_attempts" in snap["states"][sym]
+
+
 def test_an_unconfirmed_trail_does_not_claim_it_replaced_the_stop():
     """
     armed_replaced_stop suppresses the fixed stop. Setting it for a trail that

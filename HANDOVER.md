@@ -3,6 +3,9 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.77.0 adds the DORMANT FLOOR TRAIL (off by default) — the break-even
+promise no longer depends on a poll.
+v3.76.1 surfaces a missing break-even floor on the dashboard.
 v3.76.0 backs the shadow logger off during provider outages.
 
 **START AT "THE OPEN PROBLEM: entry timing"** — that is the live work. The
@@ -162,6 +165,114 @@ alone cannot express the goal.
 - Do NOT use `peak_roi` or `capture` in any of this analysis — peak is
   sampled, not tracked, and under-records by a median 9.55 ROI points on the
   moves that matter.
+
+---
+
+## The break-even promise depended on a poll it kept losing (v3.77.0)
+
+The operator's rule: **once a coin touches +3% ROI it should never close at a
+loss** — GUARD_BREAKEVEN_AT_ROI=3 exists to cover fees.
+
+PHA 2026-09-21 08:29 broke it:
+
+    08:29:24  ARMED trail placed, activation +5.00% ROI  (dormant)
+    08:29:25  floor attempt 1 -> REFUSED -2021, peak +3.2%
+    08:29:45  floor attempt 5 -> REFUSED
+    08:30:48  roi -10.5%      <- nothing between here and the -22.5% ATR stop
+    08:31:29  peak +6.6% -> floor finally placed
+
+The floor can only REST while price is below its trigger. At +3.2% there was
+about one poll to place it; by the time the order went out mark had come back
+through the +2% level, so Binance correctly refused it as immediately-
+triggering, and refused every retry for the same reason all the way down.
+
+**And fail-fast makes it worse by design.** Fail-fast cuts only when
+peak <= +3%, so ABOVE +3% it deliberately steps back — while the armed trail
+stays dormant until +5%. A peak that touches +3.2% and reverses is exactly the
+case the floor exists for, and exactly the case it cannot catch.
+
+### Why lowering GUARD_ARM_ROI does NOT fix it
+
+The lock is `arm_roi - callback_roi`. Setting arm_roi=3 with
+GUARD_TRAIL_CALLBACK_ROI=3 locks EXACTLY 0% gross — a net loss after fees at
+any leverage. Locking +2% would need callback_roi=1, which is below the
+exchange minimum at 20x AND would trail every runner at peak-1%, exiting a
++100% move at +99%. That destroys the room-to-breathe the +5% arm exists for.
+
+### The fix
+
+`GUARD_FLOOR_TRAIL_ENABLED` places a SECOND dormant trail at entry,
+activating at GUARD_BREAKEVEN_AT_ROI. Exchange-side, so no poll is in the
+protection path — the same property that makes arm-at-entry work.
+
+**Leverage decides whether the promise is keepable.** Binance rejects a
+callbackRate under 0.1% of price; the rate needed is (3-2)/leverage:
+
+    10x -> 0.100%  locks +2.0% ROI   fees ~0.9%   net +1.1%   KEPT
+    20x -> 0.050% -> clamped -> locks +1.0%   fees ~1.8%   net -0.8%   NOT KEPT
+
+At 20x GUARD_BREAKEVEN_AT_ROI must rise to ~4 for the rule to hold. The
+guardian logs both warnings (cannot lock what was asked; locks less than the
+round trip costs) when it places the trail.
+
+### On stacking — the guarantee and its limit
+
+Both trails rest DORMANT at different activation prices, so in normal
+movement only one can activate, and the armed trail supersedes the floor when
+it arms. **A single tick gapping from below +3% to above +5% can activate
+both** before any poll intervenes — no guardian-side logic can prevent that,
+because the guardian is not in the loop at activation time. Both are
+reduce-only: the tighter one closes the position and the other cannot fill
+against a flat position, so the sweep cancels it. The failure mode is a
+redundant order, not a double close or a reversed position.
+
+`floor_trail_id` is in the sweep's protected set. Omitting it would have
+repeated the native_trail_id bug exactly — placed at entry, lands in
+_all_stop_ids, swept by the next fixed-stop placement.
+
+### Before enabling on live
+
+Run it on demo and confirm from the logs that every resting order is
+accounted for after each close. Demo at 20x is also the worst case for
+gap-throughs, since the ROI thresholds sit closer together in price terms —
+and it will show the +1% lock rather than +2%, which is worth seeing.
+
+---
+
+## A missing break-even floor was invisible on the dashboard (v3.76.1)
+
+PHA 2026-09-21 08:29. The profit floor was refused by the exchange:
+
+    PROTECTION-NO-FLOOR PHA: peak reached +3.2% but NO profit floor is
+    resting (attempt 1, wanted +2.0% ROI, currently +3.2%)
+    exchange said: -2021: Order would immediately trigger.
+
+and again at attempt 5. The floor was only placed at 08:31:29, so the
+position ran ~2 minutes with break-even unlocked. **The dashboard showed
+nothing**, because `snapshot()` exposes only `unprotected_reason` and
+`_floor_unavailable` never set it — it logged at ERROR and called `_record`.
+
+The -2021 itself is a race, not a bug: the floor level is derived from a peak
+observed up to a poll ago, and by the time the order is sent price has come
+back through it, so a buy-stop for a short would trigger instantly. Expected
+on a 2.5s poll against a fast-moving mark; it retries and eventually places.
+
+### The fix, and why it is a NEW field
+
+`GuardState.floor_missing_reason`, set by `_floor_unavailable` and cleared
+when the floor lands. Deliberately NOT `unprotected_reason`: PHA still had a
+fixed stop and two trails resting. Reusing that field would have shown
+"UNPROTECTED" for a position that was protected — just not at break-even —
+and that banner tells the operator to close the position or accept the risk.
+
+The dashboard now renders a distinct amber notice, weaker than the red
+unprotected banner, saying the stop and trails are resting and only profit
+lock is missing. `floor_attempts` is exposed alongside it.
+
+Note the module's own docstring already recorded the earlier version of this
+bug: the dashboard kept showing "Stop @ ROI +2%" because that field is the
+guardian's INTENT, not what the exchange holds. The logging was fixed then;
+the dashboard was not.
 
 ---
 

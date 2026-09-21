@@ -120,6 +120,14 @@ class GuardState:
     # the operator must decide what to do — the guardian will not close a
     # position on its own initiative.
     unprotected_reason: str | None = None
+    # Distinct from unprotected_reason ON PURPOSE. A missing profit floor is
+    # NOT an unprotected position — the fixed stop and the trails are still
+    # resting — but it does mean break-even is not locked, and the dashboard
+    # could not see it at all because only unprotected_reason was exposed.
+    floor_missing_reason: str | None = None
+    # Dormant exchange-side trail that activates at breakeven_at_roi. Distinct
+    # from native_trail_id (activates at arm_roi) and adaptive_trail_id.
+    floor_trail_id: str | None = None
 
 
 @dataclass
@@ -159,6 +167,10 @@ class GuardConfig:
     # by volatility. Sets how much later a volatile position arms: the trail
     # waits until peak >= callback_give_back + this. See effective_arm_roi.
     min_trail_lock_roi: float = 2.0
+    # Dormant floor trail. OFF by default — it adds a third resting trailing
+    # order, and order management is the area of this codebase with the worst
+    # track record (two lost-protection incidents).
+    floor_trail_enabled: bool = False
     use_native_trail: bool = True
     # ── Volatility-scaled initial stop ──────────────────────────────────
     # 0 disables (fixed initial_stop_roi is used). When set, the initial stop
@@ -497,6 +509,36 @@ def is_armed(state: GuardState, cfg: GuardConfig, leverage: float = 0.0,
     """
     return state.peak_roi >= (
         effective_arm_roi(cfg, leverage, atr_pct, recent_tr_pct) - _ROI_EPS)
+
+
+def floor_trail_callback_pct(cfg: GuardConfig, leverage: float) -> tuple:
+    """
+    (callbackRate, roi_actually_locked) for the dormant FLOOR trail.
+
+    The intent: "once a coin touches breakeven_at_roi it should never close at
+    a loss". Activating at breakeven_at_roi and giving back
+    (breakeven_at_roi - breakeven_stop_roi) locks breakeven_stop_roi.
+
+    BUT Binance will not accept a callbackRate under 0.1% of price, and the
+    required rate is (give-back ROI) / leverage. At high leverage the rate
+    needed falls under the minimum and the clamp silently locks LESS than
+    asked, so the locked figure is returned rather than assumed:
+
+        10x, activate +3%, lock +2%  -> 0.100% (exactly the minimum) -> +2.0%
+        20x, activate +3%, lock +2%  -> 0.050% -> clamped to 0.100% -> +1.0%
+
+    Fees cost ~0.09% of price per round trip, which is 0.9% ROI at 10x and
+    1.8% at 20x. So at 20x a +3% activation CANNOT keep the promise; the
+    activation level has to rise. The caller logs this rather than pretending.
+    """
+    if leverage <= 0:
+        return 0.0, 0.0
+    activate = float(getattr(cfg, "breakeven_at_roi", 0.0) or 0.0)
+    target = float(getattr(cfg, "breakeven_stop_roi", 0.0) or 0.0)
+    needed_roi = max(activate - target, 0.0)
+    pct = max(0.1, min(5.0, round(needed_roi / leverage, 2)))
+    locked = activate - pct * leverage
+    return pct, round(locked, 2)
 
 
 def trail_vol_floor_pct(cfg: GuardConfig, atr_pct: float | None,
