@@ -3,8 +3,9 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
-v3.78.0 VERIFIES protective orders against the algo book — the guardian was
-holding REJECTED orders as resting.
+v3.78.1 WITHDRAWS the v3.78.0 diagnosis — REJECTED meant "invalidated at
+close", not "refused at placement". The verification code stays as a safety
+net. See the correction in that section.
 v3.77.3 adds the floor trail to the GIVE-BACK resting dict.
 v3.77.2 stops the floor trail falling back to a derived activation.
 v3.77.1 fixes two gaps found in the first demo run of the floor trail.
@@ -537,10 +538,11 @@ the variable currently under experiment.
 
 ---
 
-## The guardian was holding REJECTED orders as resting (v3.78.0)
+## REJECTED algo orders — the alarming reading was WRONG (v3.78.1)
 
-**The most serious defect found in this investigation.** Not introduced by
-the floor-trail work — the floor trail is how it was noticed.
+**READ THE CORRECTION AT THE END OF THIS SECTION BEFORE ACTING ON IT.** The
+original conclusion — that the guardian holds refused orders as resting
+through the life of a position — is NOT supported by later evidence.
 
 PHA demo 2026-09-21 10:18. The guardian logged `FLOOR TRAIL resting
 id=...309`, `TRAIL-RESPONSE` showed the activatePrice accepted and kept, and
@@ -589,16 +591,53 @@ position size. Two fitted, the third did not.
 two, and the design is wrong rather than the implementation.** The fix would
 be fewer trails, not better checking.
 
+### CORRECTION, same day, v3.77.2 demo run
+
+Two positions (MUBARAK, PHA) with all three trails. Every one came back
+**CANCELED**, none REJECTED:
+
+    MUBARAK  FLOOR ...104 CANCELED   armed ...092 CANCELED   adaptive ...044 CANCELED
+    PHA      FLOOR ...733 CANCELED   armed ...706 CANCELED   adaptive ...653 CANCELED
+
+**The reduce-only aggregate theory is DEAD** — three reduce-only trails at
+full position size coexist without trouble.
+
+And the REJECTED pattern has a simpler explanation:
+
+    v3.77.0, PHA 10:18  guardian did NOT cancel armed/floor_trail at close
+                        -> left resting, position vanished underneath them
+                        -> REJECTED
+    v3.77.2, both       guardian DID cancel all three at close  -> CANCELED
+
+**REJECTED almost certainly means "invalidated when the position closed", not
+"refused at placement".** The profit floor fits: placed 10:18:20, position
+gone by 10:18:23, never cancelled by that build. The one order showing
+FINISHED is the armed trail — the one that actually fired.
+
+So the orders WERE resting during the position's life. This was a bookkeeping
+artefact of the pre-v3.77.1 cleanup gap, not a protection failure.
+
+### What still stands
+
+`_verify_protection` (v3.78.0) is still worth having: a genuine
+placement-refusal is possible, the module's own comment says the algo
+endpoint can return 200 and refuse, and the check costs one request per
+position. But it is a SAFETY NET, not a fix for an active defect — and its
+warning text should not be read as evidence that one occurred.
+
+**Do not repeat this inference.** A terminal algo status read AFTER a close
+cannot distinguish "refused at placement" from "invalidated by the close".
+Only a status read WHILE the position is open can, which is exactly what
+_verify_protection does.
+
 ### Consequences
 
-- **Do NOT enable GUARD_FLOOR_TRAIL_ENABLED on live.** It has never been
-  observed resting, let alone firing.
-- Every historical `PROTECTION ... guardian holds [...]` line is suspect.
-  Positions were less protected than the log claimed, for the whole of this
-  investigation and before it.
-- Confirm the reduce-only aggregate theory before any further trail work:
-  check whether the rejection persists with the floor trail disabled (two
-  trails) versus enabled (three).
+- **Do NOT enable GUARD_FLOOR_TRAIL_ENABLED on live yet.** Not because of
+  rejections — that reading was wrong — but because it has still never been
+  observed ACTIVATING and FIRING. Placement, coexistence and cleanup are all
+  now confirmed on demo.
+- Historical `PROTECTION ... guardian holds [...]` lines are NOT known to be
+  wrong. That claim was withdrawn.
 
 ---
 
