@@ -1534,7 +1534,8 @@ class FuturesGuardian:
     def _create_trail_order(self, pos: FuturesPosition, side: str,
                             qty: float, cb: float,
                             activation: float | None = None,
-                            activate_now: bool = True):
+                            activate_now: bool = True,
+                            require_activation: bool = False):
         """
         Place the trail, activating it immediately where the exchange allows.
 
@@ -1584,6 +1585,21 @@ class FuturesGuardian:
             return order
         except Exception as e:
             if not act:
+                raise
+            if require_activation:
+                # The FLOOR trail exists ONLY to activate EARLIER than the
+                # armed trail. Without its activatePrice, Binance derives one
+                # from its own latest price — USELESS demo 2026-09-21 10:00
+                # put the floor at +15.8% ROI and the armed trail at +9.0%,
+                # INVERTING the order. That is not a degraded floor, it is a
+                # second armed trail in the wrong place, so no trail is
+                # better than this one.
+                log.warning(
+                    f"{pos.symbol}: floor trail refused with "
+                    f"activatePrice={act} ({_safe_err(e)}) — NOT retrying "
+                    f"without one. A derived activation would place the "
+                    f"floor ABOVE the armed trail and invert the ordering. "
+                    f"The armed trail and the fixed stop are unaffected.")
                 raise
             log.warning(
                 f"{pos.symbol}: trail refused with activatePrice={act} "
@@ -1911,7 +1927,8 @@ class FuturesGuardian:
                 qty_str = self.exchange.amount_to_precision(pos.symbol, pos.qty)
                 order = self._create_trail_order(
                     pos, stop_side(pos), float(qty_str), cb,
-                    activation=activation, activate_now=False)
+                    activation=activation, activate_now=False,
+                    require_activation=True)
             except Exception as e:
                 log.warning(f"{pos.symbol}: floor trail not placed "
                             f"({_safe_err(e)}) — the armed trail and the fixed "

@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.77.2 stops the floor trail falling back to a derived activation.
 v3.77.1 fixes two gaps found in the first demo run of the floor trail.
 v3.77.0 adds the DORMANT FLOOR TRAIL (off by default) — the break-even
 promise no longer depends on a poll.
@@ -258,6 +259,50 @@ activation, so the floor trail never activated and fail-fast cut it at -5.3%.
 
 Also seen for the first time on live: `shadow decision: rate cap (30/min)
 reached`. Worth watching if candidate counts keep climbing.
+
+### USELESS, 2026-09-21 ~10:00 — the same coin on BOTH instances
+
+A natural experiment: both instances entered USELESS/USDT 21 seconds apart.
+
+**The two instances do NOT see the same market.**
+
+                sized      ATR%   recentTR    RSI   body%  lowerwick  callback
+    demo 20x   0.2788     0.740      0.690   85.8    46.1       34.7     0.55%
+    live 10x   0.27878    1.257      1.024   82.4    24.9       51.4     1.57%
+
+**ATR differs by 1.70x for the same symbol at the same moment.** Demo market
+data is a genuinely different feed, not just a different account. This is
+direct evidence for the structural divergence AUTO_CALLBACK_ATR_MULT was
+introduced to compensate for — the instances are not screening the same
+market, whatever the scanner config says. Keep it in mind for ANY
+cross-container comparison, not just outcomes.
+
+**Risk sizing held exactly**, from wildly different ROIs and position sizes:
+
+    demo  -16.6677 USDT on 5236.70 = -0.318% of wallet  (ROI -15.09%, margin $110.64)
+    live   -0.2789 USDT on   90.95 = -0.307% of wallet  (ROI -12.52%, margin $2.23)
+
+### The floor trail inverted its own ordering (fixed in v3.77.2)
+
+On demo both trails hit -2021 on their activatePrice and retried without one.
+Binance then derived its own activation from its latest price:
+
+    armed  intended 0.2777 (+5% ROI)  -> derived 0.2771412 = +9.0% ROI
+    floor  intended 0.2780 (+3% ROI)  -> derived 0.2762000 = +15.8% ROI
+
+**The floor ended up activating LATER than the armed trail** — the exact
+inversion of its only purpose. A floor without its activation is not a
+degraded floor, it is a second armed trail in the wrong place.
+
+`_create_trail_order` now takes `require_activation`, set ONLY by the floor
+trail: if the activatePrice is refused it raises rather than retrying, the
+floor is simply not placed, and the armed trail and fixed stop are
+unaffected. The armed and rescue trails keep the retry, because for them a
+derived activation is degraded rather than inverted and no trail would be
+worse.
+
+**This is why the activation path needed watching before live.** Placement had
+already been seen to work; the -2021-on-activation case had not.
 
 ### Before enabling on live
 

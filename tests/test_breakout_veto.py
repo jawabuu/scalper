@@ -1741,6 +1741,37 @@ def test_the_floor_trail_appears_in_the_PROTECTION_line():
     assert '"floor_trail": getattr(state, "floor_trail_id", None),' in src
 
 
+def test_the_floor_trail_REFUSES_to_fall_back_to_a_derived_activation():
+    """
+    USELESS demo 2026-09-21 10:00. Both trails hit -2021 on their
+    activatePrice and retried without one; Binance derived its own from its
+    latest price:
+
+        armed  intended 0.2777 (+5% ROI)  -> derived 0.2771412 = +9.0% ROI
+        floor  intended 0.2780 (+3% ROI)  -> derived 0.2762000 = +15.8% ROI
+
+    The floor ended up activating LATER than the armed trail — the exact
+    inversion of its only purpose. A floor without its activation is not a
+    degraded floor, it is a second armed trail in the wrong place.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._create_trail_order)
+    assert "require_activation" in src
+    place = inspect.getsource(FuturesGuardian._place_floor_trail)
+    assert "require_activation=True" in place
+
+
+def test_only_the_floor_trail_requires_its_activation():
+    # The armed and rescue trails must keep the retry: for them a derived
+    # activation is a degraded trail, not an inverted one, and no trail at
+    # all would be worse.
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert src.count("require_activation=True") == 1
+
+
 def test_the_floor_trail_is_OFF_by_default():
     from bot.futures_guard import GuardConfig
     assert GuardConfig().floor_trail_enabled is False
