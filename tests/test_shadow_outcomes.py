@@ -111,8 +111,8 @@ def test_a_ripe_decision_is_labelled_with_forward_returns(tmp_path):
     ex = _Exchange(start=100.0, drift=-0.1)      # falling
     assert resolve(ex, str(src), str(dst), now=now) == 1
     rec = json.loads(dst.read_text().strip())
-    assert set(rec["returns_pct"]) == {"3", "6", "15", "30", "60"}
-    assert rec["returns_pct"]["60"] < 0
+    assert set(rec["returns_pct"]) == {"1", "2", "3", "5", "10", "30"}
+    assert rec["returns_pct"]["30"] < 0
 
 
 def test_a_short_that_fell_reads_as_FAVOURED_not_negative(tmp_path):
@@ -123,8 +123,8 @@ def test_a_short_that_fell_reads_as_FAVOURED_not_negative(tmp_path):
     _write(src, [_row(ts=now - 7200, side="short")])
     resolve(_Exchange(start=100.0, drift=-0.1), str(src), str(dst), now=now)
     rec = json.loads(dst.read_text().strip())
-    assert rec["returns_pct"]["60"] < 0
-    assert rec["favoured_side_pct"]["60"] > 0
+    assert rec["returns_pct"]["30"] < 0
+    assert rec["favoured_side_pct"]["30"] > 0
 
 
 def test_a_long_keeps_its_sign(tmp_path):
@@ -133,15 +133,15 @@ def test_a_long_keeps_its_sign(tmp_path):
     _write(src, [_row(ts=now - 7200, side="long")])
     resolve(_Exchange(start=100.0, drift=0.1), str(src), str(dst), now=now)
     rec = json.loads(dst.read_text().strip())
-    assert rec["favoured_side_pct"]["60"] > 0
-    assert rec["favoured_side_pct"]["60"] == rec["returns_pct"]["60"]
+    assert rec["favoured_side_pct"]["30"] > 0
+    assert rec["favoured_side_pct"]["30"] == rec["returns_pct"]["30"]
 
 
 def test_an_unripe_decision_is_left_for_a_later_run(tmp_path):
     # Writing a truncated observation would be worse than writing none.
     src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
     now = 1_000_000.0
-    _write(src, [_row(ts=now - 300)])            # 5 min old, 60 min horizon
+    _write(src, [_row(ts=now - 60)])             # 1 min old, 30 min horizon
     assert resolve(_Exchange(), str(src), str(dst), now=now) == 0
     assert not dst.exists()
 
@@ -152,11 +152,10 @@ def test_a_missing_minute_is_missing_not_interpolated(tmp_path):
     src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
     now = 1_000_000.0
     _write(src, [_row(ts=now - 7200)])
-    resolve(_Exchange(drift=-0.1, gap_after=20), str(src), str(dst), now=now)
+    resolve(_Exchange(drift=-0.1, gap_after=12), str(src), str(dst), now=now)
     rec = json.loads(dst.read_text().strip())
-    assert "15" in rec["returns_pct"]
+    assert "10" in rec["returns_pct"]
     assert "30" not in rec["returns_pct"]
-    assert "60" not in rec["returns_pct"]
 
 
 def test_no_candles_at_all_writes_nothing(tmp_path):
@@ -269,7 +268,7 @@ def test_a_row_with_no_triggers_still_resolves(tmp_path):
     assert json.loads(dst.read_text().strip())["triggers"] == {}
 
 
-def test_the_one_candle_wait_baseline_is_reported(tmp_path):
+def test_the_one_minute_wait_baseline_is_reported(tmp_path):
     """
     The comparison that keeps a structural trigger honest: if CRT cannot beat
     simply waiting one candle, its structure has earned nothing.
@@ -279,7 +278,7 @@ def test_the_one_candle_wait_baseline_is_reported(tmp_path):
     _write(src, [_row(ts=now - 7200, side="short")])
     resolve(_Exchange(start=100.0, drift=-0.1), str(src), str(dst), now=now)
     s = summarize(str(dst), horizon=30)
-    one = s["wait_baseline"]["one_candle"]
+    one = s["wait_baseline"]["one_minute"]
     assert one["n"] == 1
     # A falling market favours the short at every horizon.
     assert one["median_favoured_pct"] > 0
@@ -350,6 +349,29 @@ def test_summarize_reports_path_quality_split_by_trigger(tmp_path):
     assert s["path"]["median_adverse_pct"] is not None
     assert set(s["path_by_crt_agrees"]) == {"True", "False"}
     assert "adverse_under_0.5pct" in s["path"]
+
+
+def test_the_horizons_match_the_strategys_actual_hold_time():
+    """
+    Measured over 771 trades: median hold 1.3 min, 80% closed within 3 min,
+    99% within 30. The first version scored every trigger at 30 minutes — a
+    window 23x longer than the median trade, i.e. it measured whether a
+    trigger predicts something the bot is never exposed to.
+
+    1 minute is the floor (no finer candle from fetch_ohlcv). If these ever
+    drift long again, trigger conclusions become meaningless.
+    """
+    from bot.shadow_outcomes import HORIZONS_MIN
+    assert min(HORIZONS_MIN) == 1
+    assert sorted(HORIZONS_MIN)[:3] == [1, 2, 3], \
+        "the median trade lives inside the first 3 minutes"
+
+
+def test_summarize_defaults_to_a_SCALPER_horizon():
+    import inspect
+    from bot.shadow_outcomes import summarize
+    d = inspect.signature(summarize).parameters["horizon"].default
+    assert d <= 3, f"default horizon {d} is longer than 80% of trades live"
 
 
 # ── Reading ─────────────────────────────────────────────────────────────────

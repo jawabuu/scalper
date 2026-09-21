@@ -1,8 +1,10 @@
 # Handover — Binance futures scalping bot
 
-**v3.74.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
+**v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.75.0 RECALIBRATES the outcome horizons to actual hold time — every earlier
+trigger conclusion was scored at the wrong timescale (below).
 v3.74.0 adds PATH capture (adverse/favourable excursion) to the outcome
 resolver — endpoints alone cannot express the entry-timing goal.
 v3.73.6 documents peak_roi being UNRELIABLE (below) — read it before using
@@ -75,6 +77,60 @@ failed identically and logged its own warning — one failure looking like
 Region and connectivity problems are fatal for the pass, not per-row.
 
 `resolve()` is idempotent, so an aborted run loses nothing — re-run it.
+
+---
+
+## The horizons were 23x too long (v3.75.0)
+
+Hold time, measured over 771 trades:
+
+    p50   1.3 min          3 min:  80% closed
+    p75   2.3              6 min:  92%
+    p90   4.9             15 min:  98%
+    p95   7.6             30 min:  99%
+    p99  17.3             60 min: 100%
+
+`HORIZONS_MIN` was `(3, 6, 15, 30, 60)` and `summarize()` defaulted to 30.
+**Every trigger conclusion in SETTLED #7 was therefore scored on a window 23x
+longer than the median trade** — it measured whether CRT and jev predict
+something the position is never exposed to. Treat #7 as unscored, not as a
+negative result.
+
+Now `(1, 2, 3, 5, 10, 30)`, default horizon 2. One minute is the floor:
+`fetch_ohlcv` has no finer candle.
+
+**A sharper consequence for CRT.** The median trade closes in 1.3 minutes —
+BEFORE the 3m scanner candle it entered on has closed. A trigger keyed on
+candle closes is operating on a timescale roughly twice the entire life of
+the position. That is a structural mismatch, not a tuning problem, and it
+should be settled before more work goes into CRT.
+
+The delay baseline moved with it: `wait_baseline` is now `one_minute` /
+`two_minutes` rather than 3m candles. A trade that waits one 3m candle has
+usually already been closed.
+
+Because median hold sits inside the first candle, the FIRST candle's high and
+low carry most of what a position lives through — which is why the v3.74.0
+excursion data matters more here than closes do.
+
+### Two things that are NOT problems (checked, 2026-09-21)
+
+**Live's tiny position sizes are correct.** 157 live trades risk a median
+$0.45 with p10-p90 of $0.43-$0.47 — 0.5% of an ~$89 wallet, held to four
+cents, a TIGHTER distribution than demo's. Live is a data-collection account
+at this size; do not read its net P&L as evidence about the strategy. Demo
+(implied wallet $5,156) is where P&L means something.
+
+**Concurrency limits are not needed yet.** `ENTRY_MAX_POSITIONS=6` but
+concurrency is 1 in 593 cases, 2 in 126, 3 in 48, and never higher. Sizing
+holds flat across all three ($86-$89 margin, $25.3-$25.7 risk). Correlated-
+exposure caps would solve a problem that does not exist. Directional
+concentration also does not hurt: all-same-side n=139 median net +$0.74 (win
+57%) vs mixed n=35 median -$0.22 (win 46%) — the opposite of a warning,
+consistent with the strategy working when there is a real market-wide move.
+
+**No BNB fee discount, by choice** — a constant fee rate is worth more than a
+discount that complicates cost basis mid-history. Do not propose it again.
 
 ---
 

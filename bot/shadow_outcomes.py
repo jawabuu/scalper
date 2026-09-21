@@ -53,16 +53,24 @@ log = logging.getLogger(__name__)
 DEFAULT_IN = "logs/shadow_decisions.jsonl"
 DEFAULT_OUT = "logs/shadow_outcomes.jsonl"
 
-# Minutes after the decision at which forward return is measured. Short
-# because this is a scalper: a 4h return says nothing about a trade whose
-# median hold is measured in candles.
+# Minutes after the decision at which forward return is measured.
 #
-# 3 and 6 are ONE and TWO candles on the 3m timeframe, and they are the point
-# of the trigger comparison rather than an afterthought. The wait_* columns
-# say the better price arrives one candle later 81% of the time (median
-# +0.26%), so a plain one-candle delay is the baseline any structural trigger
-# must beat before its structure has earned anything.
-HORIZONS_MIN = (3, 6, 15, 30, 60)
+# CALIBRATED TO ACTUAL HOLD TIME, measured over 771 trades:
+#
+#     p50  1.3 min      3 min:  80% closed
+#     p75  2.3          6 min:  92%
+#     p90  4.9         15 min:  98%
+#     p95  7.6         30 min:  99%
+#
+# The first version used (3, 6, 15, 30, 60) and every trigger conclusion was
+# scored at 30 minutes — a window 23x longer than the median trade. That
+# measured whether a trigger predicts something the bot is never exposed to.
+#
+# 1 minute is the floor: fetch_ohlcv has no finer candle. Since the median
+# hold is 1.3 min, the FIRST candle's high/low carries most of what a position
+# actually lives through, which is why excursions matter more than closes
+# here. 30 is kept only as slow-drift context; do not score triggers on it.
+HORIZONS_MIN = (1, 2, 3, 5, 10, 30)
 
 # Two rows for the same symbol inside this many seconds are treated as one
 # observation. Independent of the live dedup window: this one repairs rows
@@ -295,11 +303,15 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
         collapsed_rows=len(group), resolved_ts=now)
 
 
-def summarize(out_path: str = DEFAULT_OUT, horizon: int = 30) -> dict:
+def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
     """
     What the labelled data says. Deliberately plain: counts, medians, and the
     split by verdict. No significance testing — with samples this small it
     would dress up noise.
+
+    The default horizon is 2 MINUTES, not 30: median hold is 1.3 min and 80%
+    of trades close within 3. A 30-minute score describes a window the
+    position never sees.
     """
     rows = _load(Path(out_path))
     h = str(horizon)
@@ -383,19 +395,23 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 30) -> dict:
     # The baseline every structural trigger must beat: does simply waiting one
     # candle improve the price? Measured on the same observations, so it is a
     # like-for-like comparison rather than a remembered statistic.
+    # The delay baseline, now in SCALPER units. A 3m-candle wait was the
+    # original comparison, but the median trade is 1.3 min — a trade that
+    # waits one 3m candle has usually already been closed. 1 and 2 minutes
+    # are the delays that can actually be acted on.
     one, two = [], []
     for r, _ in vals:
         f = r.get("favoured_side_pct", {})
-        if f.get("3") is not None:
-            one.append(f["3"])
-        if f.get("6") is not None:
-            two.append(f["6"])
+        if f.get("1") is not None:
+            one.append(f["1"])
+        if f.get("2") is not None:
+            two.append(f["2"])
     out["wait_baseline"] = {
-        "one_candle": {"n": len(one), "median_favoured_pct": med(one),
+        "one_minute": {"n": len(one), "median_favoured_pct": med(one),
                        "better_than_now_pct": (
                            round(sum(1 for x in one if x > 0) / len(one) * 100, 1)
                            if one else None)},
-        "two_candles": {"n": len(two), "median_favoured_pct": med(two),
+        "two_minutes": {"n": len(two), "median_favoured_pct": med(two),
                         "better_than_now_pct": (
                             round(sum(1 for x in two if x > 0) / len(two) * 100, 1)
                             if two else None)},
