@@ -128,6 +128,9 @@ class GuardState:
     # Dormant exchange-side trail that activates at breakeven_at_roi. Distinct
     # from native_trail_id (activates at arm_roi) and adaptive_trail_id.
     floor_trail_id: str | None = None
+    # Async verification bookkeeping — see FuturesGuardian._verify_protection.
+    _verify_due: float = 0.0
+    _verified: bool = False
 
 
 @dataclass

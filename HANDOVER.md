@@ -3,6 +3,9 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.78.0 VERIFIES protective orders against the algo book — the guardian was
+holding REJECTED orders as resting.
+v3.77.3 adds the floor trail to the GIVE-BACK resting dict.
 v3.77.2 stops the floor trail falling back to a derived activation.
 v3.77.1 fixes two gaps found in the first demo run of the floor trail.
 v3.77.0 adds the DORMANT FLOOR TRAIL (off by default) — the break-even
@@ -304,6 +307,31 @@ worse.
 **This is why the activation path needed watching before live.** Placement had
 already been seen to work; the -2021-on-activation case had not.
 
+### v3.77.1 demo run, 2026-09-21 10:13-10:18 — both fixes verified
+
+    PROTECTION PHA: guardian holds [adaptive=...262, armed=...298,
+                                    floor_trail=...309]
+
+Visibility fixed. Cleanup fixed too: the algo listing read 0 shortly after
+the close and the orphan sweep found nothing, where the v3.77.0 session had
+climbed 1 -> 4 -> 7 through the session.
+
+The floor trail also placed WITH its activatePrice accepted this time
+(0.05853, +3% ROI), so the -2021 path is intermittent rather than constant —
+which is exactly why v3.77.2's refusal-to-fall-back matters: it will not fire
+often, and when it does the failure was silent.
+
+**Still unproven: a floor trail that actually ACTIVATES and FIRES.** PHA
+peaked +6.7%, passing the +3% activation, but the closing order cannot be
+identified from the log. Exit 0.0584101 sits below BOTH the armed trail's
+implied trigger (~0.05851) and the floor trail's (~0.05848) as computed from
+the POLLED low — which only means the exchange saw a lower low than the
+guardian sampled. Same peak_roi sampling problem, not a new defect.
+
+Settle it with `fetch_my_trades` on a closed position and match the closing
+order id against the ids in the log. Until that is done, the activation path
+has never been observed end to end.
+
 ### Before enabling on live
 
 Run it on demo and confirm from the logs that every resting order is
@@ -506,6 +534,71 @@ risk, while still consuming a position slot, a symbol cooldown and scanner
 attention. `AUTO_MAX_ATR_PCT` exists for this and is 0 (off). 2.5% is where
 the data says sizing stops working. NOTE it would cut entry rate, which is
 the variable currently under experiment.
+
+---
+
+## The guardian was holding REJECTED orders as resting (v3.78.0)
+
+**The most serious defect found in this investigation.** Not introduced by
+the floor-trail work — the floor trail is how it was noticed.
+
+PHA demo 2026-09-21 10:18. The guardian logged `FLOOR TRAIL resting
+id=...309`, `TRAIL-RESPONSE` showed the activatePrice accepted and kept, and
+every `PROTECTION` line listed it as held. The algo HISTORY
+(`fapiPrivateGetAllAlgoOrders`) says:
+
+    armed         1000000212987298  FINISHED   <- actually closed the position
+    FLOOR         1000000212987309  REJECTED   <- never rested
+    adaptive      1000000212987262  CANCELED
+    fixed         1000000212987373  CANCELED
+    profit-floor  1000000212987532  REJECTED   <- also refused
+
+**Two of five protective orders were refused and the guardian believed all
+five were resting.** The 08:29 PHA trade shows the same shape: armed
+...852893 REJECTED while the profit floor ...855212 FINISHED.
+
+The module already knew this was possible — "the algo endpoint returns 200
+with an id and refuses the order" — and `_accepted_id` exists to catch it. It
+cannot: **the rejection is ASYNCHRONOUS.** The POST returns 200 with a real
+id and the status flips afterwards.
+
+### Why polling is legitimate here, unlike for price
+
+Polling for PRICE loses information permanently — a peak not sampled is gone,
+which is why peak_roi under-records by a median 9.55 ROI points. Polling for
+ORDER STATUS loses nothing: REJECTED is durable and discrete, so a later read
+returns the same answer.
+
+What remains is a BLIND WINDOW between placement and verification — one
+guardian cycle (~2.5s), against the entire life of the position before.
+
+`_verify_protection` runs ONCE per position, one cycle after placement, reads
+the algo history, and DROPS any tracked id whose status is REJECTED /
+EXPIRED / CANCELED. Deliberately conservative: an unreadable algo book or an
+id absent from the history (the history has a retention window) changes
+nothing — silence beats dropping live protection on a guess.
+
+### It DETECTS, it cannot PREVENT
+
+Likely cause of the rejections, still unconfirmed: all three trails are
+`reduceOnly` at FULL position quantity, so adaptive + armed + floor is 3x the
+position in reduce-only orders, and Binance refuses reduce-only beyond
+position size. Two fitted, the third did not.
+
+**If that is the cause, the floor trail can never rest alongside the other
+two, and the design is wrong rather than the implementation.** The fix would
+be fewer trails, not better checking.
+
+### Consequences
+
+- **Do NOT enable GUARD_FLOOR_TRAIL_ENABLED on live.** It has never been
+  observed resting, let alone firing.
+- Every historical `PROTECTION ... guardian holds [...]` line is suspect.
+  Positions were less protected than the log claimed, for the whole of this
+  investigation and before it.
+- Confirm the reduce-only aggregate theory before any further trail work:
+  check whether the rejection persists with the floor trail disabled (two
+  trails) versus enabled (three).
 
 ---
 

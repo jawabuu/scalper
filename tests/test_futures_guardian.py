@@ -3133,6 +3133,66 @@ def test_a_rejected_armed_trail_keeps_the_adaptive_trail():
     assert adaptive not in [o for o, _ in fake.cancelled]
 
 
+def test_an_ASYNCHRONOUSLY_REJECTED_order_is_dropped_from_the_state():
+    """
+    PHA demo 2026-09-21 10:18. The guardian logged "FLOOR TRAIL resting
+    id=...309", TRAIL-RESPONSE showed the activatePrice accepted and kept, and
+    every PROTECTION line listed it as held. The algo HISTORY said:
+
+        armed  ...298  FINISHED   <- actually closed the position
+        FLOOR  ...309  REJECTED   <- never rested
+        floor  ...532  REJECTED   <- profit floor, also refused
+
+    _accepted_id cannot catch this: the POST returns 200 with a real id and
+    the status flips afterwards.
+    """
+    from bot.futures_guard import GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    st = GuardState()
+    st.native_trail_id = "armed-1"
+    st.floor_trail_id = "floor-1"
+    st.stop_order_id = "fixed-1"
+    g._algo_status = lambda sym: {"armed-1": "FINISHED",
+                                  "floor-1": "REJECTED",
+                                  "fixed-1": "NEW"}
+    g._verify_protection(g.fetch_positions()[0], st)
+    assert st.floor_trail_id is None, "a REJECTED order must not be held"
+    assert st.native_trail_id == "armed-1", "a live one must survive"
+    assert st.stop_order_id == "fixed-1"
+
+
+def test_verification_says_NOTHING_when_the_algo_book_is_unreadable():
+    # Silence beats guessing: an empty reply must not look like a rejection
+    # and drop live protection.
+    from bot.futures_guard import GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    st = GuardState()
+    st.native_trail_id = "armed-1"
+    g._algo_status = lambda sym: {}
+    g._verify_protection(g.fetch_positions()[0], st)
+    assert st.native_trail_id == "armed-1"
+
+
+def test_an_id_absent_from_the_history_is_left_alone():
+    # Absent is not refused — the history has a retention window.
+    from bot.futures_guard import GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    st = GuardState()
+    st.native_trail_id = "armed-1"
+    g._algo_status = lambda sym: {"something-else": "REJECTED"}
+    g._verify_protection(g.fetch_positions()[0], st)
+    assert st.native_trail_id == "armed-1"
+
+
+def test_every_dead_algo_status_is_recognised():
+    from bot.futures_guardian import FuturesGuardian
+    assert {"REJECTED", "EXPIRED", "CANCELED", "CANCELLED"} <= \
+        FuturesGuardian._DEAD_ALGO
+
+
 def test_a_missing_profit_floor_is_VISIBLE_not_just_logged():
     """
     PHA 2026-09-21 08:29: the floor was refused (-2021 "would immediately

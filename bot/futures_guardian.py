@@ -2615,6 +2615,21 @@ class FuturesGuardian:
         stop_roi_used = _stop_roi_used
         self._check_risk_invariant(pos, _stop_roi_used)
         _peak_before = state.peak_roi
+        # One cycle after placement, confirm the exchange actually kept what
+        # we think is resting. Once per position, not every cycle: the algo
+        # history costs request weight and a terminal status does not change.
+        if not getattr(state, "_verified", False):
+            if getattr(state, "_verify_due", 0) and \
+                    time.time() >= state._verify_due:
+                try:
+                    self._verify_protection(pos, state)
+                except Exception as e:
+                    log.debug(f"{pos.symbol}: protection verify skipped "
+                              f"({_safe_err(e)})")
+                state._verified = True
+            elif not getattr(state, "_verify_due", 0):
+                state._verify_due = time.time() + self.poll_interval
+
         _atr_pct, _recent_tr_pct = self._vol_for(pos)
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
@@ -3640,6 +3655,11 @@ class FuturesGuardian:
                         ("floor", getattr(st, "floor_stop_id", None)),
                         ("trail", getattr(st, "native_trail_id", None)),
                         ("adaptive", getattr(st, "adaptive_trail_id", None)),
+                        # The dormant floor trail was missing here, so the
+                        # GIVE-BACK line could not show whether it was still
+                        # resting at the close — the one line most likely to
+                        # be read when working out which order fired.
+                        ("floor_trail", getattr(st, "floor_trail_id", None)),
                     ) if v}
                     line = (f"GIVE-BACK {symbol}: peak {peak:+.1f}% -> final "
                             f"{final_roi:+.2f}% = {give_back:.1f} ROI points"
@@ -3928,6 +3948,96 @@ class FuturesGuardian:
                 row["error"] = f"{type(e).__name__}: {e}"
             out["attempts"].append(row)
         return out
+
+    # Statuses that mean the order is NOT protecting the position. Binance's
+    # algo book uses its own vocabulary — not ccxt's open/closed/canceled.
+    _DEAD_ALGO = {"REJECTED", "EXPIRED", "CANCELED", "CANCELLED"}
+
+    def _algo_status(self, symbol: str) -> dict:
+        """
+        {algoId: status} from the algo HISTORY, not the open-order book.
+
+        `_algo_orders` lists only OPEN algo orders, so an order that was
+        accepted at POST and refused a moment later is simply absent — which
+        reads the same as "not placed yet". The history carries the terminal
+        status.
+        """
+        for name in ("fapiPrivateGetAllAlgoOrders", "fapiPrivateGetHistoricAlgoOrders"):
+            fn = getattr(self.exchange, name, None)
+            if fn is None:
+                continue
+            try:
+                res = fn({"symbol": symbol.replace("/", "").replace(":USDT", "")})
+            except Exception as e:
+                log.debug(f"{name} failed for {symbol}: {_safe_err(e)}")
+                continue
+            if isinstance(res, dict):
+                res = (res.get("orders") or res.get("data")
+                       or res.get("algoOrders") or [])
+            out = {}
+            for o in res or []:
+                oid = str(o.get("algoId") or o.get("orderId") or o.get("id") or "")
+                st = str(o.get("algoStatus") or o.get("status") or "").upper()
+                if oid:
+                    out[oid] = st
+            if out:
+                return out
+        return {}
+
+    def _verify_protection(self, pos: FuturesPosition, state) -> None:
+        """
+        Re-read the algo book and DROP any tracked id the exchange refused.
+
+        PHA demo 2026-09-21 10:18 is why this exists. The guardian logged
+        "FLOOR TRAIL resting id=...309", TRAIL-RESPONSE showed the
+        activatePrice accepted and kept, and every PROTECTION line listed it
+        as held. The algo history says:
+
+            armed  ...298  FINISHED   <- this actually closed the position
+            FLOOR  ...309  REJECTED   <- never rested
+            floor  ...532  REJECTED   <- the profit floor, also refused
+
+        The module already knew this could happen — "the algo endpoint returns
+        200 with an id and refuses the order" — and `_accepted_id` was written
+        to catch it. It cannot: the rejection is ASYNCHRONOUS. The POST
+        succeeds, the id is real, and the status flips afterwards.
+
+        Verification by polling is sound HERE in a way it is not for price:
+        REJECTED is a durable, discrete state, so a later read returns the
+        same answer and nothing is lost by sampling. What remains is a blind
+        window between placement and this check — one cycle, against the
+        whole life of the position before.
+
+        It DETECTS, it cannot PREVENT. If the cause is the reduce-only
+        aggregate (three trails at full position size is 3x the position),
+        every floor trail will be refused and this will say so promptly.
+        """
+        tracked = {
+            "fixed": "stop_order_id",
+            "adaptive": "adaptive_trail_id",
+            "armed": "native_trail_id",
+            "floor": "floor_stop_id",
+            "floor_trail": "floor_trail_id",
+        }
+        live = {k: getattr(state, a, None) for k, a in tracked.items()}
+        if not any(live.values()):
+            return
+        status = self._algo_status(pos.symbol)
+        if not status:
+            return                      # cannot tell; say nothing
+        for label, attr in tracked.items():
+            oid = getattr(state, attr, None)
+            if not oid:
+                continue
+            st = status.get(str(oid))
+            if st is None or st not in self._DEAD_ALGO:
+                continue
+            log.error(
+                f"PROTECTION-REFUSED {pos.symbol}: {label} {oid} is {st} on "
+                f"the exchange but the guardian was holding it as resting. "
+                f"Dropping the id — it was protecting nothing.")
+            setattr(state, attr, None)
+            self._record(pos.symbol, "protection_refused", f"{label} {st}")
 
     def _algo_orders(self) -> list:
         """Open ALGO orders — the book conditional and trailing stops live in."""
