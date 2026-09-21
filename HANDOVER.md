@@ -1,8 +1,10 @@
 # Handover — Binance futures scalping bot
 
-**v3.73.6**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
+**v3.74.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.74.0 adds PATH capture (adverse/favourable excursion) to the outcome
+resolver — endpoints alone cannot express the entry-timing goal.
 v3.73.6 documents peak_roi being UNRELIABLE (below) — read it before using
 that column for anything.
 v3.73.5 routes the outcome resolver through SOCKS_PROXY and records the FIRST
@@ -73,6 +75,71 @@ failed identically and logged its own warning — one failure looking like
 Region and connectivity problems are fatal for the pass, not per-row.
 
 `resolve()` is idempotent, so an aborted run loses nothing — re-run it.
+
+---
+
+## Path capture: adverse and favourable excursion (v3.74.0)
+
+The entry-timing goal is "high confidence in direction AND a small adverse
+excursion — ideally consolidating before the move". That is a statement about
+the PATH, and the resolver only recorded ENDPOINTS: a candidate that ran -8%
+before +12% scored identically to one that went straight to +12%.
+
+Every observation now carries, per horizon:
+
+    adverse_pct      worst move AGAINST the side, clamped at 0
+    favourable_pct   best move IN FAVOUR
+    edge_ratio       favourable / adverse; None (never inf) when adverse is 0
+
+Computed from candle HIGHS and LOWS, not closes — the point is what the
+position would have LIVED THROUGH, and a close hides the wick that would have
+taken out a stop.
+
+`summarize()` reports `path`, `path_by_crt_agrees` and `path_by_verdict`,
+each with median adverse, median favourable, median edge ratio, and
+`adverse_under_0.5pct` (the share of observations whose adverse excursion
+stayed under 0.5% of PRICE — stated in price because ROI depends on leverage).
+
+**This also gives the triggers a fairer test than they have had.** CRT and
+`looks_exhausted` were scored on 30-minute endpoints (SETTLED #7) and both
+looked mildly anti-predictive. If CRT's real claim is "entry here has a small
+adverse excursion", endpoint returns were never the right scorer for it.
+
+Sample discipline unchanged: 218 observations, 20 in the jev-ENTER class, 40
+CRT-True. Richer analysis on a small sample is how patterns that are not
+there get found. Let it accumulate a week before fitting anything.
+
+### A recurring error worth naming
+
+Three times in this investigation a quantity denominated in DOLLARS was
+reasoned about in ROI%:
+
+- "Is ATR_STOP_MAX_ROI=30 too permissive?" — no. `ENTRY_RISK_PCT=0.5` is the
+  bound; `ATR_STOP_MAX_ROI` sizes MARGIN DOWN so the dollar risk is constant.
+  Verified across 762 trades: risk at stop is $25.2-$25.7 in every ATR band
+  from 0 to 2.5% while stop_roi runs 16 -> 30 and margin runs $149 -> $85.
+  Median $25.44 = 0.5% of a $5,000 wallet.
+- "The cap isn't a cap" (fail-fast overshooting -5%) — wrong. The exchange
+  ATR stop is the bound; fail-fast pulls losses IN from it. Every fail-fast
+  exit closed well inside its own stop (SAGA -30.0 -> -10.91, NEAR -25.2 ->
+  -6.13).
+- Give-back and capture in ROI points across containers running 10x and 20x.
+
+**ROI% is not comparable across leverage or across position sizes. Convert to
+price % or to dollars before comparing anything.**
+
+### One genuine finding from that thread
+
+    ATR band     n    stop_roi   margin$   risk$
+    2.5%+       52      30.0        1.6     0.49
+
+Above ~2.5% ATR the sizing hits `ATR_STOP_MAX_ROI=30`, cannot widen further,
+and compensates by collapsing margin to $1.60 — risking 49 cents. Those 52
+trades (7% of entries) are economically meaningless: fees likely exceed the
+risk, while still consuming a position slot, a symbol cooldown and scanner
+attention. `AUTO_MAX_ATR_PCT` exists for this and is 0 (off). 2.5% is where
+the data says sizing stops working. NOTE it would cut entry rate, which is
+the variable currently under experiment.
 
 ---
 

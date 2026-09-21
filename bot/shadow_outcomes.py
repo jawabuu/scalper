@@ -94,6 +94,15 @@ class ShadowOutcome:
     base_price: float
     returns_pct: dict          # {"15": -0.4, "30": ...}; horizon -> % move
     favoured_side_pct: dict    # same, signed so + means the SIDE was right
+    # PATH, not endpoint. Closes answer "did the direction pay"; they cannot
+    # distinguish a candidate that ran -8% before +12% from one that went
+    # straight to +12%. The operator's criterion — high directional
+    # confidence with a SMALL adverse excursion, consolidating before the
+    # move — is a statement about the path, so it needs these.
+    adverse_pct: dict          # worst move AGAINST the side, positive = hurt
+    favourable_pct: dict       # best move IN FAVOUR, positive = helped
+    edge_ratio: dict           # favourable / adverse; >1 means the move paid
+                               # more than it hurt on the way
     collapsed_rows: int        # how many decision rows this observation covers
     resolved_ts: float
 
@@ -231,6 +240,7 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
     side = str(head.get("side") or "").lower()
     sign = -1.0 if side.startswith("short") else 1.0
     rets, favoured = {}, {}
+    adverse, favourable, edge = {}, {}, {}
     for h in horizons:
         px = close_at(ts + h * 60)
         if px is None:
@@ -241,6 +251,31 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
         # direction was right. Without this a short's winning move reads
         # negative and every later average silently inverts.
         favoured[str(h)] = round(pct * sign, 4)
+
+        # Excursions use candle HIGHS and LOWS, not closes: the point is what
+        # the position would have LIVED THROUGH, and a close hides the wick
+        # that would have taken out a stop.
+        window = [c for c in candles if ts <= c[0] / 1000.0 <= ts + h * 60]
+        if not window:
+            continue
+        hi = max(c[2] for c in window)
+        lo = min(c[3] for c in window)
+        up = (hi - base) / base * 100.0
+        dn = (lo - base) / base * 100.0
+        if sign > 0:                       # long: down hurts, up helps
+            adv, fav = -dn, up
+        else:                              # short: up hurts, down helps
+            adv, fav = up, -dn
+        # Clamped at 0: an excursion that never went against the side is zero
+        # adverse, not negative adverse. A negative value here would silently
+        # flatter any later average.
+        adverse[str(h)] = round(max(adv, 0.0), 4)
+        favourable[str(h)] = round(max(fav, 0.0), 4)
+        # None rather than infinity when nothing went against it — a ratio
+        # with a zero denominator is not a large edge, it is an undefined one,
+        # and inf poisons every median it lands in.
+        edge[str(h)] = (round(favourable[str(h)] / adverse[str(h)], 3)
+                        if adverse[str(h)] > 0 else None)
     if not rets:
         return None
 
@@ -256,6 +291,7 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
         composed_score=float(head.get("composed_score") or 0.0),
         triggers=dict(head.get("triggers") or {}),
         base_price=base, returns_pct=rets, favoured_side_pct=favoured,
+        adverse_pct=adverse, favourable_pct=favourable, edge_ratio=edge,
         collapsed_rows=len(group), resolved_ts=now)
 
 
@@ -294,6 +330,46 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 30) -> dict:
             seen.setdefault(r.get(field, "?"), []).append(v)
         out[bucket] = {k: {"n": len(v), "median_favoured_pct": med(v)}
                        for k, v in sorted(seen.items())}
+
+    # PATH quality. This is what the operator's criterion actually asks for:
+    # direction right AND the adverse excursion small. A trigger can look
+    # identical on closes and differ completely here.
+    def path(subset):
+        adv = [r["adverse_pct"][h] for r in subset
+               if r.get("adverse_pct", {}).get(h) is not None]
+        fav = [r["favourable_pct"][h] for r in subset
+               if r.get("favourable_pct", {}).get(h) is not None]
+        ed = [r["edge_ratio"][h] for r in subset
+              if r.get("edge_ratio", {}).get(h) is not None]
+        if not adv:
+            return None
+        return {"n": len(adv),
+                "median_adverse_pct": med(adv),
+                "median_favourable_pct": med(fav) if fav else None,
+                "median_edge_ratio": med(ed) if ed else None,
+                # The operator's threshold, in the units it was stated in:
+                # "consolidating under 5% ROI adverse before the move". ROI
+                # depends on leverage, so it is recorded here as PRICE and the
+                # reader applies their own leverage.
+                "adverse_under_0.5pct": round(
+                    sum(1 for v in adv if v < 0.5) / len(adv) * 100, 1)}
+
+    out["path"] = path(rows)
+    out["path_by_crt_agrees"] = {}
+    seen_p = {}
+    for r in rows:
+        seen_p.setdefault(str((r.get("triggers") or {}).get("crt_agrees")),
+                          []).append(r)
+    for k, v in sorted(seen_p.items()):
+        p_ = path(v)
+        if p_:
+            out["path_by_crt_agrees"][k] = p_
+
+    seen_v = {}
+    for r in rows:
+        seen_v.setdefault(r.get("jev_verdict", "?"), []).append(r)
+    out["path_by_verdict"] = {k: p_ for k, v in sorted(seen_v.items())
+                              if (p_ := path(v))}
 
     # By TRIGGER. None ("no opinion") is kept distinct from False — collapsing
     # them would score a trigger that abstained as one that disagreed.

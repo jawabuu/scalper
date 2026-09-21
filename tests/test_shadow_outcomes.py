@@ -20,9 +20,11 @@ from bot.shadow_outcomes import (
 class _Exchange:
     """Minimal ccxt-shaped fake. 1m candles at a fixed drift."""
 
-    def __init__(self, start=100.0, drift=0.0, minutes=180, gap_after=None):
+    def __init__(self, start=100.0, drift=0.0, minutes=180, gap_after=None,
+                 wick=0.0):
         self.start, self.drift, self.minutes = start, drift, minutes
         self.gap_after = gap_after       # stop emitting after N minutes
+        self.wick = wick                 # symmetric high/low around the close
         self.calls = []
 
     def fetch_ohlcv(self, symbol, timeframe, since, limit):
@@ -32,7 +34,9 @@ class _Exchange:
         for i in range(min(n, limit)):
             t = since + i * 60_000
             px = self.start + self.drift * i
-            out.append([t, px, px, px, px, 1000.0])
+            hi = px + (self.wick or 0.0)
+            lo = px - (self.wick or 0.0)
+            out.append([t, px, hi, lo, px, 1000.0])
         return out
 
 
@@ -280,6 +284,72 @@ def test_the_one_candle_wait_baseline_is_reported(tmp_path):
     # A falling market favours the short at every horizon.
     assert one["median_favoured_pct"] > 0
     assert one["better_than_now_pct"] == 100.0
+
+
+# ── Path, not endpoint ──────────────────────────────────────────────────────
+#
+# The operator's criterion is "direction right AND the adverse excursion
+# small — consolidating before the move". Closes cannot express that: a
+# candidate that ran -8% before +12% scores identically to one that went
+# straight to +12%.
+
+def test_a_short_that_only_fell_has_ZERO_adverse_excursion(tmp_path):
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, side="short")])
+    resolve(_Exchange(start=100.0, drift=-0.1), str(src), str(dst), now=now)
+    rec = json.loads(dst.read_text().strip())
+    assert rec["adverse_pct"]["30"] == 0.0
+    assert rec["favourable_pct"]["30"] > 0
+
+
+def test_adverse_is_never_NEGATIVE(tmp_path):
+    # A clamp, not a cosmetic one: a negative "adverse" would flatter every
+    # later average of this column.
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, side="long")])
+    resolve(_Exchange(start=100.0, drift=0.1), str(src), str(dst), now=now)
+    rec = json.loads(dst.read_text().strip())
+    assert rec["adverse_pct"]["30"] >= 0.0
+
+
+def test_excursions_use_WICKS_not_closes(tmp_path):
+    # What the position would have lived through. A close hides the wick that
+    # would have taken out a stop.
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, side="short")])
+    resolve(_Exchange(start=100.0, drift=-0.1, wick=2.0), str(src), str(dst), now=now)
+    rec = json.loads(dst.read_text().strip())
+    assert rec["adverse_pct"]["30"] > 1.0, \
+        "an upper wick is adverse for a short even if every close fell"
+
+
+def test_the_edge_ratio_is_NONE_not_infinity_when_nothing_went_against(tmp_path):
+    # inf poisons every median it lands in, and an undefined ratio is not a
+    # large edge.
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, side="short")])
+    resolve(_Exchange(start=100.0, drift=-0.1), str(src), str(dst), now=now)
+    rec = json.loads(dst.read_text().strip())
+    assert rec["edge_ratio"]["30"] is None
+
+
+def test_summarize_reports_path_quality_split_by_trigger(tmp_path):
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [
+        _row(symbol="A/USDT:USDT", ts=now - 7200, triggers={"crt_agrees": True}),
+        _row(symbol="B/USDT:USDT", ts=now - 7200, triggers={"crt_agrees": False}),
+    ])
+    resolve(_Exchange(drift=-0.1, wick=0.5), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=30)
+    assert s["path"]["n"] == 2
+    assert s["path"]["median_adverse_pct"] is not None
+    assert set(s["path_by_crt_agrees"]) == {"True", "False"}
+    assert "adverse_under_0.5pct" in s["path"]
 
 
 # ── Reading ─────────────────────────────────────────────────────────────────
