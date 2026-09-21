@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.79.0 adds tools/compare_callback_mult.py — the WITHIN-INSTANCE before/after
+for a multiplier change. Run it BEFORE deploying to capture the baseline.
 v3.78.2 documents the DEMO-vs-LIVE STRUCTURAL FACTOR — read it before
 porting any ATR-derived setting between instances.
 v3.78.1 WITHDRAWS the v3.78.0 diagnosis — REJECTED meant "invalidated at
@@ -969,11 +971,9 @@ Two measured effects roughly account for it:
       (live 1.25 x ATR_live = 1.250 vs demo 0.75 x ATR_demo = 0.563)
                                                  1.25 x 2.22 = 2.78x vs 3.13x
 
-The second is the actionable half and it is uncomfortable:
-`AUTO_CALLBACK_ATR_MULT=1.25` was set to fix entry RATE, and in real price
-terms it makes live wait for a retracement more than twice as deep as demo's.
-A deeper retracement is a better price, but it is also a move that has already
-given a lot back — consistent with live's worse `roi_at_first_sight`.
+The second is the actionable half. **CORRECTED 2026-09-21 by the 11:49
+exports** — see below; per-trade PRICE outcomes do NOT show the multiplier
+costing edge, and the claim that it does is withdrawn.
 
 **Do NOT try to close the gap with leverage.** It cancels.
 
@@ -996,6 +996,70 @@ consequence of this section.
 The edge decomposition is a HYPOTHESIS — 2.78 vs 3.13 is close enough to be
 coincidence, and correlation is not causation. Re-measure before treating the
 callback-depth effect as established.
+
+---
+
+## The multiplier's measured effect — and what it does NOT show (v3.79.0)
+
+From the 11:49 exports, 38 live (1.25) and 45 demo (0.75), **all in PRICE %
+with leverage divided out**, atr_floor trades only:
+
+                     n   drift    first_sight   underwater
+    live 1.25       37  -0.669%     -0.176%        95%
+    demo 0.75       36  -0.270%     +0.023%        39%
+
+    FINAL         median    mean   trimmed      p10      p90   win
+    live 1.25     +0.157  +0.170   +0.124   -1.266  +1.461   59%
+    demo 0.75     +0.081  +0.235   +0.180   -1.082  +1.274   53%
+
+**The multiplier does exactly what it should on FILL QUALITY**: the wider
+callback fills 0.669% better than its sized price against 0.270%, 2.5x the
+improvement. And it is underwater at first sight 95% of the time against 39%.
+
+**Both are real and they are not contradictory.** A better price comes from
+waiting for a bigger bounce, and you enter while that bounce is still
+running, so it continues briefly.
+
+**On OUTCOME they are tied.** Live has the better median and win rate, demo
+the better mean, and trimming one outlier from each tail flips the mean. At
+n=37/36 that is a coin toss.
+
+### Two claims WITHDRAWN
+
+1. "The callback-depth effect costs edge." NOT SUPPORTED by per-trade price
+   outcomes. The earlier 3.13x decomposition used dashboard WALLET
+   percentages, which fold in position sizing; price move per trade is the
+   cleaner measure and it shows no gap.
+2. The 95%-underwater figure has been treated as an entry-quality problem.
+   Much of it is an ARTEFACT OF THE WIDER CALLBACK, not a signal about the
+   trigger. `roi_at_first_sight` is not comparable across different
+   multipliers.
+
+### The only clean test, and how to run it
+
+Cross-container comparison carries the 0.751 ATR factor, a leverage
+difference and a different symbol set — confounds larger than the effect.
+Split WITHIN one instance instead:
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+        python tools/compare_callback_mult.py
+
+Groups identify THEMSELVES from `callback_pct / atr_pct` per trade, so there
+is no deploy timestamp to remember and a re-run months later still splits
+correctly. Only `callback_source == "atr_floor"` trades are grouped — the
+first version invented cohorts at 0.70/0.90/1.00 that were ratio-sourced
+trades with coincidental ATRs.
+
+Everything is PRICE %, never ROI. Reasoning in ROI about a price-denominated
+quantity caused four separate wrong conclusions in this investigation.
+
+The tool refuses to declare a winner. It flags groups under 30 trades, a
+leverage difference between groups (no longer within-instance), and a median
+ATR difference over 25% (the groups did not trade the same market). At ~40
+trades/day that is roughly a week per group.
+
+**Run it BEFORE deploying the change** — with one multiplier present it
+prints the BEFORE baseline and says so.
 
 ---
 
