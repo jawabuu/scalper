@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.77.1 fixes two gaps found in the first demo run of the floor trail.
 v3.77.0 adds the DORMANT FLOOR TRAIL (off by default) — the break-even
 promise no longer depends on a poll.
 v3.76.1 surfaces a missing break-even floor on the dashboard.
@@ -229,6 +230,34 @@ redundant order, not a double close or a reversed position.
 `floor_trail_id` is in the sweep's protected set. Omitting it would have
 repeated the native_trail_id bug exactly — placed at entry, lands in
 _all_stop_ids, swept by the next fixed-stop placement.
+
+### First demo run, 2026-09-21 09:38-09:45 — what it showed
+
+Placement works. SUI, METIS and EGLD all got the floor trail at entry, and
+both warnings fired exactly as intended on every one:
+
+    floor trail can only lock +1% ROI, not the +2% asked — Binance will not
+    take a callback under 0.1% of price and 3%/20x needs less than that
+    floor trail locks +1% ROI but a round trip costs ~1.8% ROI at 20x —
+    activating it would still close NET NEGATIVE
+
+METIS behaved correctly in the negative case: peak +2.7%, below the +3%
+activation, so the floor trail never activated and fail-fast cut it at -5.3%.
+
+**Two gaps, both introduced by v3.77.0:**
+
+1. The floor trail was in NO `PROTECTION ... guardian holds` line. It rested
+   on the exchange and was invisible. Now in the `tracked` dict as
+   `floor_trail` — deliberately distinct from `floor`, which is the reactive
+   profit-floor STOP_MARKET. **The naming collision is real and worth
+   remembering: "floor" means two different orders.**
+2. It was not cancelled at close, only swept 120s later. SUI 09:41 closed
+   with BOTH the armed trail and the floor trail still resting — the armed
+   trail already behaved that way and adding a third order doubled it. Close
+   now cancels adaptive, armed AND floor trails.
+
+Also seen for the first time on live: `shadow decision: rate cap (30/min)
+reached`. Worth watching if candidate counts keep climbing.
 
 ### Before enabling on live
 

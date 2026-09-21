@@ -1718,6 +1718,29 @@ def test_it_is_not_superseded_when_other_stops_are_cancelled():
 # poll-driven floor placement refused -2021 because price had come back
 # through the level, position ran to -10.5% on the ATR stop alone.
 
+def test_every_trail_is_cancelled_when_the_position_closes():
+    """
+    SUI 2026-09-21 09:41 closed with the armed trail AND the floor trail still
+    resting — only the profit floor and the adaptive trail were cancelled, and
+    the rest were left to the 120s orphan sweep. The armed trail already
+    behaved that way; adding the floor trail doubled the orphans.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert '"adaptive_trail_id", "native_trail_id",' in src
+    assert '"floor_trail_id")' in src
+
+
+def test_the_floor_trail_appears_in_the_PROTECTION_line():
+    # It rested on the exchange but showed in no PROTECTION line, so there was
+    # no way to see it was there.
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    assert '"floor_trail": getattr(state, "floor_trail_id", None),' in src
+
+
 def test_the_floor_trail_is_OFF_by_default():
     from bot.futures_guard import GuardConfig
     assert GuardConfig().floor_trail_enabled is False

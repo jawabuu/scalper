@@ -2033,6 +2033,11 @@ class FuturesGuardian:
             "adaptive": getattr(state, "adaptive_trail_id", None),
             "armed": state.native_trail_id,
             "floor": getattr(state, "floor_stop_id", None),
+            # The DORMANT floor trail, distinct from "floor" above (which is
+            # the reactive profit-floor STOP_MARKET). Omitted on the first
+            # pass, so it was invisible in every PROTECTION line while
+            # resting on the exchange.
+            "floor_trail": getattr(state, "floor_trail_id", None),
         }
         tracked_ids = {v for v in tracked.values() if v}
 
@@ -3239,14 +3244,21 @@ class FuturesGuardian:
                 self._record_closed_trade(sym, st, meta)
                 # Drop the floor now rather than leaving it to the 120s sweep.
                 self._cancel_profit_floor(sym, st)
-                if getattr(st, "adaptive_trail_id", None):
+                # Cancel every trail this position holds, not just the
+                # adaptive one. The armed trail was already being left to the
+                # 120s sweep; adding the floor trail doubled the orphans, and
+                # SUI 2026-09-21 09:41 closed leaving both resting.
+                for _attr in ("adaptive_trail_id", "native_trail_id",
+                              "floor_trail_id"):
+                    _oid = getattr(st, _attr, None)
+                    if not _oid:
+                        continue
                     try:
                         self._cancel_stop(
-                            type("P", (), {"symbol": sym})(),
-                            st.adaptive_trail_id)
+                            type("P", (), {"symbol": sym})(), _oid)
                     except Exception:
                         pass
-                    st.adaptive_trail_id = None
+                    setattr(st, _attr, None)
                 log.info(f"{sym}: position gone — clearing guard state")
                 self._record(sym, "closed", "position no longer open")
                 # Tell whoever is trading that this symbol closed. The
