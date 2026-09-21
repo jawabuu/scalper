@@ -1237,16 +1237,30 @@ def test_trail_callback_gives_same_roi_at_any_leverage():
         assert px * lev == pytest.approx(5.0, abs=0.6)
 
 
-def test_the_guardian_floor_follows_the_entry_paths_multiplier():
+def test_the_volatility_floor_is_OFF_by_default():
     """
-    The two systems that size a callback must not drift apart again. Defaulting
-    the guardian to a literal 0.75 matched only the OTHER setting's DEFAULT —
-    set AUTO_CALLBACK_ATR_MULT in compose and the guardian would have silently
-    kept 0.75, which is the disagreement the floor exists to close.
+    v3.73.4. The floor was introduced in v3.72.0 from one trade (STG) and a
+    mechanism argument, then tested against 395 historical trail exits and NOT
+    supported: median outcome improves monotonically as the callback gets
+    TIGHTER relative to ATR, and the loss rate is flat ~10% for tight
+    callbacks against 26% for wide ones.
+
+    Off by default so neither container needs the env var at all.
+    """
+    cfg = _cfg_with({})
+    assert cfg.guard_trail_callback_atr_mult == 0.0
+
+
+def test_the_floor_is_NOT_chained_to_the_entry_multiplier():
+    """
+    v3.72.1 defaulted this to AUTO_CALLBACK_ATR_MULT. That was a mistake: the
+    entry multiplier is the independent variable of a running experiment with
+    a pre-committed control, so chaining silently coupled an EXIT-side setting
+    to it and gave the comparison three differences instead of one.
     """
     cfg = _cfg_with({"AUTO_CALLBACK_ATR_MULT": "1.25"})
-    assert cfg.guard_trail_callback_atr_mult == pytest.approx(1.25)
     assert cfg.auto_callback_atr_mult == pytest.approx(1.25)
+    assert cfg.guard_trail_callback_atr_mult == 0.0
 
 
 def test_an_explicit_guardian_multiplier_still_wins():

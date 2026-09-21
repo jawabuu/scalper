@@ -473,15 +473,12 @@ def test_arm_at_entry_must_use_the_DEFERRED_level_not_the_configured_one():
         "activating at the deferred level must still lock in profit"
 
 
-def test_the_live_and_demo_containers_now_floor_differently():
+def test_with_the_floor_off_the_callback_is_pure_roi_over_leverage():
     """
-    AUTO_CALLBACK_ATR_MULT is 1.25 live and 0.75 demo, and since v3.72.1 the
-    guardian floor follows it. That is intended, but it means the two
-    containers are no longer running the same experiment — worth failing here
-    if anyone assumes they are.
+    The default since v3.73.4, and what BOTH containers now run. The floor is
+    dead code unless someone deliberately sets the multiplier.
     """
-    live = _vcfg(trail_callback_atr_mult=1.25)
-    demo = _vcfg(trail_callback_atr_mult=0.75)
-    atr = 0.6
-    assert trail_callback_price_pct(10, live, atr, None) != \
-        trail_callback_price_pct(10, demo, atr, None)
+    cfg = _vcfg(trail_callback_atr_mult=0.0)
+    for atr in (0.3, 0.6, 1.5, 3.0):
+        assert trail_callback_price_pct(10, cfg, atr, None) == pytest.approx(0.30)
+    assert effective_arm_roi(cfg, 10, 1.5, None) == pytest.approx(cfg.arm_roi)

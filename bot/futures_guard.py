@@ -154,7 +154,7 @@ class GuardConfig:
     # 0.75 matches AUTO_CALLBACK_ATR_MULT, the multiplier the ENTRY path has
     # used for this same judgement all along — the two systems disagreeing is
     # what produced a 0.45% entry callback and a 0.15% armed one on one coin.
-    trail_callback_atr_mult: float = 0.75
+    trail_callback_atr_mult: float = 0.0
     # Profit the trail must still lock in once its callback has been floored
     # by volatility. Sets how much later a volatile position arms: the trail
     # waits until peak >= callback_give_back + this. See effective_arm_roi.

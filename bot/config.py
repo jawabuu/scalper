@@ -299,14 +299,25 @@ class BotConfig:
     #
     # 0.75 deliberately matches AUTO_CALLBACK_ATR_MULT so the two systems that
     # size a callback finally use one yardstick. 0 restores the old behaviour.
-    # Defaults to AUTO_CALLBACK_ATR_MULT rather than to a literal, so the two
-    # systems that size a callback cannot silently drift apart again. Hardcoding
-    # 0.75 here matched only the OTHER setting's default: change
-    # AUTO_CALLBACK_ATR_MULT in compose and the guardian would have kept 0.75,
-    # reintroducing exactly the disagreement this floor exists to close.
+    # Volatility floor for the ARMED trail's callback, as a multiple of the
+    # coin's own movement. DEFAULT 0 = OFF.
+    #
+    # Introduced in v3.72.0 on the argument that a callback inside the coin's
+    # ATR fires on an ordinary candle (STG 2026-09-20: 0.15% against a 0.604%
+    # ATR, peak +23.2% ROI, closed -8.08% three seconds later).
+    #
+    # TESTED AGAINST 395 HISTORICAL TRAIL EXITS AND NOT SUPPORTED. Median
+    # outcome improves MONOTONICALLY as the callback gets TIGHTER relative to
+    # ATR, and the loss rate is flat at ~10% for tight callbacks against 26%
+    # for wide ones. The same-ATR/different-width comparison (20x vs 10x)
+    # favours the tighter callback in all four ATR bands. See the SETTLED
+    # section of HANDOVER.md before re-enabling this.
+    #
+    # It was also briefly chained to AUTO_CALLBACK_ATR_MULT, which was a
+    # mistake: that variable is the independent variable of a running
+    # experiment, so chaining coupled an exit-side setting to it.
     guard_trail_callback_atr_mult: float = field(default_factory=lambda: _env_float(
-        "GUARD_TRAIL_CALLBACK_ATR_MULT",
-        _env_float("AUTO_CALLBACK_ATR_MULT", 0.75)))
+        "GUARD_TRAIL_CALLBACK_ATR_MULT", 0.0))
     # Profit the trail must still lock in AFTER its callback has been floored
     # by volatility. A floored callback can cost more ROI than GUARD_ARM_ROI
     # at high leverage (at 20x a 0.6% ATR needs 0.45%, which is 9% ROI against
