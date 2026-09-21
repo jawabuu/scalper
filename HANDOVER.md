@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.79.1 adds never_green to that tool.
 v3.79.0 adds tools/compare_callback_mult.py — the WITHIN-INSTANCE before/after
 for a multiplier change. Run it BEFORE deploying to capture the baseline.
 v3.78.2 documents the DEMO-vs-LIVE STRUCTURAL FACTOR — read it before
@@ -1023,6 +1024,37 @@ running, so it continues briefly.
 **On OUTCOME they are tied.** Live has the better median and win rate, demo
 the better mean, and trimming one outlier from each tail flips the mean. At
 n=37/36 that is a coin toss.
+
+### never_green is the sharpest split in the data
+
+`never_green` = the position never traded above entry (`peak_roi <= 0`). From
+the same exports, atr_floor trades only, price %:
+
+                  n   never_green   their final   others final
+    live 1.25    37       30%         -0.574%       +0.238%
+    demo 0.75    39       23%         -0.853%       +0.355%
+
+**Nothing else in this dataset separates winners from losers that cleanly.**
+30% of live trades never trade above entry and lose ~0.57% of price; the
+other 70% make ~+0.24%.
+
+It is plausibly connected to the multiplier: a WIDER callback fills deeper
+into the bounce, so the position starts further underwater (first_sight
+-0.176% live vs +0.023% demo) and needs more recovery just to reach entry.
+Lowering the multiplier should REDUCE the rate. **That is the sharpest
+prediction of the live change**, and `compare_callback_mult.py` now reports
+it per group.
+
+CAVEAT: `peak_roi` is SAMPLED and under-records by a median 9.55 ROI points
+on fast moves, so a position that went green between polls records
+`peak <= 0` and is counted. This OVER-counts never_green, and does so more
+when moves are fast. Treat the RATE as comparable between groups only if
+their observation lags are similar.
+
+Note also that `dead_on_arrival` (peak <= 0 AND <= -20% ROI) fires far less on
+live: `DEAD_LOSS_ROI=20` is denominated in ROI, so it is -1.0% of price at 20x
+but -2.0% at 10x. Live had ZERO in this window against demo's four. Its
+absence on live is uninformative, not reassuring.
 
 ### Two claims WITHDRAWN
 

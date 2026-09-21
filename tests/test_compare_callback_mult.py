@@ -15,9 +15,10 @@ import compare_callback_mult as cc          # noqa: E402
 
 
 def _trade(mult=0.75, atr=1.0, lev=20.0, final_roi=10.0, source="atr_floor",
-           **kw):
+           peak_roi=5.0, **kw):
     t = {
         "leverage": lev, "final_roi": final_roi, "roi_at_first_sight": -1.0,
+        "peak_roi": peak_roi,
         "drift_since_sizing_pct": -0.3, "net_pnl_usdt": 5.0, "fees_usdt": 1.0,
         "exit_reason": "trail", "opened_at": 1_000_000.0, "symbol": "X/USDT:USDT",
         "entry_context": {"atr_pct": atr, "callback_pct": atr * mult,
@@ -94,6 +95,31 @@ def test_a_market_regime_difference_is_called_out(capsys, tmp_path):
     sys.argv = ["x", "--journal", str(j)]
     cc.main()
     assert "MARKET REGIME DIFFERS" in capsys.readouterr().out
+
+
+def test_never_green_is_reported_and_split_by_outcome(capsys, tmp_path):
+    """
+    On the 2026-09-21 exports never_green split winners from losers more
+    cleanly than anything else: 30% of live trades, median -0.570% of price,
+    against +0.237% for those that went green. A wider callback fills deeper
+    into the bounce, so lowering the multiplier should REDUCE this rate —
+    the sharpest prediction of the change.
+    """
+    j = tmp_path / "trades.jsonl"
+    rows = ([_trade(mult=0.75, peak_roi=5.0, final_roi=8.0) for _ in range(30)]
+            + [_trade(mult=0.75, peak_roi=-3.0, final_roi=-12.0) for _ in range(10)])
+    j.write_text("\n".join(json.dumps(r) for r in rows))
+    sys.argv = ["x", "--journal", str(j)]
+    cc.main()
+    out = capsys.readouterr().out
+    assert "NEVER_GREEN" in out
+    assert "25%" in out                      # 10 of 40
+
+
+def test_never_green_is_None_when_peak_is_missing():
+    # Absent must not be counted as "never green".
+    rows = cc.enrich([_trade(peak_roi=None)])
+    assert rows[0]["never_green"] is None
 
 
 def test_a_missing_journal_is_not_a_crash(capsys, tmp_path):

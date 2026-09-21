@@ -101,6 +101,22 @@ def enrich(rows: list) -> list:
             "drift": _f(r, "drift_since_sizing_pct"),
             "first_sight_px": None if fs is None else fs / lev,
             "final_px": None if fin is None else fin / lev,
+            # never_green: the position never traded above entry. On the
+            # 2026-09-21 exports this split winners from losers more cleanly
+            # than anything else — 30% of live trades, median -0.570% of
+            # price, against +0.237% for those that did go green.
+            #
+            # A WIDER callback fills deeper into the bounce, so the position
+            # starts further underwater and needs more recovery just to reach
+            # entry. Lowering the multiplier should REDUCE this rate; that is
+            # the sharpest prediction of the change.
+            #
+            # CAVEAT: peak_roi is SAMPLED, not tracked, and under-records by a
+            # median 9.55 ROI points on fast moves. A position that went green
+            # between polls records peak <= 0 and is counted here. This
+            # OVER-counts, and does so more when moves are fast.
+            "never_green": (None if _f(r, "peak_roi") is None
+                            else _f(r, "peak_roi") <= 0.0),
             "net": _f(r, "net_pnl_usdt"),
             "fees": _f(r, "fees_usdt"),
             "exit": r.get("exit_reason"),
@@ -139,6 +155,23 @@ def report(groups: dict) -> None:
               f"{st.median([d['drift'] for d in g if d['drift'] is not None]):>9.3f}"
               f"{(st.median(fs) if fs else float('nan')):>13.3f}"
               f"{under:>11.0%}")
+
+    print("\nNEVER_GREEN — never traded above entry. The sharpest split in the")
+    print("data, and the metric most likely to move with the multiplier.")
+    print(f"{'multiplier':<12}{'n':>5}{'never_green':>13}{'  their final':>15}"
+          f"{'  others final':>16}")
+    for k in keys:
+        g = [d for d in groups[k] if d["never_green"] is not None]
+        if not g:
+            continue
+        ng = [d for d in g if d["never_green"]]
+        ok = [d for d in g if not d["never_green"]]
+        f_ng = [d["final_px"] for d in ng if d["final_px"] is not None]
+        f_ok = [d["final_px"] for d in ok if d["final_px"] is not None]
+        print(f"{k:<12.2f}{len(g):>5}{len(ng) / len(g):>12.0%}"
+              f"{(st.median(f_ng) if f_ng else float('nan')):>+15.3f}"
+              f"{(st.median(f_ok) if f_ok else float('nan')):>+16.3f}")
+    print("  (peak_roi is sampled — this OVER-counts when moves are fast)")
 
     print("\nFINAL OUTCOME — price %, leverage divided out. The deciding number.")
     print(f"{'multiplier':<12}{'n':>5}{'median':>9}{'mean':>9}{'trimmed':>9}"
