@@ -3,8 +3,11 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+**START AT "THE OPEN PROBLEM: entry timing"** — that is the live work. The
+rest is settled, shelved, or a record of reversals.
+
 v3.75.0 RECALIBRATES the outcome horizons to actual hold time — every earlier
-trigger conclusion was scored at the wrong timescale (below).
+trigger conclusion was scored at the wrong timescale.
 v3.74.0 adds PATH capture (adverse/favourable excursion) to the outcome
 resolver — endpoints alone cannot express the entry-timing goal.
 v3.73.6 documents peak_roi being UNRELIABLE (below) — read it before using
@@ -77,6 +80,86 @@ failed identically and logged its own warning — one failure looking like
 Region and connectivity problems are fatal for the pass, not per-row.
 
 `resolve()` is idempotent, so an aborted run loses nothing — re-run it.
+
+---
+
+## THE OPEN PROBLEM: entry timing — read this first
+
+Everything else in this document is settled or shelved. This is the live
+question, and it is the operator's stated focus.
+
+### The goal, in his words
+
+Enter where there is **high confidence the direction is in his favour, with a
+small adverse excursion** — ideally the coin consolidating before the
+breakout rather than already extended. Direction first; magnitude is the
+trail's job.
+
+### Why it is THE problem
+
+    79.1% of entries are ALREADY LOSING the first time the guardian sees them
+    entered green -> n=9,  mean net ROI +3.60, win 55.6%
+    entered red   -> n=34, mean net ROI -3.37, win 26.5%
+
+and NOTHING in ~40 entry-context fields separates the two (bot/crt.py). The
+screening, candidate selection and sizing are fine and the operator is
+content with them. Risk sizing is verifiably excellent ($25.44 median risk on
+demo, $0.45 on live, both 0.5% of equity, flat across ATR and concurrency).
+The exit side has been reviewed exhaustively. **The trigger is what is left.**
+
+### The constraint that governs everything here
+
+**Median hold is 1.3 minutes. 80% of trades close within 3.** Any signal must
+resolve inside that window to be actionable. This kills or reshapes several
+otherwise reasonable ideas:
+
+- A trigger keyed on 3m CANDLE CLOSES (CRT) works on a timescale ~2x the
+  entire life of the position. Structural mismatch, not tuning.
+- Forward-return scoring beyond ~5 minutes measures something the position is
+  never exposed to (this invalidated the first trigger results — see below).
+- "Wait one candle" is not a usable delay: the trade is usually already shut.
+
+### What is measurable RIGHT NOW
+
+`bot/shadow_outcomes.py` labels every REFUSED candidate — the 99% the bot
+declines, which is where the sample lives — with:
+
+    favoured_side_pct   endpoint, signed so + means the direction was right
+    adverse_pct         worst move AGAINST the side (candle highs/lows)
+    favourable_pct      best move in favour
+    edge_ratio          favourable / adverse
+    adverse_under_0.5pct   share whose adverse excursion stayed small
+
+at 1, 2, 3, 5, 10 and 30 minutes, split by CRT and by jev verdict. The
+adverse/edge columns are the direct expression of "confidence in direction
+with small adverse excursion" — they did not exist until v3.74.0, and closes
+alone cannot express the goal.
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+        python tools/resolve_shadow_outcomes.py
+
+### Status of the candidate triggers
+
+- **CRT** — implemented, recorded, NEVER gating. Live: crt_agrees was False 6
+  times and None once across 7 entries, never True. First scoring showed it
+  mildly anti-predictive, but that was at 30 minutes — UNSCORED, not
+  disproven. Timescale mismatch above is the bigger concern.
+- **jev `looks_exhausted`** — a raw component on every shadow row, asks the
+  same question from indicator state. Same unscored status.
+- **A plain 1-2 minute delay** — the baseline both must beat. `wait_baseline`
+  in the summary.
+
+### Do not repeat these
+
+- Do NOT cite "the better price arrives one candle later 81% of the time
+  (median +0.26%)". It is computed on ENTERED trades, so it is conditioned on
+  the very trigger it would be used to justify. On refused candidates the same
+  statistic was a coin flip (49.5%).
+- Do NOT gate on any trigger before it beats the delay baseline at a 1-3
+  minute horizon on a sample well past the current 218 observations.
+- Do NOT use `peak_roi` or `capture` in any of this analysis — peak is
+  sampled, not tracked, and under-records by a median 9.55 ROI points on the
+  moves that matter.
 
 ---
 
