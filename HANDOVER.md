@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.78.2 documents the DEMO-vs-LIVE STRUCTURAL FACTOR — read it before
+porting any ATR-derived setting between instances.
 v3.78.1 WITHDRAWS the v3.78.0 diagnosis — REJECTED meant "invalidated at
 close", not "refused at placement". The verification code stays as a safety
 net. See the correction in that section.
@@ -903,6 +905,97 @@ flat tax on precisely those winners.
 - Shadow rows were not independent (v3.71).
 - Arm-at-entry was broken by v3.72.0 and fixed in v3.73.1.
 - The supersede sweep had never protected `native_trail_id` — see below.
+
+---
+
+## DEMO IS LIVE DATA WITH A ~0.75 FACTOR ON ATR — read before porting anything
+
+**Demo and live are SIMILAR, not EQUIVALENT.** The price path matches; the
+amplitude does not.
+
+### The measurement
+
+Same symbol, paired within 30 minutes, 13 pairs from the 2026-09-21 exports:
+
+    ATR       demo/live   median 0.751   mean 0.769   sd 0.137  (range 0.66-1.21)
+    advance   demo/live   median 0.937
+    RSI, 24h change                      agree to ~1 point
+
+USELESS, 21 seconds apart, is the cleanest single pair:
+
+                sized      ATR%   recentTR    RSI   body%  lowerwick
+    demo 20x   0.2788     0.740      0.690   85.8    46.1       34.7
+    live 10x   0.27878    1.257      1.024   82.4    24.9       51.4
+
+**Candidate selection agrees, chart lines are similar, RSI and 24h change
+match — only intra-candle RANGE is compressed.** Demo has the same trend with
+~25% less noise (advance 0.937 / ATR 0.751 = 1.25x better trend-per-noise).
+
+Supporting: the same scan pass yields 21 of 40 movers on demo vs 10 of 40 on
+live. ATR is NOT the scan gate (min_atr is an auto-trade refusal, applied
+later), so that gap comes from cleaner RSI/EMA states — consistent with less
+noise.
+
+### EVERY ATR-derived setting means something different on each instance
+
+    AUTO_CALLBACK_ATR_MULT       known, deliberately different
+    ATR_STOP_MULT=1.5            demo stops ~0.75x as wide in real terms
+    AUTO_MIN_ATR_PCT=0.5         demo needs ~0.67% live-equivalent to pass
+    GUARD_TRAIL_CALLBACK_ATR_MULT  same (currently 0)
+
+**Conversion: a demo mult of M is equivalent to a live mult of 0.751 x M.**
+So demo 0.75 == live 0.563, NOT live 1.25.
+
+### The performance gap, and why LEVERAGE EXPLAINS NONE OF IT
+
+2026-09-21, 43 demo trades vs 37 live:
+
+                          demo      live
+    win rate              58%       59%      <- essentially identical
+    gross P&L/trade      0.128%    0.037%    of wallet
+    fees/trade           0.040%    0.036%    of wallet — proportionally EQUAL
+    fees as % of gross    31.5%     98.4%
+
+**Fees scale with notional, and notional scales with leverage, so leverage
+multiplies gross AND fees equally.** The leverage-free measure is how many
+times its own fee a trade captures:
+
+    demo 3.18x     live 1.02x     ratio 3.13x
+
+Two measured effects roughly account for it:
+
+    trend/noise advantage on demo                         1.25x
+    live waits a 2.22x DEEPER retracement before filling
+      (live 1.25 x ATR_live = 1.250 vs demo 0.75 x ATR_demo = 0.563)
+                                                 1.25 x 2.22 = 2.78x vs 3.13x
+
+The second is the actionable half and it is uncomfortable:
+`AUTO_CALLBACK_ATR_MULT=1.25` was set to fix entry RATE, and in real price
+terms it makes live wait for a retracement more than twice as deep as demo's.
+A deeper retracement is a better price, but it is also a move that has already
+given a lot back — consistent with live's worse `roi_at_first_sight`.
+
+**Do NOT try to close the gap with leverage.** It cancels.
+
+### How to work with this
+
+Demo REMAINS the test case — it has far more data, and the operator's
+decision. The requirement is that the 0.751 factor is applied when a
+parameter is ported:
+
+    live_equivalent_mult = 0.751 x demo_mult
+
+**Most development to date was optimised ON DEMO**, which has 1.25x better
+trend-per-noise. Every parameter tuned there is tuned for an easier market,
+and the bias is SYSTEMATIC, not random. That is the single most important
+consequence of this section.
+
+### Caveats
+
+43 and 37 trades, one day. The 0.751 ATR factor is solid (n=13, tight spread).
+The edge decomposition is a HYPOTHESIS — 2.78 vs 3.13 is close enough to be
+coincidence, and correlation is not causation. Re-measure before treating the
+callback-depth effect as established.
 
 ---
 
