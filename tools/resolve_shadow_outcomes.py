@@ -26,10 +26,13 @@ across 24 symbols — a row count would have overstated it by ~40x.
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+log = logging.getLogger(__name__)
 
 from bot.shadow_outcomes import (  # noqa: E402
     DEFAULT_IN, DEFAULT_OUT, HORIZONS_MIN, resolve, summarize,
@@ -42,11 +45,36 @@ def _exchange(demo: bool):
     this can never share state with the trading path. No API keys: public
     OHLCV needs none, and not holding them means this cannot place an order
     even by accident.
+
+    ROUTED THROUGH SOCKS_PROXY, exactly as bot/engine.py does. Without it
+    Binance answers 451 "restricted location" from the VPS's region — and it
+    does so on exchangeInfo during market loading, BEFORE any candle fetch, so
+    every row failed identically and logged one warning each.
     """
     import ccxt
-    ex = ccxt.binanceusdm({"enableRateLimit": True})
+    params = {"enableRateLimit": True, "options": {"defaultType": "future"}}
+    proxy = (os.environ.get("SOCKS_PROXY") or "").strip()
+    if proxy:
+        params["proxies"] = {"http": proxy, "https": proxy}
+        log.info(f"proxy active: {proxy}")
+    else:
+        log.warning("SOCKS_PROXY is not set — if this box is in a restricted "
+                    "region Binance will answer 451 on the first request.")
+    ex = ccxt.binanceusdm(params)
     if demo:
-        ex.set_sandbox_mode(True)
+        ex.enable_demo_trading(True)
+    # FAIL LOUDLY AND ONCE. Region and connectivity problems are fatal for the
+    # whole pass, not per-row: without this each of ~2000 rows logs its own
+    # warning and the run looks like 2000 unrelated failures.
+    try:
+        ex.load_markets()
+    except Exception as e:
+        raise SystemExit(
+            f"cannot reach the exchange ({type(e).__name__}: {e})\n"
+            f"proxy={proxy or '(unset)'} demo={demo}\n"
+            f"Nothing was written. Set SOCKS_PROXY (the bot uses "
+            f"http://gluetun:8888 in production) and re-run — resolve() is "
+            f"idempotent, so nothing is lost.")
     return ex
 
 
