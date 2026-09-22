@@ -1563,6 +1563,34 @@ class AutoTrader:
                             row.get("pct_above_24h_low") if side == "long"
                             else row.get("pct_below_24h_high")),
                         "range_pos_24h": row.get("range_pos_24h"),
+                        # ROOM AHEAD — distance to the 24h extreme the trade
+                        # is heading TOWARD. Note this is the OPPOSITE field
+                        # from dist_to_extreme_pct, which measures the extreme
+                        # the setup came FROM.
+                        #
+                        # Recorded to test one claim: "compare the room to the
+                        # next level against the distance to invalidation, and
+                        # skip when the obstacle is closer than the stop."
+                        # NOTHING GATES ON THIS. A proxy test on range_pos_24h
+                        # pointed the OPPOSITE way (most room below did worst
+                        # for shorts), so the claim is unverified for this
+                        # timeframe and may not survive a 1.96-minute hold.
+                        #
+                        # The 24h extreme is a crude stand-in for "next level".
+                        # A volume profile would be better and is not
+                        # available: it needs volume-at-price, and the scanner
+                        # has OHLCV only. Do not let the field name imply more
+                        # than a 24h high/low.
+                        "room_ahead_pct": abs(
+                            row.get("pct_below_24h_high") if side == "long"
+                            else row.get("pct_above_24h_low")),
+                        # Room in units of the coin's own noise. Config- and
+                        # leverage-free, so it stays comparable across every
+                        # setting change in this investigation.
+                        "room_ahead_atr": (
+                            abs(row.get("pct_below_24h_high") if side == "long"
+                                else row.get("pct_above_24h_low")) / row["atr_pct"]
+                            if row.get("atr_pct") else None),
                         "ema_gap_pct": row.get("ema_gap_pct"),
                         # Regime context at entry. Recorded ONLY — nothing
                         # gates on these yet. The point is to find out whether

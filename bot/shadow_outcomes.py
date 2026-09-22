@@ -383,6 +383,35 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
     out["path_by_verdict"] = {k: p_ for k, v in sorted(seen_v.items())
                               if (p_ := path(v))}
 
+    # ROOM AHEAD. The claim under test: "skip when the obstacle is closer than
+    # the stop." Banded in ATR units so it stays comparable across leverage
+    # and config changes.
+    #
+    # PREDICTION, stated in advance so it is falsifiable: if the claim holds
+    # for this timeframe, the LOW-room band should show a worse median and
+    # more never_green. If instead momentum position is what matters, these
+    # bands will be flat — a level 2% away is not an obstacle to a trade with
+    # a 1.96-minute median hold.
+    def room_band(v):
+        if v is None:
+            return None
+        for lo, hi, lbl in ((0, 1, "<1 ATR"), (1, 2, "1-2"), (2, 4, "2-4"),
+                            (4, 1e9, ">4")):
+            if lo <= v < hi:
+                return lbl
+        return None
+
+    seen_r = {}
+    for r, v in vals:
+        b = room_band((r.get("triggers") or {}).get("room_ahead_atr"))
+        if b:
+            seen_r.setdefault(b, []).append(v)
+    if seen_r:
+        order = {"<1 ATR": 0, "1-2": 1, "2-4": 2, ">4": 3}
+        out["by_room_ahead_atr"] = {
+            k: {"n": len(v), "median_favoured_pct": med(v)}
+            for k, v in sorted(seen_r.items(), key=lambda kv: order[kv[0]])}
+
     # By TRIGGER. None ("no opinion") is kept distinct from False — collapsing
     # them would score a trigger that abstained as one that disagreed.
     seen = {}

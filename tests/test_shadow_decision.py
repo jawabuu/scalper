@@ -17,7 +17,7 @@ import pytest
 from bot.shadow_decision import (
     ShadowDecisionLogger, ShadowDecision, read_decisions, summarize,
     FINGERPRINT, _QUESTION_SPECS, _candidate_state, _reasons,
-    VALID_VERDICTS, _noul_confidence, _component_confidence,
+    VALID_VERDICTS, _noul_confidence, _component_confidence, _triggers,
     BACKOFF_AFTER, BACKOFF_START_S, BACKOFF_MAX_S,
     _state_signature, _materially_changed,
 )
@@ -478,6 +478,44 @@ def test_regime_is_compared_too_not_just_the_candidate():
     a = _candidate_state("X/USDT:USDT", "short", _row(), {"breadth_pct": 10})
     b = _candidate_state("X/USDT:USDT", "short", _row(), {"breadth_pct": 90})
     assert _materially_changed(_state_signature(a), _state_signature(b))
+
+
+def test_room_ahead_is_the_OPPOSITE_field_from_dist_to_extreme():
+    """
+    dist_to_extreme_pct measures the extreme the setup came FROM. Room ahead
+    measures the one it is heading TOWARD. Confusing them would invert the
+    whole test.
+    """
+    row = {"pct_above_24h_low": 4.0, "pct_below_24h_high": 0.5, "atr_pct": 1.0}
+    short = _triggers(row, "short")
+    long_ = _triggers(row, "long")
+    assert short["room_ahead_pct"] == 4.0, "a short falls toward the 24h LOW"
+    assert long_["room_ahead_pct"] == 0.5, "a long rises toward the 24h HIGH"
+
+
+def test_room_is_also_expressed_in_ATR_units():
+    # Config- and leverage-free, so it stays comparable across every setting
+    # change in this investigation.
+    t = _triggers({"pct_above_24h_low": 3.0, "atr_pct": 1.5}, "short")
+    assert t["room_ahead_atr"] == 2.0
+
+
+def test_room_is_None_rather_than_guessed_when_the_extreme_is_missing():
+    t = _triggers({"atr_pct": 1.0}, "short")
+    assert t["room_ahead_pct"] is None and t["room_ahead_atr"] is None
+
+
+def test_recording_room_does_NOT_change_what_jev_is_shown():
+    """
+    It goes in TRIGGERS, not in the state. Adding it to the state would change
+    the questions' inputs and the FINGERPRINT, invalidating every shadow row
+    written so far.
+    """
+    from bot.shadow_decision import _candidate_state
+    st = _candidate_state("X/USDT:USDT", "short",
+                          _row(pct_above_24h_low=3.0), {})
+    flat = json.dumps(st)
+    assert "room_ahead" not in flat
 
 
 def test_a_signature_survives_missing_fields():

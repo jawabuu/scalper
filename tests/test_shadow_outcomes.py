@@ -259,6 +259,39 @@ def test_crt_no_opinion_is_scored_apart_from_crt_disagreeing(tmp_path):
     assert all(v["n"] == 1 for v in s["by_crt_agrees"].values())
 
 
+def test_room_ahead_is_banded_in_ATR_units(tmp_path):
+    """
+    The claim: "skip when the obstacle is closer than the stop." Banded in ATR
+    units so it survives every leverage and config change in this
+    investigation.
+
+    Stated prediction: if the claim holds here, <1 ATR should be worse. If
+    momentum position is what matters instead, the bands will be flat — a
+    level 2% away is no obstacle to a 1.96-minute trade.
+    """
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [
+        _row(symbol="A/USDT:USDT", ts=now - 7200, triggers={"room_ahead_atr": 0.4}),
+        _row(symbol="B/USDT:USDT", ts=now - 7200, triggers={"room_ahead_atr": 1.5}),
+        _row(symbol="C/USDT:USDT", ts=now - 7200, triggers={"room_ahead_atr": 6.0}),
+    ])
+    resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=30)
+    assert list(s["by_room_ahead_atr"]) == ["<1 ATR", "1-2", ">4"], \
+        "bands must stay in ascending order, not dict insertion order"
+
+
+def test_a_missing_room_value_is_omitted_not_bucketed(tmp_path):
+    # Absent must not silently land in the lowest band.
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(ts=now - 7200, triggers={"crt_agrees": True})])
+    resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=30)
+    assert not s.get("by_room_ahead_atr")
+
+
 def test_a_row_with_no_triggers_still_resolves(tmp_path):
     # Rows written before this existed carry none, and must not be dropped.
     src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"

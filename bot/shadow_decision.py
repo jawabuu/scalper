@@ -454,10 +454,34 @@ def _triggers(row: dict, side: str) -> dict:
     disagreement. None means "no opinion", which must stay distinguishable
     from False when these are scored.
     """
+    # ROOM AHEAD — distance to the 24h extreme the trade heads TOWARD, and
+    # the same in units of the coin's own noise. The OPPOSITE field from
+    # dist_to_extreme_pct, which measures the extreme the setup came from.
+    #
+    # Tests one claim: "compare the room to the next level against the
+    # distance to invalidation, and skip when the obstacle is closer than the
+    # stop." Recorded in TRIGGERS, not in the state jev sees, so the shadow
+    # questions and their FINGERPRINT are unchanged.
+    #
+    # The 24h extreme is a crude stand-in for "next level" — a volume profile
+    # needs volume-at-price and the scanner has OHLCV only. And a proxy test
+    # on range_pos_24h pointed the OPPOSITE way, so this may not hold at a
+    # 1.96-minute median hold: a level 2% away is not an obstacle to a trade
+    # that lives two minutes.
+    _raw = (row.get("pct_below_24h_high") if str(side).lower().startswith("long")
+            else row.get("pct_above_24h_low"))
+    try:
+        _room = abs(float(_raw)) if _raw is not None else None
+    except (TypeError, ValueError):
+        _room = None
+    _atr = row.get("atr_pct")
     out = {"crt_agrees": None, "crt_swept": row.get("crt_swept"),
            "crt_side": row.get("crt_side"),
            "crt_penetration_pct": row.get("crt_penetration_pct"),
-           "crt_close_pos": row.get("crt_close_pos")}
+           "crt_close_pos": row.get("crt_close_pos"),
+           "room_ahead_pct": _room,
+           "room_ahead_atr": (round(_room / _atr, 3)
+                              if _room is not None and _atr else None)}
     try:
         from bot.crt import agrees
         out["crt_agrees"] = agrees(row, side)

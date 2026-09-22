@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.80.0 RECORDS room-ahead (never gates on it) to test one external claim.
 v3.79.3 fixes a regime guard that switched itself off once a third cohort
 appeared — exactly when it was needed.
 v3.79.2 shows non-floor cohorts and warns when one is ATR-SELECTED.
@@ -99,6 +100,65 @@ failed identically and logged its own warning — one failure looking like
 Region and connectivity problems are fatal for the pass, not per-row.
 
 `resolve()` is idempotent, so an aborted run loses nothing — re-run it.
+
+---
+
+## Room ahead — recorded, NOT gating (v3.80.0)
+
+From an external article (casper_smc, "How to Scalp Like the Top 1% of
+Traders", 2026-09-22). Volume-profile / auction-market reasoning, one
+testable claim:
+
+> Before entering, compare the room to the next level against the distance to
+> invalidation, and skip the trade when the obstacle is closer than the stop.
+
+The bot has no equivalent. `AUTO_MAX_DIST_PCT=3.0` requires being WITHIN 3%
+of the extreme — a proximity filter, the opposite of a room check.
+
+### What is recorded
+
+    room_ahead_pct   distance to the 24h extreme the trade heads TOWARD
+    room_ahead_atr   the same in units of the coin's own noise
+
+In `entry_context` (auto_trader) and in shadow `triggers`. **Deliberately in
+TRIGGERS, not in the state jev sees** — putting it in the state would change
+the questions' inputs and the FINGERPRINT, invalidating every shadow row
+written so far.
+
+**Note it is the OPPOSITE field from `dist_to_extreme_pct`**, which measures
+the extreme the setup came FROM. A short falls toward the 24h LOW
+(`pct_above_24h_low`); a long rises toward the HIGH. Confusing them inverts
+the whole test, so there is a test pinning it.
+
+`summarize()` bands it as `<1 ATR / 1-2 / 2-4 / >4` — ATR units, so it stays
+comparable across every leverage and config change in this investigation.
+
+### PREDICTION, stated in advance
+
+If the claim holds at this timeframe, the `<1 ATR` band should show a worse
+median and more never_green. **I expect it will NOT**, for two reasons:
+
+1. A proxy test on `range_pos_24h` pointed the OPPOSITE way. Shorts with the
+   MOST room below did WORST (range_pos 0.99-1.01: +0.121, 54% win) and those
+   with least did best (0.90-0.96: +0.264, 68% win). That reads as momentum,
+   not room — at 0.99 the move is still extending.
+2. Median hold is 1.96 minutes. A level 2% away is not an obstacle to a trade
+   that lives two minutes.
+
+Writing the prediction down first is the point. If `<1 ATR` is worse, the
+claim survives a fair test; if flat, it is answered and closed.
+
+### Limits of the proxy
+
+The 24h extreme is a CRUDE stand-in for "next level". A volume profile would
+be better and is unavailable: POC, value area and low-volume nodes need
+volume-at-price, and the scanner has OHLCV only. Do not let the field name
+imply more than a 24h high/low.
+
+The rest of the article does not transfer. Its author targets one to three
+trades finishing within the hour and argues explicitly AGAINST taking dozens
+of small trades — the opposite of this bot's design, not a refinement of it.
+It is also one session with no sample, the same limitation as CRT.
 
 ---
 
