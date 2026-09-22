@@ -28,15 +28,19 @@ def _trade(mult=0.75, atr=1.0, lev=20.0, final_roi=10.0, source="atr_floor",
     return t
 
 
-def test_only_atr_floor_trades_are_grouped():
+def test_non_floor_trades_are_KEPT_but_not_given_a_multiplier():
     """
-    The first run invented cohorts at 0.70, 0.90 and 1.00 that were nothing but
-    AUTO_CALLBACK_RATIO-sourced trades whose callback/atr happened to land
-    there. Only atr_floor trades are governed by the multiplier.
+    The first run invented cohorts at 0.70/0.90/1.00 that were nothing but
+    ratio-sourced trades whose callback/atr happened to land there — so they
+    must not be grouped BY multiplier. But dropping them hid the change's
+    second effect (live 09-21: floor-binding fell 97% -> 52%), so they are
+    kept as their own labelled cohort instead.
     """
     rows = cc.enrich([_trade(source="atr_floor"), _trade(source="ratio"),
                       _trade(source="")])
-    assert len(rows) == 1
+    assert len(rows) == 3
+    assert [r["mult"] is None for r in rows] == [False, True, True]
+    assert {r["src"] for r in rows} == {"atr_floor", "ratio", "unknown"}
 
 
 def test_everything_is_in_PRICE_percent_not_ROI():
@@ -120,6 +124,50 @@ def test_never_green_is_None_when_peak_is_missing():
     # Absent must not be counted as "never green".
     rows = cc.enrich([_trade(peak_roi=None)])
     assert rows[0]["never_green"] is None
+
+
+def test_ratio_sourced_trades_are_their_OWN_cohort_not_dropped(capsys, tmp_path):
+    """
+    The callback is max(ratio-derived, ATR floor). Lowering the floor from
+    1.25 to 0.563 on live took floor-binding from 97% to 52% — eleven trades
+    vanished from the comparison, and a result read as "0.563 vs 1.25" would
+    partly have been "ratio-source vs floor-source".
+    """
+    j = tmp_path / "trades.jsonl"
+    rows = ([_trade(mult=0.56) for _ in range(12)]
+            + [_trade(mult=1.25) for _ in range(35)]
+            + [_trade(source="ratio") for _ in range(11)])
+    j.write_text("\n".join(json.dumps(r) for r in rows))
+    sys.argv = ["x", "--journal", str(j)]
+    cc.main()
+    out = capsys.readouterr().out
+    assert "source 'ratio': 11 trades" in out
+    assert "ratio" in out.split("FINAL OUTCOME")[1]
+
+
+def test_a_non_floor_cohort_never_gets_a_numeric_multiplier():
+    # A number there would be read as a setting when it is an accident.
+    rows = cc.enrich([_trade(source="ratio", mult=0.9)])
+    assert rows[0]["mult"] is None and rows[0]["src"] == "ratio"
+
+
+def test_an_ATR_SELECTED_cohort_is_called_out(capsys, tmp_path):
+    """
+    The floor/ratio split is endogenous: the floor binds when ATR is high, so
+    'ratio' is largely a label for calm coins. Live 2026-09-22 showed ratio at
+    median ATR 0.556% vs ~0.95% for the floor groups, and it looked best on
+    every outcome.
+    """
+    j = tmp_path / "trades.jsonl"
+    rows = ([_trade(mult=0.56, atr=1.0) for _ in range(12)]
+            + [_trade(mult=1.25, atr=1.0) for _ in range(35)]
+            + [_trade(source="ratio", atr=0.5) for _ in range(11)])
+    j.write_text("\n".join(json.dumps(r) for r in rows))
+    sys.argv = ["x", "--journal", str(j)]
+    cc.main()
+    out = capsys.readouterr().out
+    assert "ATR-SELECTED" in out
+    assert "fair comparison" in out
 
 
 def test_a_missing_journal_is_not_a_crash(capsys, tmp_path):

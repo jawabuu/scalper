@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.79.2 shows non-floor cohorts and warns when one is ATR-SELECTED.
 v3.79.1 adds never_green to that tool.
 v3.79.0 adds tools/compare_callback_mult.py — the WITHIN-INSTANCE before/after
 for a multiplier change. Run it BEFORE deploying to capture the baseline.
@@ -1024,6 +1025,47 @@ running, so it continues briefly.
 **On OUTCOME they are tied.** Live has the better median and win rate, demo
 the better mean, and trimming one outlier from each tail flips the mean. At
 n=37/36 that is a coin toss.
+
+### The multiplier change had a SECOND effect nobody asked for
+
+The callback is `max(ratio-derived, ATR floor)`. Lowering the floor does not
+just narrow the callback — it hands trades to `AUTO_CALLBACK_RATIO` instead.
+Live, around the 2026-09-21 12:34 UTC change:
+
+    BEFORE (1.25)   n=38    atr_floor 97%
+    AFTER  (0.563)  n=23    atr_floor 52%   ratio 48%
+
+Eleven trades left the experiment entirely, because the tool grouped only
+`atr_floor` rows. The comparison showed n=12 while live had taken 23. A result
+read as "0.563 vs 1.25" would partly have been "ratio-source vs floor-source",
+and the ratio callbacks are narrower again (0.420% vs 0.510% median).
+
+`compare_callback_mult.py` now shows every non-floor source as its OWN
+cohort, labelled by source name, never merged and never given a numeric
+multiplier.
+
+### That cohort is ATR-SELECTED — do not read it as a result
+
+    cohort    n   ATR med   final median   win   x its fee   never_green
+    0.60     12    0.900      +0.176       67%    -0.10x         8%
+    1.20     37    1.012      +0.157       59%    +1.32x        30%
+    ratio    11    0.556      +0.243       82%    +2.29x         0%
+
+The ratio cohort looks best on every measure. **It is also trading coins with
+roughly half the ATR**, and that is not a coincidence: the floor binds when
+ATR is HIGH relative to the distance, so "ratio" is largely a label for CALM
+COINS. Membership depends on ATR and ATR predicts outcome — the split is
+ENDOGENOUS.
+
+The tool now prints `!! COHORT 'x' IS ATR-SELECTED` when a non-floor cohort's
+median ATR is more than 25% away from the floor groups'.
+
+**Practical consequence for the experiment**: at 0.563 the floor governs only
+about half of live's trades, so the comparison accumulates at half the rate
+and the two halves are not exchangeable. Either accept the slower read, raise
+the floor to ~0.8-0.9 so it binds again (abandoning the demo-parity value),
+or lower `AUTO_CALLBACK_RATIO` so the floor keeps winning (which changes a
+second variable).
 
 ### never_green is the sharpest split in the data
 

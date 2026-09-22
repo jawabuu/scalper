@@ -83,17 +83,28 @@ def enrich(rows: list) -> list:
         lev = _f(r, "leverage")
         if not (atr and cb and lev):
             continue
-        # ONLY atr_floor trades are governed by the multiplier. When the
-        # callback came from AUTO_CALLBACK_RATIO instead, callback/atr is
-        # incidental and grouping on it invents phantom cohorts — the first
-        # run produced groups at 0.70, 0.90 and 1.00 that were nothing but
-        # ratio-sourced trades with coincidental ATRs.
-        if (ctx.get("callback_source") or "") != "atr_floor":
-            continue
+        # The callback is max(ratio-derived, ATR floor). atr_floor trades are
+        # the ones the MULTIPLIER governs; ratio trades are not, and grouping
+        # them by callback/atr invents phantom cohorts (the first version
+        # produced groups at 0.70/0.90/1.00 that were nothing but ratio
+        # trades with coincidental ATRs).
+        #
+        # But DROPPING them hides the change's second effect. Live 09-21:
+        # at 1.25 the floor bound on 97% of trades; at 0.563 it bound on 52%
+        # and AUTO_CALLBACK_RATIO took the rest. Eleven trades vanished from
+        # the comparison, and a result read as "0.563 vs 1.25" would partly
+        # be "ratio-source vs floor-source".
+        #
+        # So they are kept as their OWN cohort, labelled, never merged.
+        src = (ctx.get("callback_source") or "").strip() or "unknown"
         fin = _f(r, "final_roi")
         fs = _f(r, "roi_at_first_sight")
         out.append({
-            "mult": round(cb / atr, 2),
+            "src": src,
+            # None for anything the multiplier does not govern: a number here
+            # would be read as a setting when it is an accident of the data.
+            "mult": round(cb / atr, 2) if src == "atr_floor" else None,
+            "cb": cb,
             "lev": lev,
             "atr": atr,
             "symbol": r.get("symbol"),
@@ -141,15 +152,19 @@ def _stats(vals):
     }
 
 
+def _lbl(k):
+    return f"{k:.2f}" if isinstance(k, float) else str(k)
+
+
 def report(groups: dict) -> None:
-    keys = sorted(groups)
+    keys = sorted(groups, key=lambda k: (isinstance(k, str), k))
     print(f"{'multiplier':<12}{'n':>5}{'ATR med':>10}{'lev':>6}"
           f"{'drift':>9}{'first_sight':>13}{'underwater':>12}")
     for k in keys:
         g = groups[k]
         fs = [d["first_sight_px"] for d in g if d["first_sight_px"] is not None]
         under = (sum(1 for v in fs if v < 0) / len(fs)) if fs else float("nan")
-        print(f"{k:<12.2f}{len(g):>5}"
+        print(f"{_lbl(k):<12}{len(g):>5}"
               f"{st.median([d['atr'] for d in g]):>10.3f}"
               f"{st.median([d['lev'] for d in g]):>6.0f}"
               f"{st.median([d['drift'] for d in g if d['drift'] is not None]):>9.3f}"
@@ -168,7 +183,7 @@ def report(groups: dict) -> None:
         ok = [d for d in g if not d["never_green"]]
         f_ng = [d["final_px"] for d in ng if d["final_px"] is not None]
         f_ok = [d["final_px"] for d in ok if d["final_px"] is not None]
-        print(f"{k:<12.2f}{len(g):>5}{len(ng) / len(g):>12.0%}"
+        print(f"{_lbl(k):<12}{len(g):>5}{len(ng) / len(g):>12.0%}"
               f"{(st.median(f_ng) if f_ng else float('nan')):>+15.3f}"
               f"{(st.median(f_ok) if f_ok else float('nan')):>+16.3f}")
     print("  (peak_roi is sampled — this OVER-counts when moves are fast)")
@@ -180,7 +195,7 @@ def report(groups: dict) -> None:
         s = _stats([d["final_px"] for d in groups[k]])
         if not s:
             continue
-        print(f"{k:<12.2f}{s['n']:>5}{s['median']:>+9.3f}{s['mean']:>+9.3f}"
+        print(f"{_lbl(k):<12}{s['n']:>5}{s['median']:>+9.3f}{s['mean']:>+9.3f}"
               f"{s['trimmed_mean']:>+9.3f}{s['p10']:>+9.3f}{s['p90']:>+9.3f}"
               f"{s['win']:>7.0%}")
 
@@ -190,21 +205,21 @@ def report(groups: dict) -> None:
         fees = sum(d["fees"] for d in g if d["fees"] is not None)
         net = sum(d["net"] for d in g if d["net"] is not None)
         if fees:
-            print(f"  {k:.2f}: gross {net + fees:+.2f}  fees {fees:.2f}  "
+            print(f"  {_lbl(k)}: gross {net + fees:+.2f}  fees {fees:.2f}  "
                   f"-> {(net + fees) / fees:.2f}x   net {net:+.2f} USDT")
 
     print("\nEXITS")
     for k in keys:
-        print(f"  {k:.2f}: {dict(Counter(d['exit'] for d in groups[k]))}")
+        print(f"  {_lbl(k)}: {dict(Counter(d['exit'] for d in groups[k]))}")
 
 
 def warn(groups: dict) -> None:
-    keys = sorted(groups)
+    keys = sorted(groups, key=lambda k: (isinstance(k, str), k))
     print()
     small = [k for k in keys if len(groups[k]) < MIN_N]
     if small:
         print(f"!! GROUPS UNDER {MIN_N} TRADES: "
-              f"{', '.join(f'{k:.2f} (n={len(groups[k])})' for k in small)}")
+              f"{', '.join(f'{_lbl(k)} (n={len(groups[k])})' for k in small)}")
         print("   Differences are not interpretable yet. At ~40 trades/day this")
         print("   needs roughly a week per group. Do not act on this output.")
 
@@ -215,6 +230,25 @@ def warn(groups: dict) -> None:
         print("   but not the sizing and fee differences that come with it.")
 
     atrs = {k: st.median([d["atr"] for d in groups[k]]) for k in keys}
+
+    # The floor/ratio split is ENDOGENOUS. The floor binds when ATR is high
+    # relative to the distance and the ratio wins when ATR is low, so "ratio"
+    # is largely a label for CALM COINS. Live 2026-09-22: ratio cohort median
+    # ATR 0.556% against 0.900 and 1.012 for the floor groups, and it looked
+    # much the best on every outcome. That may be the market, not the rule.
+    non_floor = [k for k in keys if isinstance(k, str)]
+    floor = [k for k in keys if isinstance(k, float)]
+    if non_floor and floor:
+        fa = st.median([atrs[k] for k in floor])
+        for k in non_floor:
+            if fa and not (0.8 <= atrs[k] / fa <= 1.25):
+                print(f"!! COHORT '{k}' IS ATR-SELECTED: median ATR "
+                      f"{atrs[k]:.3f}% vs {fa:.3f}% for the floor groups "
+                      f"({atrs[k] / fa:.2f}x).")
+                print("   Membership DEPENDS on ATR and ATR predicts outcome, so")
+                print("   this cohort's numbers are a volatility regime as much as")
+                print("   a sizing rule. Do not read it as a fair comparison.")
+
     if len(keys) == 2:
         a, b = (atrs[k] for k in keys)
         if a and b and not (0.8 <= a / b <= 1.25):
@@ -248,18 +282,33 @@ def main() -> int:
         print("no atr_floor trades with both callback_pct and atr_pct recorded")
         return 0
 
-    groups = {}
-    for r in rows:
-        groups.setdefault(r["mult"], []).append(r)
-
-    # Multipliers cluster (0.74/0.75/0.76 are one setting); merge to 1 decimal.
+    # Multipliers cluster (0.74/0.75/0.76 are one setting); merge to 1
+    # decimal. Non-floor sources keep their source name as the label so they
+    # can never be mistaken for a multiplier setting.
     merged = {}
-    for k, v in groups.items():
-        merged.setdefault(round(k, 1), []).extend(v)
+    for r in rows:
+        key = round(r["mult"], 1) if r["mult"] is not None else r["src"]
+        merged.setdefault(key, []).append(r)
 
-    if len(merged) < 2:
-        only = next(iter(merged))
-        print(f"only ONE multiplier in this journal: {only:.2f} (n={len(rows)}).")
+    floor_keys = [k for k in merged if isinstance(k, float)]
+    other = {k: v for k, v in merged.items() if not isinstance(k, float)}
+    if other:
+        print("NOTE: not every trade is governed by the multiplier. The callback")
+        print("is max(ratio-derived, ATR floor), so lowering the floor hands")
+        print("trades to AUTO_CALLBACK_RATIO instead. Those are shown as their")
+        print("own cohort — a difference between floor groups may partly be a")
+        print("difference in WHICH SOURCE won.\n")
+        for k, v in sorted(other.items()):
+            share = len(v) / len(rows)
+            print(f"  source '{k}': {len(v)} trades ({share:.0%} of all), "
+                  f"callback median {st.median([d['cb'] for d in v]):.3f}%")
+        print()
+
+    if len(floor_keys) < 2:
+        only = floor_keys[0] if floor_keys else None
+        print(f"only ONE multiplier in this journal: "
+              f"{only if only is None else f'{only:.2f}'} "
+              f"(n={sum(len(merged[k]) for k in floor_keys)} floor-sourced).")
         print("Nothing to compare yet — this is the BEFORE baseline.")
         print("Re-run after the change has accumulated trades.")
         report(merged)
