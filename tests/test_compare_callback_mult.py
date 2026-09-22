@@ -170,6 +170,26 @@ def test_an_ATR_SELECTED_cohort_is_called_out(capsys, tmp_path):
     assert "fair comparison" in out
 
 
+def test_the_regime_check_STILL_FIRES_when_a_third_cohort_exists(capsys, tmp_path):
+    """
+    The first version guarded with `if len(keys) == 2`, so the moment a
+    'ratio' cohort appeared the regime check silently stopped running — and
+    it stopped precisely when the floor groups had drifted to 1.29 vs 1.01
+    median ATR. A guard that switches itself off as the data gets more
+    complex is worse than no guard.
+    """
+    j = tmp_path / "trades.jsonl"
+    rows = ([_trade(mult=0.60, atr=1.29) for _ in range(34)]
+            + [_trade(mult=1.25, atr=1.01) for _ in range(37)]
+            + [_trade(source="ratio", atr=0.67) for _ in range(22)])
+    j.write_text("\n".join(json.dumps(r) for r in rows))
+    sys.argv = ["x", "--journal", str(j)]
+    cc.main()
+    out = capsys.readouterr().out
+    assert "MARKET REGIME DIFFERS between 0.60 and 1.20" in out or \
+           "MARKET REGIME DIFFERS between 1.20 and 0.60" in out
+
+
 def test_a_missing_journal_is_not_a_crash(capsys, tmp_path):
     sys.argv = ["x", "--journal", str(tmp_path / "nope.jsonl")]
     assert cc.main() == 1

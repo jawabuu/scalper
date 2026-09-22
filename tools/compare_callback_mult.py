@@ -249,13 +249,22 @@ def warn(groups: dict) -> None:
                 print("   this cohort's numbers are a volatility regime as much as")
                 print("   a sizing rule. Do not read it as a fair comparison.")
 
-    if len(keys) == 2:
-        a, b = (atrs[k] for k in keys)
-        if a and b and not (0.8 <= a / b <= 1.25):
-            print(f"!! MARKET REGIME DIFFERS: median ATR {a:.3f} vs {b:.3f} "
-                  f"({a / b:.2f}x).")
-            print("   The groups did not trade the same volatility. A difference")
-            print("   in outcome may be the market, not the multiplier.")
+    # Compare the FLOOR groups pairwise. The first version only ran when
+    # there were exactly two cohorts, so the moment a 'ratio' cohort appeared
+    # the check silently stopped firing — and it stopped firing precisely when
+    # the floor groups had drifted to 1.29 vs 1.01 (1.27x), outside tolerance.
+    # A guard that switches itself off as the data gets more complex is worse
+    # than no guard.
+    for i, a_k in enumerate(floor):
+        for b_k in floor[i + 1:]:
+            a, b = atrs[a_k], atrs[b_k]
+            if a and b and not (0.8 <= a / b <= 1.25):
+                print(f"!! MARKET REGIME DIFFERS between {_lbl(a_k)} and "
+                      f"{_lbl(b_k)}: median ATR {a:.3f} vs {b:.3f} "
+                      f"({a / b:.2f}x).")
+                print("   These groups did not trade the same volatility. A")
+                print("   difference in outcome may be the market, not the")
+                print("   multiplier.")
 
     print("\nRemember: a wider callback is EXPECTED to fill better (drift) and")
     print("to be underwater more often at first sight. Neither is the result.")

@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.79.3 fixes a regime guard that switched itself off once a third cohort
+appeared — exactly when it was needed.
 v3.79.2 shows non-floor cohorts and warns when one is ATR-SELECTED.
 v3.79.1 adds never_green to that tool.
 v3.79.0 adds tools/compare_callback_mult.py — the WITHIN-INSTANCE before/after
@@ -1066,6 +1068,37 @@ and the two halves are not exchangeable. Either accept the slower read, raise
 the floor to ~0.8-0.9 so it binds again (abandoning the demo-parity value),
 or lower `AUTO_CALLBACK_RATIO` so the floor keeps winning (which changes a
 second variable).
+
+### FIRST FULL READ of the multiplier, 2026-09-22 (n=34 vs 37)
+
+    mult    n    ATR   median    mean  trimmed     p90     p10  win  nevergrn  x fee
+    0.60   34  1.290   +0.169  -0.035   +0.007  +0.834  -1.064  62%      15%  -0.08
+    1.20   37  1.012   +0.157  +0.170   +0.124  +1.461  -1.266  59%      30%  +1.32
+
+**0.60 wins on median, win rate and never_green. It LOSES on everything that
+carries the account.** Mean is negative, trimmed mean is near zero, and p90
+collapses from +1.461% to +0.834% of price — the narrower callback caps the
+winners. Economics is the plainest statement: 0.60 captures -0.08x its own
+fee and is down 1.07 USDT over 34 trades, against 1.32x and +0.37.
+
+Under the operator's stated mechanism — capped downside plus two or three
+large winners carrying the account — cutting p90 by 43% is precisely the wrong
+trade, however good the median and win rate look.
+
+**CONFOUNDED, and the tool failed to say so.** Median ATR 1.290 vs 1.012 =
+1.27x, outside the 1.25 tolerance. The regime check did not fire because it
+was guarded with `if len(keys) == 2` and a third ('ratio') cohort had
+appeared. Fixed in v3.79.3 to compare floor groups pairwise regardless of how
+many cohorts exist.
+
+The confound makes the result STRONGER, not weaker: 0.60 traded MORE volatile
+coins and still produced smaller winners.
+
+**Reading**: 0.60 is not supported. It trades fewer bad entries for
+materially smaller good ones. If a value is to be tested against 1.25, the
+design-intent argument favours 0.75 (0.75x of live's OWN noise), not 0.563 —
+see the entry above. Note also that at 0.60 the floor governed only 76% of
+trades, so the cohorts are not fully exchangeable.
 
 ### never_green is the sharpest split in the data
 
