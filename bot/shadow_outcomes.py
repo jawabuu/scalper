@@ -112,6 +112,12 @@ class ShadowOutcome:
     edge_ratio: dict           # favourable / adverse; >1 means the move paid
                                # more than it hurt on the way
     collapsed_rows: int        # how many decision rows this observation covers
+    # The candidate's ATR at decision time. Carried so any split can be
+    # checked for VOLATILITY SELECTION: a group with lower ATR will show a
+    # smaller adverse excursion mechanically, which looks like an edge and is
+    # not one. The 'ratio' cohort in compare_callback_mult.py was exactly
+    # this trap.
+    atr_pct: float | None
     resolved_ts: float
 
 
@@ -315,7 +321,10 @@ def _label(exchange, head: dict, group: list, horizons, now: float):
         triggers=dict(head.get("triggers") or {}),
         base_price=base, returns_pct=rets, favoured_side_pct=favoured,
         adverse_pct=adverse, favourable_pct=favourable, edge_ratio=edge,
-        collapsed_rows=len(group), resolved_ts=now)
+        collapsed_rows=len(group),
+        atr_pct=(((head.get("inputs_seen") or {}).get("candidate") or {})
+                 .get("atr_pct")),
+        resolved_ts=now)
 
 
 def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
@@ -370,7 +379,12 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
               if r.get("edge_ratio", {}).get(h) is not None]
         if not adv:
             return None
+        atrs = [r.get("atr_pct") for r in subset if r.get("atr_pct")]
         return {"n": len(adv),
+                # Check this BEFORE reading any difference in adverse
+                # excursion: a lower-ATR group shows less adverse movement
+                # mechanically.
+                "median_atr_pct": med(atrs) if atrs else None,
                 "median_adverse_pct": med(adv),
                 "median_favourable_pct": med(fav) if fav else None,
                 "median_edge_ratio": med(ed) if ed else None,

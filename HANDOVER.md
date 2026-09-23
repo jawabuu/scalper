@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.81.0 carries ATR onto outcome rows so any split can be checked for
+volatility selection — and records the FIRST real entry signal (below).
 v3.80.2 fixes the CLI horizon default (still 30, should be 2), warns on
 STALE observations, and adds progress output to the resolver.
 v3.80.0 RECORDS room-ahead (never gates on it) to test one external claim.
@@ -197,6 +199,66 @@ The rest of the article does not transfer. Its author targets one to three
 trades finishing within the hour and argues explicitly AGAINST taking dozens
 of small trades — the opposite of this bot's design, not a refinement of it.
 It is also one session with no sample, the same limitation as CRT.
+
+---
+
+## FIRST REAL ENTRY SIGNAL: jev's verdict predicts the PATH (2026-09-23)
+
+n=1,923 observations (17,740 decision rows), horizon 2 MINUTES — the one that
+matches a 1.96-minute median hold.
+
+    2-min horizon      adverse   favourable   edge ratio   adverse <0.5%
+    jev ENTER  n=518    0.194%      0.223%       1.119         82.8%
+    jev SKIP   n=1405   0.275%      0.267%       0.807         71.8%
+
+**This is the operator's stated criterion, met**: direction right AND a small
+adverse excursion. ENTER candidates show 29% less adverse movement and an
+edge ratio 39% higher.
+
+**The horizon is what made it visible.** On endpoint returns ENTER beats SKIP
+at 2 min (+0.038 vs -0.010) and LOSES at 30 min (+0.055 vs +0.128). jev is
+picking short-horizon favourable paths — exactly what this hold time needs,
+and invisible at 30 minutes. SETTLED #7's "jev is mildly anti-predictive" was
+an artefact of the wrong horizon and is WITHDRAWN.
+
+### Before acting on it — check for volatility selection
+
+A group with lower ATR shows a smaller adverse excursion MECHANICALLY. If jev
+says ENTER on calmer candidates, all of the above follows with no edge at
+all — the same endogenous-split trap as the 'ratio' cohort.
+
+v3.81.0 carries `atr_pct` onto every outcome row and reports
+`median_atr_pct` in each group of `path`, `path_by_verdict` and
+`path_by_crt_agrees`. **Read that first.** If ENTER's median ATR is close to
+SKIP's, the signal stands. If it is materially lower, the signal is
+volatility and nothing more.
+
+Requires a rebuild to populate on existing rows:
+
+    mv logs/shadow_outcomes.jsonl logs/shadow_outcomes.jsonl.old
+    python tools/resolve_shadow_outcomes.py
+
+### Three questions CLOSED by the same run
+
+**CRT is done.** At 2 min, `crt_agrees=True` has edge ratio 0.79 vs 0.96 for
+False, and no endpoint difference. Neutral-to-negative on 452 observations.
+Stop treating it as a candidate trigger.
+
+**The wait baseline is a coin flip** — 47.8% at one minute, 49.7% at two,
+n=1,923. Delay adds nothing. Confirmed at scale.
+
+**Room-ahead: the PROXY is too coarse, the claim is untested.** No gradient
+across bands, as predicted. But note there is NO `<1 ATR` band at all: the
+24h extreme is over 4 ATRs away on 418 of 519 rows. The case the article
+describes — obstacle closer than the stop — essentially never arises with a
+24h high/low as the level. That refutes the proxy, not the claim.
+
+### Note on the 9.5:1 collapse
+
+The rebuild produced 1,923 observations from 17,740 rows, where the old file
+had 218 from 2,064. Rows written BEFORE the v3.71 dedup collapse ~9.5:1
+(the scanner re-offered the same candidate repeatedly); rows written after
+are already unique and collapse ~1:1. Expect the ratio to keep falling.
 
 ---
 

@@ -41,8 +41,9 @@ class _Exchange:
 
 
 def _row(symbol="X/USDT:USDT", ts=None, side="short", bot="SKIP",
-         verdict="SKIP", **kw):
+         verdict="SKIP", atr=1.0, **kw):
     base = {
+        "inputs_seen": {"candidate": {"atr_pct": atr}},
         "ts": ts if ts is not None else time.time() - 7200,
         "symbol": symbol, "side": side, "bot_decision": bot,
         "jev_verdict": verdict, "confidence": 0.4, "conviction": 1.2,
@@ -459,6 +460,36 @@ def test_progress_is_silent_for_a_small_run(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
     assert "/3 ..." not in caplog.text
+
+
+def test_each_group_reports_its_MEDIAN_ATR(tmp_path):
+    """
+    A group with lower ATR shows a smaller adverse excursion MECHANICALLY.
+    Without ATR beside it, jev's ENTER cohort looking calmer than SKIP cannot
+    be told apart from jev simply picking calmer candidates — the same
+    endogenous-split trap as the 'ratio' cohort in compare_callback_mult.py.
+    """
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [
+        _row(symbol="A/USDT:USDT", ts=now - 7200, verdict="ENTER", atr=0.4),
+        _row(symbol="B/USDT:USDT", ts=now - 7200, verdict="SKIP", atr=2.0),
+    ])
+    resolve(_Exchange(drift=-0.1, wick=0.5), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=2)
+    assert s["path_by_verdict"]["ENTER"]["median_atr_pct"] == 0.4
+    assert s["path_by_verdict"]["SKIP"]["median_atr_pct"] == 2.0
+
+
+def test_a_missing_ATR_does_not_break_the_group(tmp_path):
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    r = _row(ts=now - 7200)
+    r["inputs_seen"] = {}
+    _write(src, [r])
+    resolve(_Exchange(drift=-0.1, wick=0.5), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=2)
+    assert s["path"]["median_atr_pct"] is None
 
 
 def test_the_CLI_horizon_default_matches_the_hold_time():
