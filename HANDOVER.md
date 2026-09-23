@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.80.2 fixes the CLI horizon default (still 30, should be 2), warns on
+STALE observations, and adds progress output to the resolver.
 v3.80.0 RECORDS room-ahead (never gates on it) to test one external claim.
 v3.79.3 fixes a regime guard that switched itself off once a third cohort
 appeared — exactly when it was needed.
@@ -100,6 +102,42 @@ failed identically and logged its own warning — one failure looking like
 Region and connectivity problems are fatal for the pass, not per-row.
 
 `resolve()` is idempotent, so an aborted run loses nothing — re-run it.
+
+---
+
+## Stale shadow outcomes, and two resolver bugs (v3.80.2)
+
+A `--summary` on 2026-09-23 returned 218 observations with `horizon_min: 30`,
+`path: null`, `wait_baseline` empty and no `by_room_ahead_atr`. All of it was
+labelled BEFORE v3.74/3.75, and `resolve()` skips rows already present in the
+outcomes file — so those rows keep their old shape forever.
+
+**To rebuild after any change to horizons or recorded fields:**
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+      sh -c 'mv logs/shadow_outcomes.jsonl logs/shadow_outcomes.jsonl.old'
+    docker exec $(docker ps -q -f name=scalper-1) \
+      python tools/resolve_shadow_outcomes.py
+
+The decision log is untouched and re-labelling is idempotent. The tool now
+DETECTS stale rows and prints this itself rather than letting an old summary
+read as current.
+
+### Two bugs found the same way
+
+**The CLI horizon default was never moved.** `summarize()` went to 2 minutes
+in v3.75.0; the argparse default stayed at 30, so every `--summary` kept
+reporting the window established as 23x longer than the median hold. A test
+now pins the CLI default, not just the function's.
+
+**The resolver ran silently for minutes.** One candle fetch per observation,
+rate-limited, through the proxy — and the only output came after the whole
+pass. It reads as a hang. It now logs the count and an estimate up front,
+progress every 25 for runs of 50+, and stays quiet on small runs.
+
+NOTE `room_ahead` exists only on rows written since v3.80.0 deployed, so a
+rebuilt file has path and short-horizon data for everything but room data
+only for recent rows. `by_room_ahead_atr` will be thin for a while.
 
 ---
 

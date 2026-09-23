@@ -433,6 +433,34 @@ def test_summarize_splits_by_verdict(tmp_path):
     assert s["by_verdict"]["SKIP"]["n"] == 1
 
 
+def test_resolve_reports_progress_before_it_starts_fetching(tmp_path, caplog):
+    """
+    One candle fetch per observation, rate-limited, through a proxy. A rebuild
+    of a few hundred rows runs for minutes, and the only output used to be at
+    the very end — which reads as a hang.
+    """
+    import logging
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(symbol=f"S{i}/USDT:USDT", ts=now - 7200) for i in range(60)])
+    with caplog.at_level(logging.INFO):
+        resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    text = caplog.text
+    assert "resolving 60 observation(s)" in text
+    assert "25/60" in text, "long runs must report progress, not just a total"
+
+
+def test_progress_is_silent_for_a_small_run(tmp_path, caplog):
+    # Noise on a three-row run helps nobody.
+    import logging
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [_row(symbol=f"S{i}/USDT:USDT", ts=now - 7200) for i in range(3)])
+    with caplog.at_level(logging.INFO):
+        resolve(_Exchange(drift=-0.1), str(src), str(dst), now=now)
+    assert "/3 ..." not in caplog.text
+
+
 def test_the_CLI_horizon_default_matches_the_hold_time():
     """
     summarize() was moved to 2 minutes in v3.75.0 and the CLI default was

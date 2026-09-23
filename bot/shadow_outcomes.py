@@ -193,7 +193,22 @@ def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
     longest = max(horizons)
     written = 0
 
-    for group in collapse(_load(src), collapse_sec):
+    groups = collapse(_load(src), collapse_sec)
+    ripe = [g for g in groups
+            if (g[0].get("symbol"), g[0].get("ts")) not in done
+            and now - g[0]["ts"] >= longest * 60]
+    if ripe:
+        # One candle fetch per observation, rate-limited, through the proxy.
+        # A rebuild of a few hundred rows runs for minutes and the only
+        # output used to be at the very end, which reads as a hang.
+        log.info(f"resolving {len(ripe)} observation(s) "
+                 f"({len(groups) - len(ripe)} already labelled or not yet ripe) "
+                 f"— roughly {len(ripe)} exchange calls, expect "
+                 f"~{max(1, len(ripe) // 60)} min")
+
+    for i, group in enumerate(ripe, 1):
+        if len(ripe) >= 50 and i % 25 == 0:
+            log.info(f"  {i}/{len(ripe)} ... {written} written")
         head = group[0]
         key = (head.get("symbol"), head.get("ts"))
         if key in done:

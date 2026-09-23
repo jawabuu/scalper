@@ -96,7 +96,11 @@ def main() -> int:
                         f"median hold is ~2 min, do not raise this casually")
     args = p.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    # Unbuffered and timestamped: this can run for minutes and the operator
+    # needs to see it is alive, not guess.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%H:%M:%S", stream=sys.stderr, force=True)
 
     if not args.summary:
         n = resolve(_exchange(args.demo), args.src, args.dst)
