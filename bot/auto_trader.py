@@ -1506,6 +1506,32 @@ class AutoTrader:
                 self._record("blocked", why, symbol)
                 continue
 
+            # SHADOW GATE — the only point where the shadow path can affect a
+            # trade, and off unless SHADOW_GATE_MODE says otherwise.
+            #
+            # Placed AFTER every deterministic check and BEFORE the preview,
+            # deliberately. After, so a candidate the bot would reject anyway
+            # never costs a blocking API call. Before, so a blocked entry
+            # never touches the exchange.
+            #
+            # It FAILS OPEN on every error, timeout and outage: a provider
+            # going down must never halt trading.
+            sh = getattr(self, "shadow", None)
+            if sh is not None and getattr(sh, "gate_mode", "off") != "off":
+                try:
+                    allow, why_gate = sh.gate(symbol, side, row, snap=snap)
+                except Exception as e:
+                    # A gate that raises must not stop a trade either.
+                    allow, why_gate = True, f"gate error ({type(e).__name__})"
+                    _log.warning(f"auto-trade: {symbol} shadow gate raised "
+                                 f"{type(e).__name__} — allowing the entry.")
+                if not allow:
+                    self._skip_reasons[symbol] = why_gate
+                    _log.info(f"auto-trade: {symbol} blocked by shadow gate "
+                              f"— {why_gate}")
+                    self._record("shadow_gate", why_gate, symbol)
+                    continue
+
             # Route through the SAME preview/execute path a manual entry uses,
             # so every guardrail (margin cap, leverage resolution, duplicate
             # position check) applies identically.

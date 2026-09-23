@@ -656,6 +656,93 @@ def test_backoff_never_touches_the_real_decision(tmp_path):
                                    bot_decision="SKIP") is None
 
 
+# ── The GATE — the only path from jev to a real trade ───────────────────────
+
+def test_the_gate_is_OFF_by_default_and_costs_nothing(tmp_path):
+    c = _Client()
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)
+    allow, why = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True and "off" in why
+    assert c.calls == [], "an off gate must not call the provider at all"
+
+
+def test_warn_mode_NEVER_blocks(tmp_path):
+    """
+    Run warn first. On live to 2026-09-21 jev said SKIP on ALL 16 trades the
+    bot took, so a block gate on that data takes ZERO trades. Warn measures
+    whether that still holds, continuously, at no risk.
+    """
+    c = _Client(_Result(verdict="skip"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="warn")
+    allow, why = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True
+    assert lg.gate_would_block == 1, "it must RECORD what it would have done"
+    assert lg.gate_blocked == 0
+
+
+def test_block_mode_refuses_a_non_ENTER_verdict(tmp_path):
+    c = _Client(_Result(verdict="skip"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="block")
+    allow, _ = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is False and lg.gate_blocked == 1
+
+
+def test_block_mode_allows_an_ENTER_verdict(tmp_path):
+    c = _Client(_Result(verdict="enter"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="block")
+    allow, _ = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True and lg.gate_blocked == 0
+
+
+def test_the_gate_FAILS_OPEN_on_a_provider_error(tmp_path):
+    """
+    A provider outage must never halt trading. The 2026-09-21 outage ran 503s
+    for four minutes; a fail-closed gate would have blocked every entry in
+    that window.
+    """
+    c = _Client(raises=RuntimeError("503 no healthy upstream"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="block")
+    allow, why = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True and "failed open" in why
+    assert lg.gate_failed_open == 1
+
+
+def test_the_gate_FAILS_OPEN_while_backing_off(tmp_path):
+    c = _Client(raises=RuntimeError("529 high traffic"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="block", dedup_window=0)
+    for i in range(BACKOFF_AFTER + 2):
+        lg._note_failure(RuntimeError("503 no healthy upstream"))
+    allow, why = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True and "backing off" in why
+
+
+def test_the_gate_does_NOT_write_to_the_shadow_log(tmp_path):
+    """
+    The log is a record of UNGATED judgements. Mixing gated rows in would
+    corrupt every comparison built on it.
+    """
+    p = tmp_path / "s.jsonl"
+    c = _Client(_Result(verdict="enter"))
+    lg = ShadowDecisionLogger(path=str(p), client=c, gate_mode="block")
+    lg.gate("X/USDT:USDT", "short", _row())
+    time.sleep(0.2)
+    assert not p.exists() or not p.read_text().strip()
+
+
+def test_an_unknown_gate_mode_is_treated_as_OFF(tmp_path):
+    # A typo in the env must not silently start blocking trades.
+    c = _Client(_Result(verdict="skip"))
+    lg = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c,
+                              gate_mode="blokc")
+    allow, _ = lg.gate("X/USDT:USDT", "short", _row())
+    assert allow is True
+
+
 def test_an_invalid_bot_decision_is_rejected_before_any_call(tmp_path):
     c = _Client()
     logger = ShadowDecisionLogger(path=str(tmp_path / "s.jsonl"), client=c)

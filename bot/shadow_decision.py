@@ -110,6 +110,10 @@ DEDUP_WINDOW_SEC = 900.0
 # This is politeness and log noise, NOT data integrity — the resolver already
 # drops UNKNOWN rows, and the shadow path is advisory, so the pre-existing
 # behaviour was correct, just loud.
+# How long an entry may wait for a gate verdict. Observed latency is
+# 360-1200ms; past this the trade goes ahead UNJUDGED rather than late.
+GATE_TIMEOUT_S = 1.5
+
 BACKOFF_AFTER = 5            # consecutive server failures before pausing
 BACKOFF_START_S = 30.0
 BACKOFF_MAX_S = 300.0
@@ -550,7 +554,8 @@ class ShadowDecisionLogger:
 
     def __init__(self, path: str = DEFAULT_PATH, model: str = "jev-latest",
                  max_per_minute: int = MAX_PER_MINUTE, client=None,
-                 dedup_window: float = DEDUP_WINDOW_SEC):
+                 dedup_window: float = DEDUP_WINDOW_SEC,
+                 gate_mode: str = "off"):
         self.path = Path(path)
         self.model = model
         self.max_per_minute = max_per_minute
@@ -560,6 +565,21 @@ class ShadowDecisionLogger:
         self._backoff_until = 0.0
         self._backoff_s = BACKOFF_START_S
         self.dropped_for_backoff = 0
+        # Whitelisted, not free text. An unrecognised value falls back to
+        # OFF and says so: a typo in SHADOW_GATE_MODE must never silently
+        # start blocking real trades.
+        _m = (gate_mode or "off").strip().lower()
+        if _m not in ("off", "warn", "block"):
+            log.warning(f"shadow gate: unknown SHADOW_GATE_MODE {_m!r} — "
+                        f"treating as 'off'. Valid: off, warn, block.")
+            _m = "off"
+        self.gate_mode = _m
+        self.gate_seen = 0
+        self.gate_blocked = 0
+        self.gate_would_block = 0
+        self.gate_failed_open = 0
+        self.gate_latency = []
+        self._warned_no_timeout = False
         # 0 disables dedup entirely — the pre-v3.71.0 behaviour, kept because
         # it changes WHICH candidates get judged, not just how many.
         self.dedup_window = float(dedup_window)
@@ -698,6 +718,100 @@ class ShadowDecisionLogger:
         return out
 
     # ── the public call ───────────────────────────────────────────────────
+
+    def gate(self, symbol: str, side: str, row: dict, *,
+             snap: dict | None = None,
+             timeout: float = GATE_TIMEOUT_S) -> tuple:
+        """
+        SYNCHRONOUS verdict for an entry the bot wants to take.
+
+        Returns (allow, reason). This is the ONLY place the shadow path can
+        affect a trade, and it is off unless SHADOW_GATE_MODE says otherwise.
+
+        FAILS OPEN, always. A provider outage, a timeout, a backoff, a missing
+        client — every one of them returns allow=True. The alternative is that
+        TypeSafe going down halts trading, which is a far worse failure than
+        taking a trade the model might have refused. The 2026-09-21 outage
+        (503s for four minutes) would otherwise have blocked every entry in
+        that window.
+
+        BLOCKING, unlike decide_async. That is the point and also the cost:
+        observed latency is 360-1200ms, and this bot's entries fill on a
+        retracement whose median hold is under two minutes. `timeout` bounds
+        the damage; past it the trade goes ahead unjudged.
+
+        NOTE the rows this produces are NOT written to the shadow log — the
+        log is a record of UNGATED judgements, and mixing gated ones in would
+        corrupt every comparison built on it.
+        """
+        mode = (self.gate_mode or "off").lower()
+        if mode == "off":
+            return True, "gate off"
+        client = self._get_client()
+        if client is None:
+            self.gate_failed_open += 1
+            return True, "no client"
+        if self._in_backoff():
+            self.gate_failed_open += 1
+            return True, "backing off"
+        state = _candidate_state(symbol, side, row, snap or {})
+        try:
+            t0 = time.time()
+            result = self._client.system_one(state, self._questions(),
+                                             timeout=timeout)
+            took = time.time() - t0
+            self._note_success()
+        except TypeError:
+            # Older SDKs have no per-call timeout. Rather than drop the bound
+            # silently, take the call without one and say so — a gate whose
+            # timeout does not apply is worse than a slow one.
+            try:
+                t0 = time.time()
+                result = self._client.system_one(state, self._questions())
+                took = time.time() - t0
+                self._note_success()
+                if not self._warned_no_timeout:
+                    log.warning("shadow gate: the SDK does not accept a "
+                                "per-call timeout — entries may wait the full "
+                                "client timeout. Upgrade typesafe-sdk.")
+                    self._warned_no_timeout = True
+            except Exception as e:
+                self._note_failure(e)
+                self.gate_failed_open += 1
+                return True, f"failed open ({type(e).__name__})"
+        except Exception as e:
+            self._note_failure(e)
+            self.gate_failed_open += 1
+            return True, f"failed open ({type(e).__name__})"
+
+        try:
+            rec = self._parse(symbol, side, "ENTER", state, None, result,
+                              _triggers(row, side))
+            verdict = rec.jev_verdict
+        except Exception as e:
+            self.gate_failed_open += 1
+            return True, f"unparseable ({type(e).__name__})"
+
+        self.gate_latency.append(took)
+        allow = verdict == "ENTER"
+        if mode == "warn":
+            # Records what a gate WOULD have done and changes nothing. Run
+            # this first: on live to 2026-09-21, jev said SKIP on all 16
+            # trades the bot took, so a live gate would have taken ZERO.
+            self.gate_would_block += 0 if allow else 1
+            self.gate_seen += 1
+            log.info(f"shadow gate (warn): {symbol} jev={verdict} "
+                     f"conf={rec.confidence:.2f} in {took*1000:.0f}ms — "
+                     f"would {'allow' if allow else 'BLOCK'}. "
+                     f"{self.gate_would_block}/{self.gate_seen} blocked so far.")
+            return True, f"warn only (jev={verdict})"
+        self.gate_seen += 1
+        if not allow:
+            self.gate_blocked += 1
+            log.warning(f"shadow gate: {symbol} BLOCKED — jev={verdict} "
+                        f"conf={rec.confidence:.2f} ({took*1000:.0f}ms). "
+                        f"{self.gate_blocked}/{self.gate_seen} blocked.")
+        return allow, f"jev={verdict}"
 
     def decide_async(self, symbol: str, side: str, row: dict, *,
                      bot_decision: str, snap: dict | None = None,

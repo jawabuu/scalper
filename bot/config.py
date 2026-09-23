@@ -605,6 +605,22 @@ class BotConfig:
     # behaviour); it changes WHICH candidates are judged, not just how many.
     shadow_dedup_window_sec: float = field(default_factory=lambda: _env_float(
         "SHADOW_DEDUP_WINDOW_SEC", 900.0))
+    # THE ONLY WAY THE SHADOW PATH CAN AFFECT A TRADE.
+    #   off   (default) — advisory only, exactly as before
+    #   warn  — asks jev before each entry, logs what it WOULD have blocked,
+    #           changes nothing. RUN THIS FIRST.
+    #   block — refuses the entry when jev does not say ENTER
+    #
+    # Evidence for warn-first: on live to 2026-09-21 jev said SKIP on ALL 16
+    # trades the bot took (322 of its ENTERs were on candidates the bot
+    # skipped). A block gate on that data takes ZERO trades. Warn mode
+    # measures whether that still holds, continuously, at no risk.
+    #
+    # The gate is SYNCHRONOUS and adds 360-1200ms to an entry decision, on a
+    # strategy whose median hold is under two minutes. It FAILS OPEN on every
+    # error, timeout and outage — a provider going down must not halt trading.
+    shadow_gate_mode: str = field(default_factory=lambda: _env(
+        "SHADOW_GATE_MODE", "off").strip().lower())
     # Symbols the futures scan must never surface, comma-separated. Matched on
     # the BASE (SNXX matches SNXX/USDT:USDT), so no need to write the suffix.
     #

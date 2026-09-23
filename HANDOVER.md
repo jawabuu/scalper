@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.82.0 adds SHADOW_GATE_MODE — jev can gate entries. Default off, and warn
+mode must be run before block.
 v3.81.0 carries ATR onto outcome rows so any split can be checked for
 volatility selection — and records the FIRST real entry signal (below).
 v3.80.2 fixes the CLI horizon default (still 30, should be 2), warns on
@@ -199,6 +201,59 @@ The rest of the article does not transfer. Its author targets one to three
 trades finishing within the hour and argues explicitly AGAINST taking dozens
 of small trades — the opposite of this bot's design, not a refinement of it.
 It is also one session with no sample, the same limitation as CRT.
+
+---
+
+## SHADOW_GATE_MODE — jev on the trade path (v3.82.0)
+
+`off` | `warn` | `block`. Default off. The ONLY point where the shadow path
+can affect a trade.
+
+### Run warn first, and know what it is checking
+
+    bot ENTER / jev ENTER      0
+    bot ENTER / jev SKIP      16
+    bot SKIP  / jev ENTER    322
+
+**jev said SKIP on every trade the bot took.** A block gate on that data takes
+ZERO trades. The 40% edge-ratio advantage (below) is measured on candidates
+the bot mostly SKIPS — it does not follow that jev improves the ones the bot
+would take, and the overlap sample is 12.
+
+Warn mode answers this continuously: it asks jev before each entry, logs
+`would allow` / `would BLOCK` with a running count, and changes nothing.
+
+### Design decisions worth keeping
+
+**FAILS OPEN on everything** — error, timeout, backoff, missing client,
+unparseable reply, and even an exception raised by the gate itself. A
+provider outage must never halt trading; the 2026-09-21 outage ran 503s for
+four minutes and a fail-closed gate would have blocked every entry in it.
+
+**SYNCHRONOUS, and that is the cost.** 360-1200ms on an entry decision for a
+strategy with a sub-two-minute hold. `GATE_TIMEOUT_S=1.5` bounds it; past
+that the trade goes ahead unjudged. If the SDK rejects a per-call timeout the
+gate says so once rather than silently dropping the bound.
+
+**Placed AFTER every deterministic check and BEFORE the preview.** After, so
+a candidate the bot would reject anyway never costs a blocking API call.
+Before, so a blocked entry never touches the exchange.
+
+**Gate rows are NOT written to the shadow log.** That log is a record of
+UNGATED judgements; mixing gated rows in would corrupt every comparison built
+on it.
+
+**Modes are whitelisted.** An unrecognised value falls back to off with a
+warning — a typo must never silently start blocking real trades. A test
+pins this.
+
+### Suggested sequence
+
+1. `SHADOW_GATE_MODE=warn` on DEMO. Read the blocked ratio after a day.
+2. If it would block nearly everything, the signal does not transfer to the
+   bot's own candidates and there is nothing to gate on.
+3. Only if warn shows a workable pass rate, try `block` on demo.
+4. Live last, and not before the demo result is clear.
 
 ---
 
