@@ -433,6 +433,21 @@ def test_summarize_splits_by_verdict(tmp_path):
     assert s["by_verdict"]["SKIP"]["n"] == 1
 
 
+def test_the_CLI_horizon_default_matches_the_hold_time():
+    """
+    summarize() was moved to 2 minutes in v3.75.0 and the CLI default was
+    missed, so `--summary` kept reporting the 30-minute window that made the
+    first trigger read meaningless. Median hold is 1.96 min.
+    """
+    import subprocess, sys as _s, pathlib
+    tool = pathlib.Path(__file__).resolve().parents[1] / "tools" / "resolve_shadow_outcomes.py"
+    out = subprocess.run([_s.executable, str(tool), "--help"],
+                         capture_output=True, text=True).stdout
+    assert "default: 2" in out or "(default: 2)" in out or "--horizon HORIZON" in out
+    src = tool.read_text()
+    assert 'p.add_argument("--horizon", type=int, default=2' in src
+
+
 def test_summarize_on_an_empty_file_is_not_an_error(tmp_path):
     s = summarize(str(tmp_path / "none.jsonl"))
     assert s["observations"] == 0

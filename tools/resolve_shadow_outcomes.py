@@ -87,8 +87,13 @@ def main() -> int:
                    help="use the testnet feed (match the container you ran in)")
     p.add_argument("--summary", action="store_true",
                    help="only read what is already labelled; fetch nothing")
-    p.add_argument("--horizon", type=int, default=30,
-                   help=f"minutes for --summary (labelled: {HORIZONS_MIN})")
+    # 2 minutes, NOT 30. Median hold is 1.96 min and 80% of trades close
+    # within 3. summarize() was changed to 2 in v3.75.0 and this was missed,
+    # so the CLI kept reporting the window that made the first trigger read
+    # meaningless.
+    p.add_argument("--horizon", type=int, default=2,
+                   help=f"minutes for --summary (labelled: {HORIZONS_MIN}); "
+                        f"median hold is ~2 min, do not raise this casually")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -96,6 +101,26 @@ def main() -> int:
     if not args.summary:
         n = resolve(_exchange(args.demo), args.src, args.dst)
         print(f"labelled {n} new observation(s) -> {args.dst}")
+
+    # Rows already in the outcomes file are SKIPPED, so observations written
+    # before a horizon or field change keep their old shape forever. Say so
+    # rather than letting a stale summary read as current.
+    try:
+        import json as _json
+        _rows = [_json.loads(l) for l in Path(args.dst).read_text().splitlines() if l.strip()]
+        _stale = [r for r in _rows if "adverse_pct" not in r
+                  or "1" not in (r.get("returns_pct") or {})]
+        if _stale:
+            print(f"\n!! {len(_stale)} of {len(_rows)} observations were labelled "
+                  f"BEFORE the current horizons/fields and cannot be compared\n"
+                  f"   with newer ones. resolve() skips rows it has already "
+                  f"written, so they will\n   never update. To rebuild:\n"
+                  f"     mv {args.dst} {args.dst}.old\n"
+                  f"     python tools/resolve_shadow_outcomes.py\n"
+                  f"   The decision log is untouched and re-labelling is "
+                  f"idempotent.", file=sys.stderr)
+    except Exception:
+        pass
 
     s = summarize(args.dst, horizon=args.horizon)
     print(json.dumps(s, indent=2))
