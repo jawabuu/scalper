@@ -3,7 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
-v3.83.0 adds tools/compare_jev_picks.py for the remaining fork.
+v3.83.1 CLOSES the last fork: jev's picks lose even with every advantage.
+v3.83.0 adds tools/compare_jev_picks.py.
 v3.82.1 records the GATE NEGATIVE RESULT — all four variants dead.
 v3.82.0 adds SHADOW_GATE_MODE — jev can gate entries. Default off, and warn
 mode must be run before block.
@@ -283,6 +284,36 @@ left worth testing.
 - `looks_exhausted` is flat AND is the component pinned near 0.5 that drags
   confidence to zero. It contributes nothing and costs the composite
   everything. A candidate for removal or re-specification.
+
+### FORK CLOSED — jev's picks LOSE, 2026-09-23
+
+                        n    median     mean      p10      p90    win
+    bot's real trades 145    +0.071   -0.057   -0.992   +0.708    59%
+    jev's picks       518    -0.052   -0.057   -0.534   +0.441    43%
+
+    2% of jev's picks hit a 1.5x ATR stop and were booked there.
+
+**jev's picks lose while holding EVERY advantage**: no entry fill, no trail
+cutting winners short, no fail-fast, no slippage, no capacity limit. Win rate
+43% vs 59%. Charging the uncharged costs can only widen the gap.
+
+So the edge-ratio signal (ENTER 1.119 vs SKIP 0.800, ATR-normalised, n=1,923)
+is REAL AND UNTRADEABLE. It describes the shape of a path, not a profitable
+entry: jev's picks have a better favourable-to-adverse ratio and still end
+lower, because the ratio says nothing about magnitude.
+
+**That closes the whole jev line of work.** Gate: dead in four variants.
+Alternative strategy: dead here. The shadow log answered its question, which
+was worth building to find out.
+
+### A reasoning error in the tool, fixed in v3.83.1
+
+The first version used a SYMMETRIC +/-0.2% band and would have called this
+result "not evidence either way". Wrong: every uncharged cost falls on the
+jev side, so it can only move the gap DOWN. A NEGATIVE gap of any size is
+therefore conclusive; only a small POSITIVE one needs the band. The band is
+now one-sided and a test pins it.
+
 
 ### The remaining fork — tools/compare_jev_picks.py (v3.83.0)
 

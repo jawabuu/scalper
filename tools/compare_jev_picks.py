@@ -169,14 +169,23 @@ def main() -> int:
     if bot and jev:
         gap = st.median(jev) - st.median(bot)
         print(f"  observed median gap: {gap:+.3f}% of price per trade")
-        if abs(gap) < 0.2:
-            print("  -> INSIDE the uncharged-cost band. Not evidence either way.")
-        elif gap > 0:
+        # THE BAND IS ONE-SIDED. Every uncharged cost above falls on the jev
+        # side only, so it can only move the gap DOWN. A positive gap smaller
+        # than the band could vanish once charged; a NEGATIVE gap of any size
+        # can only get worse. Treating the band as symmetric — as the first
+        # version did — would have called a clear negative "not evidence".
+        if gap < 0:
+            print("  -> jev's picks are WORSE while holding every advantage")
+            print("     listed above. Charging them can only widen this.")
+            print("     CONCLUSIVE in this direction; no sample-size caveat")
+            print("     applies to a result that runs against the bias.")
+        elif gap < 0.2:
+            print("  -> a POSITIVE gap smaller than the uncharged costs. Could")
+            print("     vanish entirely once entry fill and exit logic are")
+            print("     charged. Not evidence.")
+        else:
             print("  -> larger than the band, but see the list above before "
                   "believing it.")
-        else:
-            print("  -> jev's picks are WORSE even before its advantages are "
-                  "charged.")
     return 0
 
 
