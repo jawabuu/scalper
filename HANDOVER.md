@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.83.0 adds tools/compare_jev_picks.py for the remaining fork.
 v3.82.1 records the GATE NEGATIVE RESULT — all four variants dead.
 v3.82.0 adds SHADOW_GATE_MODE — jev can gate entries. Default off, and warn
 mode must be run before block.
@@ -282,6 +283,40 @@ left worth testing.
 - `looks_exhausted` is flat AND is the component pinned near 0.5 that drags
   confidence to zero. It contributes nothing and costs the composite
   everything. A candidate for removal or re-specification.
+
+### The remaining fork — tools/compare_jev_picks.py (v3.83.0)
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+        python tools/compare_jev_picks.py
+
+**THE TWO POPULATIONS ARE NOT COMPARABLE.** Real trades carry fills,
+slippage, stops, trails, fail-fast and fees. jev's picks are the forward
+price move from the DECISION price — no fill, no stop, no trail. A naive
+comparison hands jev a large unearned advantage.
+
+The tool charges what it can and names what it cannot:
+
+  CHARGED   the same 0.09%-of-price round trip on BOTH sides (fees do not
+            scale with leverage, so this is like-for-like), and a stop at
+            `--stop-atr` (default 1.5, matching ATR_STOP_MULT) booked as a
+            loss whenever a pick's adverse excursion breached it.
+
+  NOT CHARGED, and stated in the output every run:
+    ENTRY FILL   the bot enters on a trailing order after a retracement.
+                 Many picks would never have filled; those that did would
+                 fill worse than the decision price. LARGEST unmodelled
+                 advantage.
+    EXIT LOGIC   real trades exit on a trail, a 60s fail-fast or a stop, all
+                 of which cut winners short too. Picks are marked at a fixed
+                 horizon — the best possible exit rule in hindsight.
+    SLIPPAGE     median 0.068% of price on live, tail to 2.4%.
+    CAPACITY     thousands of picks against ENTRY_MAX_POSITIONS=6.
+
+**A gap under ~0.2% of price per trade is INSIDE the uncharged band and is
+not evidence either way.** The tool says so itself rather than printing a
+number and leaving the reader to it.
+
+Everything is PRICE %, leverage divided out, at the 2-minute horizon.
 
 ### The remaining fork — a different strategy, not a filter
 

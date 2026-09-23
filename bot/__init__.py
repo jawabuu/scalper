@@ -1,6 +1,6 @@
 from .config import BotConfig
 from .engine import ScalpingEngine
 
-__version__ = "3.82.1"
+__version__ = "3.83.0"
 
 __all__ = ["BotConfig", "ScalpingEngine", "__version__"]
