@@ -3,6 +3,7 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.82.1 records the GATE NEGATIVE RESULT — all four variants dead.
 v3.82.0 adds SHADOW_GATE_MODE — jev can gate entries. Default off, and warn
 mode must be run before block.
 v3.81.0 carries ATR onto outcome rows so any split can be checked for
@@ -201,6 +202,94 @@ The rest of the article does not transfer. Its author targets one to three
 trades finishing within the hour and argues explicitly AGAINST taking dozens
 of small trades — the opposite of this bot's design, not a refinement of it.
 It is also one session with no sample, the same limitation as CRT.
+
+---
+
+## GATING ON jev: DEAD, all four variants (2026-09-23)
+
+The shadow log was built to answer whether jev could improve the bot's
+entries. It has now answered: **no**, and the reason is consistent across
+every form the gate could take.
+
+### 1. Verdict gate — 4.3% pass rate
+
+    n=19,660             jev ENTER   jev SKIP
+    bot ENTER                    6        132
+    bot SKIP                 5,615     13,907
+
+jev ENTER rate is 28.6% overall but **4.3% on the bot's own entries**.
+Expected 39.5 under independence, observed 6 — chi-square 40.0 (1 df), p far
+below 0.001. Not noise: **jev systematically dislikes exactly what the bot
+picks**, 6.6x less often than chance. A block gate takes ~1.7 trades/day
+from ~40.
+
+### 2. Confidence gate — no usable range
+
+    bot ENTER / jev SKIP: median confidence 0.02, ZERO of 132 above 0.2
+    all rows:             median 0.06, p90 0.24
+
+Structural, not a market fact. `confidence` is the MINIMUM of four
+components, and the min of four draws sits far below the min of four
+medians:
+
+    conviction        0.840   (0-3 score)
+    looks_exhausted   0.500 -> derived conf 0.260
+    regime_aligned    0.650 -> derived conf 0.740
+    structure_intact  0.410 -> derived conf 0.220
+
+Whichever component lands near 0.5 on a given row drags the composite to
+zero. The min rule is right for "how much do I trust this composite" and
+useless as a threshold.
+
+### 3. Component gate — viable on paper, flat in reality
+
+Edge ratio at 2 min by component quartile, n=1,965 REFUSED candidates:
+
+    regime_aligned     bottom 0.747   top 1.050   1.41x   <- the discriminator
+    structure_intact   bottom 0.917   top 1.000   1.09x
+    looks_exhausted    bottom 1.000   top 1.000   FLAT — no information
+    conviction         bottom 0.952   top 0.714   INVERTED
+
+`regime_aligned > 0.3` keeps 37% of the bot's entries (72% of all
+candidates) — a workable rate, unlike the verdict.
+
+**But on the bot's own 123 REAL trades it is flat:**
+
+    regime band      n     median px    win    net USDT
+    0 - 0.3         75      +0.161%     64%     -0.99
+    0.3 - 0.5       14      +0.345%     71%     +0.85
+    0.5 - 1.01      34      +0.200%     65%     -0.81
+
+No gradient. The high band is no better than the low band; the middle looks
+best on n=14, which is noise.
+
+### The pattern, and what it means
+
+**jev's signal is real but lives in a population the bot does not trade.**
+The 40% edge-ratio advantage (ENTER 1.119 vs SKIP 0.800, ATR-normalised and
+confirmed) is measured on refused candidates. On the 123 the bot takes,
+nothing jev produces separates them.
+
+`SHADOW_GATE_MODE` stays in the code and stays OFF. Warn mode remains useful
+as continuous measurement — it costs nothing — but there is no gate design
+left worth testing.
+
+### Two by-products worth keeping
+
+- `conviction` is INVERTED against edge ratio and carries weight 0.5 in the
+  composed verdict, so the verdict partly works against itself. That may be
+  why the verdict gate looked so poor.
+- `looks_exhausted` is flat AND is the component pinned near 0.5 that drags
+  confidence to zero. It contributes nothing and costs the composite
+  everything. A candidate for removal or re-specification.
+
+### The remaining fork — a different strategy, not a filter
+
+jev says ENTER on **5,615 candidates the bot SKIPS**, and that population has
+the better edge ratio. Forward-return data already exists on refused
+candidates, so "would trading jev's picks beat trading the bot's?" is
+answerable from data on disk. That is a DIFFERENT STRATEGY, not a gate on
+this one, and should be treated as its own question.
 
 ---
 
