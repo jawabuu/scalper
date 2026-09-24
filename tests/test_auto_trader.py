@@ -1,4 +1,5 @@
 """Tests for unattended auto-trading: entry rules, callback sizing, safety limits."""
+import inspect
 import pytest
 
 from bot.auto_trader import (
@@ -495,6 +496,24 @@ def test_long_above_the_ceiling_is_skipped():
     cfg = _band_cfg()
     d = evaluate_candidate(_long_row(58), streak=2, cfg=cfg, atr_pct=0.5)
     assert not d.enter and "above the long ceiling" in d.reason
+
+
+def test_PATH_shape_reaches_the_entry_context_not_just_the_candle_shape():
+    """
+    score_shape.py reported "159 trades, 0 with shape recorded" while the
+    shadow log carried 235 shape-labelled rows. Cause: row["shape"] is the
+    CANDLE shape (body, wicks) and the PATH shape from bot/shape.py lands
+    FLAT on the row via scan_runner's row.update(self._shape...). The entry
+    context read the candle one, so nothing carried the path one onto a
+    trade. Two different things sharing one word.
+    """
+    import bot.auto_trader as at
+    src = inspect.getsource(at)
+    for k in ("shape_compression", "shape_extension_atr", "shape_accel",
+              "shape_consolidating", "shape_ok"):
+        assert f'"{k}": row.get(' in src, k
+    # and the candle shape must still come from row["shape"]
+    assert '"body_pct": (row.get("shape") or {}).get("body_pct")' in src
 
 
 def _short_row(rsi):

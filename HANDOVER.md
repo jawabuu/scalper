@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.86.1 fixes PATH SHAPE never reaching a trade — a name collision with the
+CANDLE shape. score_shape.py could never have scored anything.
 v3.86.0 adds AUTO_SHORT_RSI_MAX (default OFF) — the refused-candidate data
 contradicts the "shorts need no ceiling" thesis.
 v3.85.0 puts SHAPE into the factor report and adds the CROSS-INSTANCE
@@ -646,6 +648,79 @@ These are all candidates the bot SKIPPED, for some reason. A band may be
 contaminated by other refusal reasons co-occurring (`no_turn`,
 `gap_not_rising`). Before acting on a band, check whether its candidates also
 failed those.
+
+---
+
+## SHAPE IS REFUTED — all three components run BACKWARDS (2026-09-24)
+
+n=2,401 observations, 2-minute horizon. `edge_ratio` is favourable/adverse,
+so ATR CANCELS — read it before anything else.
+
+    shape_favours     n     ATR   adv/ATR  fav/ATR   edge
+    True             59   0.497    0.473    0.243   0.415   <- "consolidating"
+    False           176   0.518    0.387    0.331   0.800
+    None          2,166   0.770    0.312    0.329   0.928
+
+`consolidating` has the WORST edge ratio, and it is not an ATR artefact:
+normalised it has LOWER favourable AND HIGHER adverse movement per ATR than
+either other group.
+
+    compression    <0.7:0.42   >=0.7:0.29   >=0.9:1.14   >=1.2:0.80
+    extension_atr  <1.0:0.45   >=1.0:1.17   >=2.0:0.64   >=3.0:0.86
+    accel          <0.7:0.53   >=0.7:0.56   >=1.0:1.00   >=1.5:0.76
+
+Contracting was meant to be good — it is worst. Not-yet-extended was meant to
+be good — it is worst. Decelerating was meant to be good — it is worst.
+**Three independent components, three reversals.** That is not a threshold
+mis-fit; the hypothesis is backwards for this strategy.
+
+### What replaces it: MODERATE momentum, confirmed twice
+
+    extension_atr  best at >=1.0 (1.17), falls to 0.64 by >=2.0
+    RSI (shorts)   best at 72-80,        falls to 0.465 by 85+
+
+Both say the same thing: the bot fades moves that have STARTED but not
+FINISHED. Not coils, and not blow-offs. The operator's stated intuition —
+"consolidating before the breakout" — is not what this strategy profits from.
+
+### The RSI floor is now the better-supported change
+
+    72-75  n=199  +0.089%  win 57%  edge 1.334   <- REFUSED today
+    75-80  n= 90  +0.009%  win 50%  edge 1.090   <- accepted
+    80-85  n= 25  -0.000%  win 48%  edge 0.604
+    85+    n= 12  -0.485%  win 33%  edge 0.465
+
+At n=199 the refused band now clearly BEATS the accepted one (was
++0.047/54%/1.029 at n=174). The ceiling case is unchanged and still thin
+(n=37 combined). **Do the floor first** — five times the sample, larger
+effect. One change at a time.
+
+Longs: 45-48 holds at edge 1.075, but 48-52 has decayed to 0.885. Watch,
+do not act.
+
+---
+
+## PATH SHAPE never reached a trade — a name collision (v3.86.1)
+
+`score_shape.py` reported "159 trades, 0 with shape recorded" while the
+shadow log carried 235 shape-labelled rows. Shape WAS being computed.
+
+`row["shape"]` is the CANDLE shape — body and wicks of the present bar, a
+pre-existing field. The PATH shape from `bot/shape.py` lands FLAT on the row,
+because scan_runner merges its per-symbol shape dict into the row: bare keys
+`compression`, `extension_atr`, `accel`. The entry context read the CANDLE
+one, so nothing ever carried the PATH one onto a trade.
+
+Two different things sharing one word. The shadow path read the flat keys and
+worked; the trade path read the nested key and silently recorded nothing.
+
+Fixed by copying the path fields into `entry_context` under `shape_`-prefixed
+names, plus `shape_ok` so the tool can tell "not recorded" from "computed and
+empty". A test pins BOTH readings so they can never be confused again.
+
+**Only trades entered after this deploy will score.** The refuted result
+above stands on its own — it comes from the shadow rows, which were never
+affected.
 
 ---
 

@@ -1608,9 +1608,31 @@ class AutoTrader:
                         "taper_vol_ratio": (row.get("taper") or {}).get("vol_ratio"),
                         "taper_close_pos": (row.get("taper") or {}).get("close_pos"),
                         "taper_trend_candles": (row.get("taper") or {}).get("trend_candles"),
+                        # NOTE row["shape"] is the CANDLE shape — body and
+                        # wicks of the present bar. The PATH shape from
+                        # bot/shape.py lands FLAT on the row — scan_runner
+                        # merges its per-symbol shape dict into the row —
+                        # under bare names like `compression`. Two things
+                        # sharing one
+                        # word: score_shape.py reported "159 trades, 0 with
+                        # shape recorded" because this block read the candle
+                        # one and nothing carried the path one onto a trade.
                         "body_pct": (row.get("shape") or {}).get("body_pct"),
                         "upper_wick_pct": (row.get("shape") or {}).get("upper_wick_pct"),
                         "lower_wick_pct": (row.get("shape") or {}).get("lower_wick_pct"),
+                        # PATH shape, stamped at SCAN time. Prefixed here so a
+                        # trade row can never confuse the two either.
+                        "shape_compression": row.get("compression"),
+                        "shape_overlap": row.get("overlap"),
+                        "shape_extension_atr": row.get("extension_atr"),
+                        "shape_accel": row.get("accel"),
+                        "shape_leg_atr_per_bar": row.get("leg_atr_per_bar"),
+                        "shape_consolidating": row.get("consolidating"),
+                        "shape_extended": row.get("extended"),
+                        "shape_bars": row.get("shape_bars"),
+                        # score_shape.py keys off this to tell "no shape on
+                        # this trade" apart from "shape computed and empty".
+                        "shape_ok": row.get("shape_ok"),
                         "dist_to_extreme_pct": abs(
                             row.get("pct_above_24h_low") if side == "long"
                             else row.get("pct_below_24h_high")),
