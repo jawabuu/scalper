@@ -462,6 +462,28 @@ def test_progress_is_silent_for_a_small_run(tmp_path, caplog):
     assert "/3 ..." not in caplog.text
 
 
+def test_each_group_reports_its_TIME_RANGE(tmp_path):
+    """
+    A field added mid-flight splits into a populated group and a `None` group
+    that is really EVERYTHING BEFORE THE DEPLOY — a different market period,
+    not a control. Comparing shape's 235 rows against 2,166 pre-deploy ones
+    produced a "refuted" verdict that had to be withdrawn; the ATR gap (0.50
+    vs 0.77) was the only clue. The time range makes it unmissable.
+    """
+    src, dst = tmp_path / "d.jsonl", tmp_path / "o.jsonl"
+    now = 1_000_000.0
+    _write(src, [
+        _row(symbol="A/USDT:USDT", ts=now - 90000, verdict="ENTER"),
+        _row(symbol="B/USDT:USDT", ts=now - 7200, verdict="SKIP"),
+    ])
+    resolve(_Exchange(drift=-0.1, wick=0.5), str(src), str(dst), now=now)
+    s = summarize(str(dst), horizon=2)
+    e = s["path_by_verdict"]["ENTER"]
+    k = s["path_by_verdict"]["SKIP"]
+    assert e["last_ts"] < k["first_ts"], \
+        "non-overlapping cohorts must be visible as such"
+
+
 def test_each_group_reports_its_MEDIAN_ATR(tmp_path):
     """
     A group with lower ATR shows a smaller adverse excursion MECHANICALLY.

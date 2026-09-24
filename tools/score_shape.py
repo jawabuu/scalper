@@ -71,7 +71,24 @@ def _net(t):
 
 
 def _ctx(t, key):
-    return (t.get("entry_context") or {}).get(key)
+    """
+    Read a shape field from the entry context.
+
+    Tries the `shape_`-prefixed name FIRST and the bare name second. The
+    prefix exists because `row["shape"]` already meant the CANDLE shape (body
+    and wicks), and the path shape lands flat on the row under bare names —
+    that collision is what made shape silently miss every trade before
+    v3.86.1. Prefixing on the trade row keeps the two apart for good.
+
+    The bare fallback is not decoration: it reads rows written by versions
+    that stored the unprefixed name, so a mixed journal still scores rather
+    than silently dropping half its rows. Checking only one spelling is
+    precisely the bug this function exists to have fixed.
+    """
+    ctx = t.get("entry_context") or {}
+    if key.startswith("shape_"):
+        return ctx.get(key, ctx.get(key[len("shape_"):]))
+    return ctx.get(f"shape_{key}", ctx.get(key))
 
 
 def main(path="logs/trades.jsonl"):
@@ -90,6 +107,10 @@ def main(path="logs/trades.jsonl"):
         print("\nShape is not on these rows yet. It is stamped at SCAN time, so\n"
               "only trades entered after the deploy carry it. Nothing to score.")
         return 0
+    if len(with_shape) < 20:
+        print(f"\nOnly {len(with_shape)} trades carry shape. Every rule below "
+              f"will be thin\nor absent; treat this as a smoke test, not a "
+              f"result.")
 
     base = sum(_net(t) for t in with_shape)
     print(f"\nactual net over those trades: {base:+.4f}")
@@ -101,6 +122,11 @@ def main(path="logs/trades.jsonl"):
         kept = [t for t in with_shape if keep(t)]
         skipped = [t for t in with_shape if not keep(t)]
         if not kept or not skipped:
+            # A rule that keeps everything or nothing has no comparison to
+            # make. Say which, rather than printing nothing and reading as a
+            # broken tool — that silence is what hid the name mismatch.
+            side = "keeps ALL" if not skipped else "keeps NONE"
+            print(f"  {name:34s} {side} of {len(with_shape)} — no split")
             return
         knet = sum(_net(t) for t in kept)
         kwins = sum(1 for t in kept if _net(t) > 0)

@@ -379,12 +379,21 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
               if r.get("edge_ratio", {}).get(h) is not None]
         if not adv:
             return None
+        # ts range, so a reader can see at a glance when a cohort only
+        # covers part of the file. A field added mid-flight (shape, room)
+        # splits into a populated group and a `None` group that is really
+        # EVERYTHING BEFORE THE DEPLOY — a different market period, not a
+        # control. Comparing against it once produced a "refuted" verdict
+        # that had to be withdrawn.
+        tss = [r.get("ts") for r in subset if r.get("ts")]
         atrs = [r.get("atr_pct") for r in subset if r.get("atr_pct")]
         return {"n": len(adv),
                 # Check this BEFORE reading any difference in adverse
                 # excursion: a lower-ATR group shows less adverse movement
                 # mechanically.
                 "median_atr_pct": med(atrs) if atrs else None,
+                "first_ts": min(tss) if tss else None,
+                "last_ts": max(tss) if tss else None,
                 "median_adverse_pct": med(adv),
                 "median_favourable_pct": med(fav) if fav else None,
                 "median_edge_ratio": med(ed) if ed else None,

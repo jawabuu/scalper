@@ -3,6 +3,10 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.86.3 WITHDRAWS the "shape is refuted" overstatement — 2,166 of those rows
+predate shape, so the None baseline was a different market period.
+v3.86.2 fixes the SAME name mismatch in the other direction — score_shape.py
+read bare names while v3.86.1 wrote prefixed ones.
 v3.86.1 fixes PATH SHAPE never reaching a trade — a name collision with the
 CANDLE shape. score_shape.py could never have scored anything.
 v3.86.0 adds AUTO_SHORT_RSI_MAX (default OFF) — the refused-candidate data
@@ -651,37 +655,46 @@ failed those.
 
 ---
 
-## SHAPE IS REFUTED — all three components run BACKWARDS (2026-09-24)
+## SHAPE: the label runs BACKWARDS within its own window — PROVISIONAL
 
-n=2,401 observations, 2-minute horizon. `edge_ratio` is favourable/adverse,
-so ATR CANCELS — read it before anything else.
+n=2,401 observations, but **only 235 carry shape**. The other 2,166 predate
+the deploy, so ANY comparison against the `None` cohort compares two market
+PERIODS, not shape against no-shape. The ATR column says so outright:
 
     shape_favours     n     ATR   adv/ATR  fav/ATR   edge
-    True             59   0.497    0.473    0.243   0.415   <- "consolidating"
+    True             59   0.497    0.473    0.243   0.415
     False           176   0.518    0.387    0.331   0.800
-    None          2,166   0.770    0.312    0.329   0.928
+    None          2,166   0.770      —        —     0.928   <- DIFFERENT PERIOD
 
-`consolidating` has the WORST edge ratio, and it is not an ATR artefact:
-normalised it has LOWER favourable AND HIGHER adverse movement per ATR than
-either other group.
+The shape window is a markedly QUIETER regime (ATR ~0.5 vs ~0.77). Do not
+read anything against the None baseline. An earlier draft of this section
+did exactly that and had to be withdrawn.
+
+### What holds: True vs False, same window
+
+    edge ratio   True 0.415   vs   False 0.800
+
+Same period, same ATR neighbourhood, and `edge_ratio` is favourable/adverse
+so ATR cancels anyway. **The `consolidating` label is ANTI-PREDICTIVE within
+its own data.**
 
     compression    <0.7:0.42   >=0.7:0.29   >=0.9:1.14   >=1.2:0.80
     extension_atr  <1.0:0.45   >=1.0:1.17   >=2.0:0.64   >=3.0:0.86
     accel          <0.7:0.53   >=0.7:0.56   >=1.0:1.00   >=1.5:0.76
 
-Contracting was meant to be good — it is worst. Not-yet-extended was meant to
-be good — it is worst. Decelerating was meant to be good — it is worst.
-**Three independent components, three reversals.** That is not a threshold
-mis-fit; the hypothesis is backwards for this strategy.
+All 235 rows fall inside the shape window, so these bands compare like with
+like. Contracting was meant to be good — worst. Not-yet-extended was meant to
+be good — worst. Decelerating was meant to be good — worst. Three components,
+three reversals.
 
-### What replaces it: MODERATE momentum, confirmed twice
+### Why this is PROVISIONAL, not settled
 
-    extension_atr  best at >=1.0 (1.17), falls to 0.64 by >=2.0
-    RSI (shorts)   best at 72-80,        falls to 0.465 by 85+
+**235 observations in ONE quiet regime.** Shape's premise is that
+consolidation precedes expansion — a low-ATR window is precisely where that
+would behave least like itself. The reversal is striking and it is not yet a
+refutation. Re-read it after a volatile stretch before removing anything.
 
-Both say the same thing: the bot fades moves that have STARTED but not
-FINISHED. Not coils, and not blow-offs. The operator's stated intuition —
-"consolidating before the breakout" — is not what this strategy profits from.
+Contrast CRT, which was closed on 575 observations spanning many regimes.
 
 ### The RSI floor is now the better-supported change
 
@@ -717,6 +730,23 @@ worked; the trade path read the nested key and silently recorded nothing.
 Fixed by copying the path fields into `entry_context` under `shape_`-prefixed
 names, plus `shape_ok` so the tool can tell "not recorded" from "computed and
 empty". A test pins BOTH readings so they can never be confused again.
+
+### The same bug, twice, in opposite directions (v3.86.2)
+
+v3.86.1 wrote the path shape into `entry_context` as `shape_compression`,
+`shape_extension_atr`, `shape_accel`. `score_shape.py` reads the BARE names.
+`shape_ok` happened to match, so the tool reported "193 trades, 34 with shape
+recorded" and printed an EMPTY rule table — the count worked, the rules did
+not.
+
+Two runs were spent reading that emptiness as "too early".
+
+`_ctx()` now tries the prefixed name first and the bare name second, so a
+journal containing rows from both versions scores whole. And a rule that
+keeps everything or nothing now SAYS SO instead of printing nothing — that
+silence is what disguised the mismatch. A tool that cannot tell "no data"
+from "no split" will hide the next one too.
+
 
 **Only trades entered after this deploy will score.** The refuted result
 above stands on its own — it comes from the shadow rows, which were never
