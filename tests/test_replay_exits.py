@@ -76,3 +76,22 @@ def test_use_trail_False_ignores_the_callback_entirely():
                         callback_pct=0.1, stop_pct=None, tp_pct=5.0,
                         use_trail=False)
     assert why == "timeout"
+
+
+def test_the_comparison_against_actual_is_PAIRED(capsys, tmp_path):
+    """
+    The same trade appears under every rule, so most of the variance is "which
+    trade was it" and cancels on differencing. Comparing the two
+    DISTRIBUTIONS gave t~1.0 on a difference that is far better determined
+    than that — the unpaired spread was measuring the wrong thing.
+    """
+    import inspect
+    src = inspect.getsource(re.main)
+    assert "PAIRED vs actual" in src
+    assert "x - y for x, y in zip" in src, "must difference PER TRADE"
+
+
+def test_the_paired_block_flags_intervals_that_exclude_zero():
+    import inspect
+    src = inspect.getsource(re.main)
+    assert "the 95% interval excludes zero" in src

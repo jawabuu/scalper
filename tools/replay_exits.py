@@ -205,6 +205,35 @@ def main() -> int:
     for k in ("actual", "trail only", "trail + TP", "TP only"):
         describe(k, *out[k])
 
+    # PAIRED comparison. The same trade appears under every rule, so the
+    # unpaired spread hugely overstates the uncertainty: most of the variance
+    # is "which trade was it", which cancels when you difference per trade.
+    # Comparing the two distributions instead gave t~1.0 on a difference that
+    # is much better determined than that.
+    import random
+    random.seed(7)
+    base = out["actual"][0]
+    if base:
+        print("\nPAIRED vs actual — same trade under both rules, "
+              "difference taken per trade")
+        print(f"  {'rule':<16}{'median diff':>13}{'mean diff':>11}"
+              f"{'95% CI on mean':>22}{'better':>8}")
+        for k in ("trail only", "trail + TP", "TP only"):
+            v = out[k][0]
+            if len(v) != len(base):
+                continue
+            d = [x - y for x, y in zip(v, base)]
+            boot = []
+            for _ in range(20000):
+                boot.append(st.mean([random.choice(d) for _ in d]))
+            boot.sort()
+            lo, hi = boot[500], boot[19500]
+            flag = "" if lo < 0 < hi else "  *"
+            print(f"  {k:<16}{st.median(d):>+13.3f}{st.mean(d):>+11.3f}"
+                  f"{f'[{lo:+.3f}, {hi:+.3f}]':>22}"
+                  f"{sum(1 for x in d if x > 0)/len(d):>7.0%}{flag}")
+        print("  * = the 95% interval excludes zero")
+
     print("""
 READ THIS BEFORE BELIEVING ANY OF IT
   Intra-candle order is unknown; a candle hitting both stop and target books
