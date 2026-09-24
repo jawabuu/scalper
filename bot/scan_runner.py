@@ -37,6 +37,10 @@ class ScanRunner:
         self.tracker = ScanTracker()
         # CRT sweep state per symbol, rebuilt every scan. Observational.
         self._crt: dict = {}
+        # Shape features per symbol, rebuilt every scan. Observational.
+        self._shape: dict = {}
+        # Bars of the ENTRY timeframe used for shape. See bot/shape.py.
+        self.shape_lookback = 12
         # How many entry-timeframe candles make one CRT range candle. 5 x 3m
         # = a 15m range, which is the shape the model is usually drawn on.
         self.crt_group = 5
@@ -330,6 +334,30 @@ class ScanRunner:
             except Exception as e:
                 log.debug(f"{sym}: CRT detection skipped ({e})")
                 self._crt.pop(sym, None)
+            # SHAPE — the path, not the point. Same candles, no extra request.
+            # Kept SEPARATE from CRT: CRT judges a sweep at a level, shape
+            # judges whether the move is coiling or already run.
+            #
+            # lookback is short ON PURPOSE. Median hold is 1.3 minutes, so a
+            # 30-bar window on 3m data describes ~20x the life of the trade.
+            # 12 bars is still long; it is the shortest that gives two halves
+            # worth comparing. Revisit with the timeframe, do not inherit it
+            # silently the way CRT's grouping did.
+            try:
+                from bot.shape import describe as _shape_describe
+                _tail = df.tail(self.shape_lookback)
+                self._shape[sym] = _shape_describe(
+                    [(0, float(r.high), float(r.low), float(r.close))
+                     for r in _tail.itertuples()],
+                    # atr_pct is not computed yet at this point in the loop,
+                    # so shape derives its own unit from mean true range over
+                    # the same window. Self-contained by design — the scale it
+                    # normalises by comes from the candles it was given.
+                    atr_pct=None,
+                    lookback=self.shape_lookback)
+            except Exception as e:
+                log.debug(f"{sym}: shape unavailable ({e})")
+                self._shape.pop(sym, None)
             try:
                 # Some ticker payloads omit high/low; derive them from the
                 # candles instead. The fetch window is sized to cover 24h
@@ -405,6 +433,7 @@ class ScanRunner:
                     "delta_note": str(d.note),
                 })
                 row.update(self._crt.get(row.get("symbol")) or {})
+                row.update(self._shape.get(row.get("symbol")) or {})
                 rows.append(row)
             # Regime context travels with the snapshot so every entry can be
         # stamped with the market conditions it was taken in.

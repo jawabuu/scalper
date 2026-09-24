@@ -3,6 +3,9 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.85.0 puts SHAPE into the factor report and adds the CROSS-INSTANCE
+comparison — the only entry split that is fair between live and demo.
+v3.84.0 adds SHAPE — the path, not the point. Recorded, NEVER gating.
 v3.83.1 CLOSES the last fork: jev's picks lose even with every advantage.
 v3.83.0 adds tools/compare_jev_picks.py.
 v3.82.1 records the GATE NEGATIVE RESULT — all four variants dead.
@@ -469,6 +472,120 @@ The rebuild produced 1,923 observations from 17,740 rows, where the old file
 had 218 from 2,064. Rows written BEFORE the v3.71 dedup collapse ~9.5:1
 (the scanner re-offered the same candidate repeatedly); rows written after
 are already unique and collapse ~1:1. Expect the ratio to keep falling.
+
+---
+
+## SHAPE: the path, not the point (v3.84.0) — recorded, NEVER gating
+
+### The gap it addresses
+
+Every field in `_candidate_state` is a SCALAR describing the PRESENT bar:
+rsi, atr_pct, body_pct, taper_ratio, turn_rise_pct. There is no sequence
+anywhere in it. **A chart is a PATH; the state is a POINT.**
+
+The operator's goal — "consolidating before the breakout rather than already
+extended" — is a statement about the last N bars. None of the ~40 entry fields
+can express it, which is consistent with the central finding that NOTHING in
+them separates a green start from a red one.
+
+### Computed in CODE, not asked of a model
+
+Range contraction, bar overlap and leg velocity are arithmetic. A decision
+model should never be spent on arithmetic, and a computed baseline is what any
+future model-judged shape question has to beat. jev's picks already lose with
+every advantage (2026-09-23), so the prior on a model reading a numeric
+sequence as *shape* is modest.
+
+### What `bot/shape.py` records
+
+    compression       recent half's range / earlier half's; <1 = contracting
+    overlap           mean bar-to-bar range overlap, 0-1; high = coiling
+    extension_atr     move over the window, in ATRs; high = already run
+    accel             last leg's pace / previous leg's; >1 = accelerating
+    leg_atr_per_bar   the raw pace `accel` is a ratio of
+    consolidating     contracting AND overlapping AND not extended
+    extended          moved far for the noise in the window
+
+Thresholds (`COMPRESSION_MAX 0.90`, `OVERLAP_MIN 0.35`, `EXTENDED_ATR 2.0`)
+are PLAIN starting values, not fitted. Components are carried RAW so they can
+be re-fitted from logged rows without re-running anything.
+
+### ATR-NORMALISED — the one setting that ports cleanly
+
+Demo's ATR is a measured **0.715x** live's for the same symbol (n=80 paired,
+2026-09-20 exports) and 0.751x (n=13, 2026-09-21). Two independent periods,
+same answer. Dividing by ATR IS that correction, so unlike every other
+ATR-derived setting a shape threshold means the same thing on both instances.
+
+### The horizon constraint is respected
+
+`shape_lookback = 12` bars, not 30. Median hold is 1.3 minutes; a 30-bar
+window on 3m data describes ~20x the life of the position. It does NOT
+silently inherit SCANNER_TIMEFRAME the way CRT's grouping did — revisit the
+lookback WITH the timeframe.
+
+### How it is scored
+
+`tools/resolve_shadow_outcomes.py` now splits by `shape_favours` AND by each
+raw component (`path_by_compression`, `path_by_extension_atr`,
+`path_by_accel`) at 1-3 minutes on adverse_pct and edge_ratio. The component
+buckets are what tell you whether the THRESHOLDS are wrong versus the IDEA —
+a label that never fires and a label that fires and does not predict look
+identical without them.
+
+`tools/score_shape.py` answers the second question: counterfactual net P&L if
+the bot had skipped entries shape did not favour, with a threshold sweep.
+
+### THE CAVEAT THAT GOVERNS THE OPERATOR'S ACTUAL GOAL
+
+The stated aim is that a reliable shape signal would let MORE coins in —
+relaxing 24h change and distance-to-extreme. **`score_shape.py` cannot answer
+that.** It scores a gate on trades already ENTERED, so it cannot see trades a
+shape gate would have ADDED, and it assumes a skipped trade returns exactly
+zero. It is an upper bound on the benefit of SKIPPING.
+
+Only the refused-candidate split can answer the admit-more question, because
+those are the coins that would be admitted. Use
+`resolve_shadow_outcomes.py`, not the P&L tool, for that decision.
+
+### Shape is the ONLY entry factor that compares fairly ACROSS instances
+
+Demo's ATR is a measured 0.715x live's for the same symbol. So:
+
+    by_atr          a "0.7-1.5%" demo bucket is a DIFFERENT market from the
+                    live bucket of the same name
+    by_change_24h   same problem, and each instance picks its own coins
+    by_rsi          RSI agrees to ~1 point, so this one is fair
+    SHAPE           ATR-normalised, so fair BY CONSTRUCTION
+
+**That is the contribution.** Every live-vs-demo comparison to date has been
+confounded by an ATR-derived dimension. Shape removes the confound rather than
+correcting for it afterwards.
+
+`tools/compare_shape.py live.csv demo.csv` reports each instance WITHIN
+cohort, using the FEE MULTIPLE (gross / fees) — the leverage-free measure from
+the demo-vs-live section, because fees scale with notional and notional scales
+with leverage, so leverage cancels. Do NOT compare net/trade across instances.
+
+    same cohort, different result -> execution/fees/leverage, NOT the market
+    cohorts differently POPULATED -> the scanner finds different shapes
+
+### In the factor report (v3.85.0)
+
+`by_compression`, `by_extension_atr`, `by_accel` and `by_shape_label` sit
+alongside `by_rsi` and `by_atr` in the same report. Bucket edges are in ATRs,
+never percent — a test pins that, because a percent edge would silently
+reintroduce the cross-instance problem.
+
+Trades entered before v3.84.0 appear as `not_recorded`, NOT dropped. Dropping
+them would make the recorded cohorts look like the whole sample.
+
+### Status
+
+Recorded on every scan row, every entry_context, and every shadow row.
+Nothing reads it to make a decision; a test asserts `evaluate_candidate` does
+not. Shape is stamped at SCAN time, so only trades entered after the deploy
+carry it — expect an empty score until then.
 
 ---
 

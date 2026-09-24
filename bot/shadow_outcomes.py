@@ -406,6 +406,41 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
         if p_:
             out["path_by_crt_agrees"][k] = p_
 
+    # SHAPE splits — the same treatment CRT gets, on the same horizons.
+    # `shape_favours` is the label; the buckets below are the raw components,
+    # because the label's thresholds are a guess and the components are not.
+    out["path_by_shape_favours"] = {}
+    seen_s = {}
+    for r in rows:
+        seen_s.setdefault(str((r.get("triggers") or {}).get("shape_favours")),
+                          []).append(r)
+    for k, v in sorted(seen_s.items()):
+        p_ = path(v)
+        if p_:
+            out["path_by_shape_favours"][k] = p_
+
+    # Component buckets. These are what tells you whether the THRESHOLDS are
+    # wrong versus the IDEA being wrong — a label that never fires and a label
+    # that fires and does not predict look identical without them.
+    def _bucket(field, edges):
+        b = {}
+        for r in rows:
+            v = (r.get("triggers") or {}).get(field)
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
+            lab = f"<{edges[0]}"
+            for e in edges:
+                if v >= e:
+                    lab = f">={e}"
+            b.setdefault(lab, []).append(r)
+        return {k: p_ for k, v in sorted(b.items()) if (p_ := path(v))}
+
+    out["path_by_compression"] = _bucket("shape_compression", [0.7, 0.9, 1.2])
+    out["path_by_extension_atr"] = _bucket("shape_extension_atr", [1.0, 2.0, 3.0])
+    out["path_by_accel"] = _bucket("shape_accel", [0.7, 1.0, 1.5])
+
     seen_v = {}
     for r in rows:
         seen_v.setdefault(r.get("jev_verdict", "?"), []).append(r)
@@ -449,6 +484,14 @@ def summarize(out_path: str = DEFAULT_OUT, horizon: int = 2) -> dict:
                         []).append(v)
     out["by_crt_agrees"] = {k: {"n": len(v), "median_favoured_pct": med(v)}
                             for k, v in sorted(seen.items())}
+    # Same treatment for shape, over the SAME (row, value) pairs so the two
+    # triggers are scored on identical observations.
+    _s = {}
+    for r, v in vals:
+        _s.setdefault(str((r.get("triggers") or {}).get("shape_favours")),
+                      []).append(v)
+    out["by_shape_favours"] = {k: {"n": len(v), "median_favoured_pct": med(v)}
+                               for k, v in sorted(_s.items())}
 
     # The baseline every structural trigger must beat: does simply waiting one
     # candle improve the price? Measured on the same observations, so it is a

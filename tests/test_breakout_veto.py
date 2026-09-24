@@ -7216,3 +7216,155 @@ def test_both_cards_now_agree_on_what_a_win_is():
     import bot.analysis as an
     src = inspect.getsource(an.group_stats)
     assert "_realised(t)" in src, "WIN RATE must use the net figure"
+
+
+# ── SHAPE: the path, not the point ──────────────────────────────────────────
+# Every field in _candidate_state is a scalar describing the PRESENT bar.
+# "Consolidating before the breakout rather than already extended" is a
+# statement about the last N bars, which is why none of the ~40 entry fields
+# separates a green start from a red one.
+#
+# Computed in code, not asked of a model: range contraction, bar overlap and
+# leg velocity are arithmetic, and a computed baseline is what any future
+# model-judged shape question has to beat.
+
+def _bars(seq):
+    return [(i, h, l, c) for i, (h, l, c) in enumerate(seq)]
+
+
+_COIL = [(102, 98, 100)] * 3 + [(101, 99, 100)] * 3 + [(100.5, 99.5, 100)] * 6
+_TREND = [(100 + i * 2, 99 + i * 2, 99.5 + i * 2) for i in range(12)]
+
+
+def test_a_coiling_window_reads_as_consolidating():
+    from bot.shape import describe, favours
+    d = describe(_bars(_COIL), atr_pct=1.0)
+    assert d["shape_ok"]
+    assert d["compression"] < 1.0, "second half should be narrower"
+    assert d["overlap"] > 0.5, "coiling bars sit on top of each other"
+    assert d["consolidating"] is True and d["extended"] is False
+    assert favours(d, "long") is True
+
+
+def test_a_trending_window_reads_as_extended():
+    from bot.shape import describe, favours
+    d = describe(_bars(_TREND), atr_pct=1.0)
+    assert d["overlap"] < 0.2, "a trend steps away, it does not overlap"
+    assert d["extension_atr"] > 2.0
+    assert d["consolidating"] is False and d["extended"] is True
+    assert favours(d, "short") is False
+
+
+def test_deceleration_is_visible_in_accel():
+    from bot.shape import describe
+    fast_then_slow = ([(100 + i * 3, 99 + i * 3, 99.5 + i * 3) for i in range(6)]
+                      + [(118 + i * .3, 117 + i * .3, 117.5 + i * .3)
+                         for i in range(6)])
+    assert describe(_bars(fast_then_slow), atr_pct=1.0)["accel"] < 1.0
+
+
+def test_everything_is_atr_normalised():
+    """
+    Demo's ATR is a measured 0.715-0.751x live's for the SAME symbol. Dividing
+    by ATR IS that correction, so a threshold ported between instances means
+    the same thing — unlike every other ATR-derived setting.
+    """
+    from bot.shape import describe
+    small = [(1.02, 0.98, 1.00)] * 6 + [(1.005, 0.995, 1.00)] * 6
+    big = [(v * 1000 for v in row) for row in small]
+    a = describe(_bars(small))
+    b = describe(_bars([tuple(r) for r in big]))
+    assert a["extension_atr"] == b["extension_atr"]
+    assert a["compression"] == b["compression"]
+
+
+def test_no_opinion_is_none_never_a_default():
+    from bot.shape import describe, favours
+    for junk in ([], None, [("x", "y", "z", "w")] * 12):
+        d = describe(junk)
+        assert d["shape_ok"] is False
+        assert d["consolidating"] is None
+        assert favours(d, "long") is None
+
+
+def test_shape_cannot_break_a_scan():
+    from bot.shape import describe
+    for junk in ([(0, 1, 1, 1)] * 12, [(0, 0, 0, 0)] * 12, [(0, 1, 2, 3)]):
+        assert describe(junk)["shape_ok"] in (True, False)
+
+
+def test_nothing_in_the_entry_path_reads_shape():
+    """Recorded only. A gate would destroy the measurement it exists to make."""
+    import inspect
+    import bot.auto_trader as at
+    src = inspect.getsource(at.evaluate_candidate)
+    for f in ("shape_favours", "consolidating", "extension_atr"):
+        assert f not in src, f"evaluate_candidate reads {f}"
+
+
+def test_the_scanner_computes_shape_without_an_extra_request():
+    import inspect
+    from bot.scan_runner import ScanRunner
+    src = inspect.getsource(ScanRunner)
+    assert "from bot.shape import describe as _shape_describe" in src
+    seg = src.split("_shape_describe")[1][:400]
+    assert "fetch_ohlcv" not in seg
+
+
+def test_the_outcome_summary_splits_on_shape_and_its_components():
+    """
+    The components matter as much as the label: a label that never fires and a
+    label that fires and does not predict look identical without them.
+    """
+    import inspect
+    import bot.shadow_outcomes as so
+    src = inspect.getsource(so)
+    for k in ("path_by_shape_favours", "by_shape_favours",
+              "path_by_compression", "path_by_extension_atr",
+              "path_by_accel"):
+        assert f'"{k}"' in src, k
+
+
+# ── Shape is the only entry factor that compares fairly ACROSS instances ────
+# Demo's ATR is a measured 0.715x live's for the same symbol (n=80 paired).
+# Every shape field is ATR-normalised, so dividing by ATR IS that correction.
+# by_atr and by_change_24h do NOT have this property.
+
+def test_the_factor_report_splits_on_shape():
+    import inspect
+    import bot.analysis as an
+    src = inspect.getsource(an)
+    for k in ("by_compression", "by_extension_atr", "by_accel",
+              "by_shape_label"):
+        assert f'"{k}"' in src, k
+
+
+def test_trades_without_shape_are_a_named_cohort_not_dropped():
+    """
+    Trades entered before v3.84.0 have no shape. Silently dropping them would
+    make the recorded cohorts look like the whole sample.
+    """
+    import inspect
+    import bot.analysis as an
+    assert '"not_recorded"' in inspect.getsource(an)
+
+
+def test_shape_buckets_are_atr_normalised_not_percent():
+    """
+    A bucket edge in ATRs means the same thing on both instances; one in
+    percent does not. Guards against someone 'simplifying' these to percents.
+    """
+    from bot.analysis import EXTENSION_BUCKETS
+    labels = " ".join(b.label for b in EXTENSION_BUCKETS)
+    assert "ATR" in labels and "%" not in labels
+
+
+def test_the_cross_instance_tool_uses_a_leverage_free_measure():
+    """
+    Fees scale with notional and notional scales with leverage, so leverage
+    multiplies gross AND fees equally. net/trade across instances is therefore
+    meaningless; the fee multiple is not.
+    """
+    src = __import__("pathlib").Path("tools/compare_shape.py").read_text()
+    assert "_fee_multiple" in src
+    assert "leverage cancels" in src or "leverage-free" in src

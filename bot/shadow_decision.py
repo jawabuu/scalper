@@ -491,6 +491,24 @@ def _triggers(row: dict, side: str) -> dict:
         out["crt_agrees"] = agrees(row, side)
     except Exception as e:
         log.debug(f"shadow decision: CRT trigger unavailable ({e})")
+
+    # SHAPE — the path, not the point (bot/shape.py). Every other field on
+    # this row describes the PRESENT bar; these describe the last 12.
+    #
+    # ATR-normalised, so the demo/live 0.715-0.751 factor is already divided
+    # out and a threshold ported between instances means the same thing.
+    #
+    # Components are carried RAW alongside the two labels so the thresholds
+    # can be re-fitted from logged rows without re-running anything.
+    for k in ("compression", "overlap", "extension_atr", "accel",
+              "leg_atr_per_bar", "consolidating", "extended", "shape_bars"):
+        out[f"shape_{k}" if not k.startswith("shape") else k] = row.get(k)
+    out["shape_favours"] = None
+    try:
+        from bot.shape import favours as _shape_favours
+        out["shape_favours"] = _shape_favours(row, side)
+    except Exception as e:
+        log.debug(f"shadow decision: shape trigger unavailable ({e})")
     return out
 
 

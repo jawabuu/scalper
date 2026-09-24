@@ -198,6 +198,25 @@ DIST_BUCKETS = [Bucket("<1%", 0, 1), Bucket("1-2%", 1, 2),
 # relationship is invisible while the bucket is open-ended, so it is split.
 # ATR is gated below by AUTO_MIN_ATR_PCT and not above on the auto-trade path,
 # which is the asymmetry these bands exist to test.
+# SHAPE buckets (bot/shape.py). These are the only entry-factor buckets that
+# compare CLEANLY ACROSS INSTANCES: every shape field is ATR-normalised, and
+# demo's ATR is a measured 0.715x live's for the same symbol (n=80 paired,
+# 2026-09-20 exports; 0.751 at n=13 on 2026-09-21). Dividing by ATR IS that
+# correction. `by_atr` and `by_change_24h` do NOT have this property — a
+# "0.7-1.5%" demo bucket is a different market from the live bucket of the
+# same name.
+COMPRESSION_BUCKETS = [Bucket("<0.6 tight", 0, 0.6), Bucket("0.6-0.9", 0.6, 0.9),
+                       Bucket("0.9-1.2 flat", 0.9, 1.2),
+                       Bucket("1.2+ expanding", 1.2, 999)]
+
+EXTENSION_BUCKETS = [Bucket("<1 ATR coiled", 0, 1), Bucket("1-2 ATR", 1, 2),
+                     Bucket("2-3 ATR run", 2, 3),
+                     Bucket("3+ ATR extended", 3, 999)]
+
+ACCEL_BUCKETS = [Bucket("<0.7 fading", 0, 0.7), Bucket("0.7-1.0", 0.7, 1.0),
+                 Bucket("1.0-1.5 building", 1.0, 1.5),
+                 Bucket("1.5+ accelerating", 1.5, 999)]
+
 ATR_BUCKETS = [Bucket("<0.3%", 0, 0.3), Bucket("0.3-0.7%", 0.3, 0.7),
                Bucket("0.7-1.5%", 0.7, 1.5), Bucket("1.5-2.5%", 1.5, 2.5),
                Bucket("2.5-4%", 2.5, 4), Bucket("4%+", 4, 999)]
@@ -1059,6 +1078,27 @@ def analyse(trades: list[dict]) -> dict:
         "by_distance_to_extreme": bucket_by(
             trades, lambda t: _stamp(t, "dist_to_extreme_pct"), DIST_BUCKETS),
         "by_atr": bucket_by(trades, lambda t: _stamp(t, "atr_pct"), ATR_BUCKETS),
+        # SHAPE — the path, not the point. Recorded only; nothing gates on it.
+        # `shape_ok` is False on trades entered before v3.84.0, so these are
+        # empty until the sample rebuilds. That is honest, not a fault.
+        "by_compression": bucket_by(
+            trades, lambda t: _stamp(t, "compression"), COMPRESSION_BUCKETS),
+        "by_extension_atr": bucket_by(
+            trades, lambda t: _stamp(t, "extension_atr"), EXTENSION_BUCKETS),
+        "by_accel": bucket_by(trades, lambda t: _stamp(t, "accel"),
+                              ACCEL_BUCKETS),
+        "by_shape_label": {
+            "consolidating": group_stats(
+                [t for t in trades if _ctx(t, "consolidating") is True]),
+            "extended": group_stats(
+                [t for t in trades if _ctx(t, "extended") is True]),
+            "neither": group_stats(
+                [t for t in trades
+                 if _ctx(t, "shape_ok") and _ctx(t, "consolidating") is False
+                 and _ctx(t, "extended") is False]),
+            "not_recorded": group_stats(
+                [t for t in trades if not _ctx(t, "shape_ok")]),
+        },
         "by_change_24h": bucket_by(
             trades, lambda t: _stamp(t, "change_24h_pct"), CHANGE_24H_BUCKETS),
         "by_exit_reason": exits,
