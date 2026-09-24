@@ -307,6 +307,7 @@ if __name__ == "__main__":
                     required_strength_sweeps=cfg.auto_strength_sweeps,
                     long_rsi_min=cfg.auto_long_rsi_min,
                     long_rsi_max=cfg.auto_long_rsi_max,
+                    short_rsi_max=cfg.auto_short_rsi_max,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     sessions=cfg.auto_sessions,

@@ -668,6 +668,17 @@ class BotConfig:
     kill_switch_on_start: bool = field(default_factory=lambda: _env_bool(
         "KILL_SWITCH_ON_START", False))
     auto_short_rsi_min: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MIN", 78.0))
+    # Ceiling for SHORTS. 0 = off, which is the historical behaviour.
+    #
+    # The code's stated thesis is that more overbought is a better fade. The
+    # refused-candidate data disagrees past ~80: RSI 80-85 forward move
+    # -0.017% (win 46%, edge 0.768) and 85+ -0.422% (win 36%, edge 0.436),
+    # against 75-80 at +0.032% (win 51%, edge 1.090). Independently, shorts
+    # at the very top of the 24h range do worst.
+    #
+    # Left OFF because n=35 across those two bands is thin. 80 is the value
+    # to test. Judge it from the factor report's by_rsi split, not from P&L.
+    auto_short_rsi_max: float = field(default_factory=lambda: _env_float("AUTO_SHORT_RSI_MAX", 0.0))
     auto_callback_ratio: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_RATIO", 0.5))
     auto_callback_atr_mult: float = field(default_factory=lambda: _env_float("AUTO_CALLBACK_ATR_MULT", 0.75))
     auto_daily_loss_limit_pct: float = field(default_factory=lambda: _env_float("AUTO_DAILY_LOSS_LIMIT_PCT", 5.0))

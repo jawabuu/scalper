@@ -37,6 +37,7 @@ def _long(**kw):
 
 # ── Entry rules ──────────────────────────────────────────────────────────────
 
+
 def test_short_meeting_all_rules_enters(cfg):
     d = evaluate_candidate(_short(), streak=2, cfg=cfg, atr_pct=0.5)
     assert d.enter and d.side == "short"
@@ -494,6 +495,51 @@ def test_long_above_the_ceiling_is_skipped():
     cfg = _band_cfg()
     d = evaluate_candidate(_long_row(58), streak=2, cfg=cfg, atr_pct=0.5)
     assert not d.enter and "above the long ceiling" in d.reason
+
+
+def _short_row(rsi):
+    return {"symbol": "X/USDT:USDT", "direction": "short", "rsi": rsi,
+            "gap_narrowing": True, "gap_rising": True,
+            "turn": {"turned_down": True, "bars_since_high": 4, "rise_pct": 1.2},
+            "atr_pct": 0.5, "pct_above_24h_low": 1.0,
+            "pct_below_24h_high": -1.0, "range_pos_24h": 0.95}
+
+
+def test_a_short_above_the_ceiling_is_skipped():
+    """
+    The module's thesis was that shorts need no ceiling — more overbought is a
+    better fade. Refused-candidate data, 2026-09-23, forward move at 2 min,
+    n=537 shorts:
+
+        RSI 72-75  n=174   +0.047%   win 54%   edge 1.029   <- refused today
+        RSI 75-80  n= 84   +0.032%   win 51%   edge 1.090
+        RSI 80-85  n= 24   -0.017%   win 46%   edge 0.768   <- accepted
+        RSI 85+    n= 11   -0.422%   win 36%   edge 0.436   <- accepted
+
+    It gets WORSE past ~80. The independent range_pos_24h gradient agrees:
+    shorts at the very top of the 24h range do worst.
+    """
+    cfg = AutoTradeConfig(short_rsi_min=75.0, short_rsi_max=80.0,
+                          max_dist_to_extreme_pct=3.0,
+                          required_strength_sweeps=2)
+    d = evaluate_candidate(_short_row(86), streak=2, cfg=cfg, atr_pct=0.5)
+    assert not d.enter and "above the short ceiling" in d.reason
+
+
+def test_a_short_below_the_ceiling_is_unaffected():
+    cfg = AutoTradeConfig(short_rsi_min=75.0, short_rsi_max=80.0,
+                          max_dist_to_extreme_pct=3.0,
+                          required_strength_sweeps=2)
+    d = evaluate_candidate(_short_row(78), streak=2, cfg=cfg, atr_pct=0.5)
+    assert "short ceiling" not in (d.reason or "")
+
+
+def test_the_short_ceiling_is_OFF_by_default():
+    # n=35 across the two high bands is thin. Changing default behaviour on 35
+    # observations is the error this investigation keeps catching.
+    assert AutoTradeConfig().short_rsi_max == 0.0
+    from bot.config import BotConfig
+    assert BotConfig().auto_short_rsi_max == 0.0
 
 
 def test_long_inside_the_band_is_taken():

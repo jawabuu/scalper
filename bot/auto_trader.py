@@ -90,6 +90,7 @@ class AutoTradeConfig:
     # profitable one; 50-60 lost 13 USDT per trade across 11 trades. 0 disables
     # the ceiling.
     long_rsi_max: float = 0.0
+    short_rsi_max: float = 0.0
     # Which directions may be traded: "all", "long" or "short". A fade
     # strategy's two halves can behave very differently in a given regime, so
     # being able to disable one without redeploying is worth having.
@@ -397,6 +398,30 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
         return AutoDecision(False, symbol, side,
                             reason=f"RSI {rsi} above the long ceiling of "
                                    f"{cfg.long_rsi_max}")
+
+    # SHORTS: the "unbounded above" thesis above is CONTRADICTED by the
+    # refused-candidate data. Forward move at 2 min, shadow log 2026-09-23,
+    # n=537 shorts:
+    #
+    #     RSI 70-72  n=244   -0.028%   win 48%   edge 0.727
+    #     RSI 72-75  n=174   +0.047%   win 54%   edge 1.029   <- REFUSED today
+    #     RSI 75-80  n= 84   +0.032%   win 51%   edge 1.090
+    #     RSI 80-85  n= 24   -0.017%   win 46%   edge 0.768   <- accepted
+    #     RSI 85+    n= 11   -0.422%   win 36%   edge 0.436   <- accepted
+    #
+    # More overbought is NOT a better fade past ~80; it is a worse one. That
+    # agrees with the independent range_pos_24h gradient (shorts at 0.99-1.01
+    # of the 24h range: +0.121%, 54% win; at 0.90-0.96: +0.264%, 68%) — at the
+    # very top the move is still extending and the fade is early.
+    #
+    # DEFAULT OFF (0.0). n=35 across the two high bands is thin, and a
+    # behaviour change on 35 observations is exactly the error this
+    # investigation keeps catching. Set AUTO_SHORT_RSI_MAX=80 to test it, and
+    # read the result from the factor report's by_rsi split, not from P&L.
+    if side == "short" and cfg.short_rsi_max and float(rsi) > cfg.short_rsi_max:
+        return AutoDecision(False, symbol, side,
+                            reason=f"RSI {rsi} above the short ceiling of "
+                                   f"{cfg.short_rsi_max}")
 
     # A wide EMA gap fits a blow-off top and a breakout equally well; what
     # separates them is whether the move is still expanding. Note this veto is
@@ -1161,6 +1186,7 @@ class AutoTrader:
         "required_strength_sweeps": (int, 1, 10),
         "long_rsi_min": (float, 0.0, 100.0),
         "long_rsi_max": (float, 0.0, 100.0),
+        "short_rsi_max": (float, 0.0, 100.0),
         # A string enum rather than a numeric range: the third element is the
         # set of allowed values instead of an upper bound.
         "directions": (str, None, ("all", "long", "short")),

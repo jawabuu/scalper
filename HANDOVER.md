@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.86.0 adds AUTO_SHORT_RSI_MAX (default OFF) — the refused-candidate data
+contradicts the "shorts need no ceiling" thesis.
 v3.85.0 puts SHAPE into the factor report and adds the CROSS-INSTANCE
 comparison — the only entry split that is fair between live and demo.
 v3.84.0 adds SHAPE — the path, not the point. Recorded, NEVER gating.
@@ -586,6 +588,64 @@ Recorded on every scan row, every entry_context, and every shadow row.
 Nothing reads it to make a decision; a test asserts `evaluate_candidate` does
 not. Shape is stamped at SCAN time, so only trades entered after the deploy
 carry it — expect an empty score until then.
+
+---
+
+## The RSI band: the gate is wrong at BOTH ends for shorts (v3.86.0)
+
+`rsi_band` is the single largest refusal reason — 36 of ~75 refusals across 40
+cycles. It had never been tested against outcomes. Joining the shadow
+decision log to forward returns (n=2,065 joined, 2-minute horizon):
+
+    SHORT  n=537                                 (gate: enter if RSI > 75)
+    RSI 70-72  n=244   -0.028%   win 48%   edge 0.727
+    RSI 72-75  n=174   +0.047%   win 54%   edge 1.029   <- REFUSED
+    RSI 75-80  n= 84   +0.032%   win 51%   edge 1.090   <- accepted
+    RSI 80-85  n= 24   -0.017%   win 46%   edge 0.768   <- accepted
+    RSI 85+    n= 11   -0.422%   win 36%   edge 0.436   <- accepted
+
+    LONG  n=1528                          (gate: enter if 45 <= RSI <= 52)
+    RSI 38-45  n=751   -0.021%   win 47%   edge 0.833
+    RSI 45-48  n=272   +0.034%   win 53%   edge 1.091   <- accepted
+    RSI 48-52  n=302   +0.011%   win 50%   edge 1.000   <- accepted
+    RSI 52-60  n=186   +0.000%   win 47%   edge 0.667
+
+**LONGS: the band is well chosen.** 45-52 brackets the best region on both
+sides. Nothing to change.
+
+**SHORTS: wrong at both ends.**
+- The floor rejects 72-75, which performs AS WELL AS OR BETTER THAN the band
+  it accepts (n=174, better median and win rate). Most of the largest refusal
+  category is being spent on candidates that were fine.
+- There is no ceiling, so 80+ is accepted and that is where performance
+  collapses. RSI 85+ is the worst band in the table by a wide margin.
+
+The module states the opposite thesis in a comment — "more overbought is a
+better fade". That is now contradicted by two INDEPENDENT measurements: this
+split, and the `range_pos_24h` gradient (shorts at 0.99-1.01 of the 24h range
++0.121%/54% vs +0.264%/68% at 0.90-0.96). Both say the same thing: at the
+very top the move is still extending and the fade is early.
+
+### What was built, and what deliberately was NOT
+
+`AUTO_SHORT_RSI_MAX`, **default 0.0 (off)**. n=35 across the two high bands
+is thin, and changing default behaviour on 35 observations is precisely the
+error this investigation keeps catching. 80 is the value to test.
+
+**The floor was NOT lowered.** 72-75 looks good on n=174, but lowering
+`AUTO_SHORT_RSI_MIN` admits ~174 more candidates per sample period and that
+is a volume change as much as a quality one. Test the ceiling FIRST, alone —
+two changes at once and neither is readable, which is the lesson from the
+multiplier experiment.
+
+Judge either from the factor report's `by_rsi` split, not from P&L.
+
+### Caveat on the bands
+
+These are all candidates the bot SKIPPED, for some reason. A band may be
+contaminated by other refusal reasons co-occurring (`no_turn`,
+`gap_not_rising`). Before acting on a band, check whether its candidates also
+failed those.
 
 ---
 
