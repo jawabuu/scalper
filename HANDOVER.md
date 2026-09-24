@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.87.0 adds tools/replay_exits.py — what the same entries would have done
+under different EXIT rules.
 v3.86.3 WITHDRAWS the "shape is refuted" overstatement — 2,166 of those rows
 predate shape, so the None baseline was a different market period.
 v3.86.2 fixes the SAME name mismatch in the other direction — score_shape.py
@@ -751,6 +753,52 @@ from "no split" will hide the next one too.
 **Only trades entered after this deploy will score.** The refuted result
 above stands on its own — it comes from the shadow rows, which were never
 affected.
+
+---
+
+## Replaying EXITS on real entries (v3.87.0)
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+        python tools/replay_exits.py --minutes 60 --tp-roi 15
+
+The question: how many winners were cut short by fail-fast and the profit
+floor, and would the adaptive trail alone — plus a take-profit — have done
+better?
+
+**The journal cannot answer this.** Once fail-fast cut a position at -5% ROI
+the path after that moment was never recorded. So the tool fetches 1-minute
+candles forward from each entry and replays the trade under rules that were
+not the ones that fired: `trail only`, `trail + TP`, `TP only`, against
+`actual` as the control.
+
+### Three structural reasons to distrust it
+
+1. **Intra-candle order is unknown.** When a candle would have hit BOTH a
+   stop and a target, the tool books the STOP, always. Pessimistic by
+   construction — a result that survives it means something, one that needs
+   the optimistic reading means nothing. This is the largest source of
+   self-deception in replays of this kind and there is a test pinning it for
+   both sides.
+2. **A trailing stop is tick-by-tick; this moves once a minute.** The
+   simulated trail lags the real one and gives back MORE than the exchange
+   would. Direction of the error is known, magnitude is not.
+3. **No slippage on simulated exits.** Live mark-vs-last is a median 0.068%
+   of price with a tail past 2%; the real side pays it and the simulated side
+   does not.
+
+Also: open trades and any newer than the window are excluded, so a losing
+streak still running is invisible.
+
+### What a result would mean
+
+If `trail only` beats `actual`, fail-fast and the profit floor are costing
+more than they save — plausible given fail-fast fires on ~35% of trades and
+peak_roi (which the floor keys on) is sampled and under-records.
+
+If `trail + TP` beats `trail only`, the trail is giving back too much at the
+top and a fixed target captures it. Note 15% ROI is 1.5% of price at 10x and
+0.75% at 20x — the SAME setting means different things per instance, so
+compare in price, never in ROI.
 
 ---
 
