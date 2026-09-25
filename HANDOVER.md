@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.90.0 RE-PLACES protective orders the exchange has killed. A live position
+ran unprotected and gave back 14.4 ROI points.
 v3.89.0 adds ENTRY_ORDER_TYPE=maker_limit and METHODOLOGY.md. THE STRATEGY IS
 FEE-BOUND, NOT SIGNAL-BOUND — read the methodology before proposing anything.
 v3.88.1 records the DERIVED stop and callback on adopted positions, so
@@ -876,6 +878,62 @@ If `trail + TP` beats `trail only`, the trail is giving back too much at the
 top and a fixed target captures it. Note 15% ROI is 1.5% of price at 10x and
 0.75% at 20x — the SAME setting means different things per instance, so
 compare in price, never in ROI.
+
+---
+
+## A LIVE POSITION RAN UNPROTECTED — PROTECTION-MISSING only logged (v3.90.0)
+
+BTW/USDT, live, 2026-09-25 14:46-14:52. **The most serious defect found in
+this investigation, and unlike the last one it is real.**
+
+    14:46:59  PROTECTION: 5 order(s)   all five tracked and present
+    14:50:28  PROTECTION: 4 order(s)   PROTECTION-MISSING adaptive
+    14:51:34  PROTECTION: 3 order(s)   PROTECTION-MISSING adaptive AND fixed
+    14:51:26  PEAK +7.8% ROI
+    14:52:32  CLOSED  final -6.6%   "MORE THAN THE TRAIL CAN EXPLAIN"
+
+The give-back line listed ALL FIVE ids as resting at the close. It could not
+be explained by the trail **because the trail was no longer there.**
+
+14.4 ROI points against a 3% callback. The armed trail had activated (peak
+crossed +5% at 14:47:47) and did not fire. The profit floor at +2% did not
+fire. Neither existed by then.
+
+### The defect
+
+`PROTECTION-MISSING` logged and did nothing. The guardian kept every id and
+kept asserting "adaptive and armed trails both resting, as arm-at-entry
+intends" — on orders the exchange had already dropped.
+
+### The fix, and why it is careful
+
+`_replace_if_dead` drops the id so the normal placement path re-creates it on
+the next cycle. But **absence from the listing is NOT enough to act on.**
+
+That listing reports `0 protective order(s)` on positions that demonstrably
+have five, because it cannot see the reduceOnly flag. Acting on absence alone
+would place duplicate stops on healthy positions. So it asks the ALGO BOOK
+(`_algo_status`, v3.78.0) for a terminal status and acts only on REJECTED /
+EXPIRED / CANCELED. An unreadable algo book, an unknown status, or a live
+order all change nothing.
+
+Capped at `MAX_REPLACEMENTS = 3` per position: an order the exchange keeps
+refusing must not be re-placed on every audit for the life of the trade.
+
+New log line to watch: **`PROTECTION-DEAD`**. It means a position was running
+with less protection than the guardian believed.
+
+### What this does NOT explain
+
+Why the orders died. They were accepted, confirmed resting, and then
+disappeared while the position was open — no cancel was issued by the
+guardian. Candidates: an exchange-side cancellation on margin change, the
+demo/live algo book expiring orders, or a sweep from another path. **Watch
+PROTECTION-DEAD for the status the exchange reports** — REJECTED and CANCELED
+point at different causes.
+
+Note also v3.78.0's `_verify_protection` runs ONCE, one cycle after
+placement. It cannot catch an order that dies later. This closes that gap.
 
 ---
 

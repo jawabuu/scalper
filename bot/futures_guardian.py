@@ -1013,6 +1013,57 @@ class FuturesGuardian:
         except (TypeError, ValueError, ZeroDivisionError):
             return None
 
+    # A protective order can be re-placed at most this many times per
+    # position. Without a cap, an order the exchange keeps refusing would be
+    # re-placed on every audit for the life of the trade.
+    MAX_REPLACEMENTS = 3
+
+    def _replace_if_dead(self, pos, state, name: str, oid: str) -> None:
+        """
+        A tracked protective order is absent from the listing. If the exchange
+        CONFIRMS it is terminal, drop the id so the normal placement path
+        re-creates it on the next cycle.
+
+        BTW/USDT 2026-09-25 is why this exists. The listing went 5 -> 4 -> 3
+        orders while the position was open; PROTECTION-MISSING fired for
+        `adaptive` and then `fixed`, and nothing acted on it. The position ran
+        to +7.8% ROI and closed at -6.6% — 14.4 points of give-back against a
+        3% callback — with the guardian still holding all five ids and
+        the give-back line reporting "more than the trail can explain". It
+        could not be explained by the trail because the trail was no longer
+        there.
+
+        ABSENCE FROM THE LISTING IS NOT ENOUGH. That listing is known
+        unreliable — it reports `0 protective order(s)` on positions that
+        demonstrably have five, because it cannot see the reduceOnly flag.
+        Acting on absence alone would place duplicate stops on a healthy
+        position. So this asks the ALGO BOOK for a terminal status and acts
+        only on REJECTED / EXPIRED / CANCELED.
+        """
+        attr = {"fixed": "stop_order_id", "adaptive": "adaptive_trail_id",
+                "armed": "native_trail_id", "floor": "floor_stop_id",
+                "floor_trail": "floor_trail_id"}.get(name)
+        if not attr:
+            return
+        done = getattr(state, "_replacements", 0)
+        if done >= self.MAX_REPLACEMENTS:
+            return
+        try:
+            status = self._algo_status(pos.symbol)
+        except Exception:
+            return
+        st = status.get(str(oid))
+        if st is None or st not in self._DEAD_ALGO:
+            return          # unknown, or still live — leave it alone
+        log.error(
+            f"PROTECTION-DEAD {pos.symbol}: {name} {oid} is {st} on the "
+            f"exchange while the position is OPEN. Dropping the id so it is "
+            f"re-placed. This position was running with LESS protection than "
+            f"the guardian believed.")
+        setattr(state, attr, None)
+        state._replacements = done + 1
+        self._record(pos.symbol, "protection_dead", f"{name} {st}, re-placing")
+
     def _is_manual(self, pos) -> bool:
         """
         True when this position was NOT opened by the auto-trader.
@@ -2224,6 +2275,7 @@ class FuturesGuardian:
                 log.warning(f"PROTECTION-MISSING {pos.symbol}: tracked {name} "
                             f"{oid} is not in the exchange's open orders — it "
                             f"filled, was cancelled, or the listing is blind.")
+                self._replace_if_dead(pos, state, name, oid)
         for o in prot:
             if o.get("id") and o["id"] not in tracked_ids:
                 log.warning(f"PROTECTION-UNTRACKED {pos.symbol}: protective "

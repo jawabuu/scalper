@@ -131,6 +131,10 @@ class GuardState:
     # Async verification bookkeeping — see FuturesGuardian._verify_protection.
     _verify_due: float = 0.0
     _verified: bool = False
+    # How many protective orders have been re-placed after being confirmed
+    # dead on the exchange. Capped so an order the exchange keeps refusing is
+    # not re-placed on every audit for the life of the position.
+    _replacements: int = 0
 
 
 @dataclass

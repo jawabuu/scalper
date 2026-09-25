@@ -3168,6 +3168,73 @@ def test_an_EXACT_handoff_is_never_overwritten_by_an_observation():
     assert ctx["sized_stop_roi"] == 33.0 and ctx["callback_pct"] == 1.11
 
 
+# ── PROTECTION-DEAD: re-place an order the exchange has killed ─────────────
+
+def _dead_setup(status, name="adaptive", oid="a-1"):
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    st = GuardState()
+    st.adaptive_trail_id = oid
+    st.stop_order_id = "f-1"
+    g._algo_status = lambda sym: status
+    g._replace_if_dead(pos, st, name, oid)
+    return st
+
+
+def test_an_order_CONFIRMED_dead_is_dropped_so_it_is_re_placed():
+    """
+    BTW/USDT 2026-09-25. The listing went 5 -> 4 -> 3 orders while the
+    position was open; PROTECTION-MISSING fired twice and nothing acted. The
+    position ran to +7.8% ROI and closed at -6.6% — 14.4 points of give-back
+    against a 3% callback — with the guardian still holding all five ids.
+    """
+    st = _dead_setup({"a-1": "CANCELED"})
+    assert st.adaptive_trail_id is None
+    assert st._replacements == 1
+
+
+def test_MERE_ABSENCE_from_the_listing_is_NOT_enough():
+    """
+    That listing reports "0 protective order(s)" on positions that
+    demonstrably have five — it cannot see the reduceOnly flag. Acting on
+    absence alone would place duplicate stops on a healthy position.
+    """
+    st = _dead_setup({})                     # algo book says nothing
+    assert st.adaptive_trail_id == "a-1"
+
+
+def test_an_order_STILL_LIVE_is_left_alone():
+    st = _dead_setup({"a-1": "NEW"})
+    assert st.adaptive_trail_id == "a-1"
+
+
+def test_replacement_is_CAPPED():
+    # An order the exchange keeps refusing must not be re-placed on every
+    # audit for the life of the position.
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    st = GuardState()
+    g._algo_status = lambda sym: {"a-1": "REJECTED"}
+    for _ in range(10):
+        st.adaptive_trail_id = "a-1"
+        g._replace_if_dead(pos, st, "adaptive", "a-1")
+    assert st._replacements == g.MAX_REPLACEMENTS
+
+
+def test_an_unreadable_algo_book_changes_nothing():
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    st = GuardState()
+    st.adaptive_trail_id = "a-1"
+    def boom(sym): raise RuntimeError("503")
+    g._algo_status = boom
+    g._replace_if_dead(pos, st, "adaptive", "a-1")
+    assert st.adaptive_trail_id == "a-1"
+
+
 # ── MANUAL_INITIAL_GUARD_ONLY — hand-opened trades, initial guard only ─────
 
 def _guard_with_ctx(ctx, flag=True):
