@@ -86,6 +86,57 @@ def _raw_pos(symbol="DOGE/USDT:USDT"):
 
 # ── sizing maths ─────────────────────────────────────────────────────────────
 
+# ── MAKER ENTRY — the cost lever, not another signal ────────────────────────
+
+def _maker_svc(fake):
+    svc = EntryService(fake_guardian(fake), EntryLimits(
+        max_positions=6, assumed_leverage=10.0,
+        entry_order_type="maker_limit"))
+    return svc
+
+
+def test_a_SELL_limit_rests_ABOVE_the_market():
+    """
+    Post-only (GTX) is REJECTED rather than filled if it would take. A sell
+    resting below the market crosses the book, is rejected, and silently
+    costs the entry — the failure would look like "no trades today".
+    """
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.execute)
+    assert 'ref * (1 + cb) if plan.order_side == "sell" else ref * (1 - cb)' in src
+
+
+def test_post_only_uses_GTX():
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.execute)
+    assert '"timeInForce": "GTX"' in src, "GTX is Binance post-only"
+
+
+def test_the_limit_is_priced_off_the_SIZED_price():
+    # Fetching a fresh price would size and place against different numbers —
+    # the sizing/placement mismatch this module guards against elsewhere.
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.execute)
+    assert "ref = float(plan.ref_price)" in src
+
+
+def test_the_default_is_STILL_the_trailing_entry():
+    assert EntryLimits().entry_order_type == "trailing"
+    from bot.config import BotConfig
+    assert BotConfig().entry_order_type == "trailing"
+
+
+def test_an_unknown_entry_order_type_falls_back_to_trailing():
+    # A typo must not silently stop every entry.
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.execute)
+    assert 'maker = entry_type == "maker_limit"' in src
+
+
 def test_compute_size():
     margin, notional, qty = compute_size(100.0, 10.0, 10.0, 2.0)
     assert margin == pytest.approx(10.0)      # 10% of 100

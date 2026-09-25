@@ -46,6 +46,10 @@ class EntryLimits:
     # (seen on demo for symbols with no open position). Zero means "not
     # declared" and the entry is refused rather than sized on a guess.
     assumed_leverage: float = 0.0
+    # "trailing" (TRAILING_STOP_MARKET, fires as MARKET, taker 0.05%) or
+    # "maker_limit" (post-only LIMIT at the same level, maker 0.02%).
+    # See config.entry_order_type for why this is the first lever to pull.
+    entry_order_type: str = "trailing"
     # Leverage to SET on the exchange before sizing. 0 leaves whatever the
     # symbol already has, which is Binance's per-symbol default for any pair
     # the account has not traded — usually 20x.
@@ -921,12 +925,63 @@ class EntryService:
             return {"ok": True, "dry_run": True, "plan": plan.as_dict(),
                     "message": "Dry run — no order sent."}
 
+        # MAKER ENTRY (ENTRY_ORDER_TYPE=maker_limit)
+        #
+        # A TRAILING_STOP_MARKET entry fires as a MARKET order and pays taker,
+        # 0.05%. A post-only LIMIT resting at the same retracement level pays
+        # maker, 0.02%. Round trip 0.07% instead of 0.10%.
+        #
+        # WHY THIS IS THE FIRST THING TO TRY. Measured on 388 live trades the
+        # fee is 0.0998% of price against a gross move of 0.1175% — 85% of the
+        # edge. Reaching gross/fee = 2.0 by SIGNAL needs the move to rise 70%;
+        # nine signal experiments moved it by at most ~10%. This is a
+        # DETERMINISTIC 30% cost cut requiring no forecast.
+        #
+        # The limit rests where the trailing entry would have triggered: for a
+        # short, ABOVE the market by callback%, which is a resting sell and
+        # therefore maker; for a long, BELOW it.
+        #
+        # THE REAL DIFFERENCE, and it is not a detail: a trailing entry's
+        # trigger FOLLOWS the extreme, a static limit does not. In a move that
+        # keeps running the limit is left behind and never fills. That is the
+        # thing to measure — fill rate, not just fee.
+        entry_type = str(getattr(self.limits, "entry_order_type",
+                                 "trailing")).lower()
+        maker = entry_type == "maker_limit"
         try:
-            order = self.guardian.exchange.create_order(
-                symbol=plan.symbol, type="TRAILING_STOP_MARKET",
-                side=plan.order_side, amount=plan.qty, price=None,
-                params={"callbackRate": plan.callback_pct, "reduceOnly": False},
-            )
+            if maker:
+                # The price the plan was SIZED from. Using a freshly fetched
+                # one would size and place against different numbers, which is
+                # the sizing/placement mismatch this module already guards
+                # against elsewhere.
+                ref = float(plan.ref_price)
+                cb = float(plan.callback_pct) / 100.0
+                # sell rests ABOVE, buy rests BELOW — anything else crosses the
+                # book, is rejected by GTX, and silently costs the entry.
+                px = ref * (1 + cb) if plan.order_side == "sell" else ref * (1 - cb)
+                px = float(self.guardian.exchange.price_to_precision(
+                    plan.symbol, px))
+                order = self.guardian.exchange.create_order(
+                    symbol=plan.symbol, type="LIMIT", side=plan.order_side,
+                    amount=plan.qty, price=px,
+                    # GTX is Binance post-only: the order is REJECTED rather
+                    # than filled if it would take. A rejection here is the
+                    # correct outcome — it means the price moved and the entry
+                    # would have paid taker.
+                    params={"timeInForce": "GTX", "reduceOnly": False},
+                )
+                log.warning(
+                    f"MAKER ENTRY {plan.side.upper()} {plan.symbol}: post-only "
+                    f"LIMIT {plan.order_side} {plan.qty} @ {px} "
+                    f"({plan.callback_pct}% from {ref}) — pays maker, not "
+                    f"taker. It may never fill; that is the trade-off.")
+            else:
+                order = self.guardian.exchange.create_order(
+                    symbol=plan.symbol, type="TRAILING_STOP_MARKET",
+                    side=plan.order_side, amount=plan.qty, price=None,
+                    params={"callbackRate": plan.callback_pct,
+                            "reduceOnly": False},
+                )
         except Exception as e:
             # An exchange rejection is a routine outcome, not a crash. A full
             # traceback buries the one useful part — Binance's own code and

@@ -180,6 +180,7 @@ if __name__ == "__main__":
             from bot.futures_entry import EntryService, EntryLimits
             from bot.api import set_entry_service
             entry_service = EntryService(guardian, EntryLimits(
+                entry_order_type=cfg.entry_order_type,
                 max_positions=cfg.entry_max_positions,
                 max_margin_pct=cfg.entry_max_margin_pct,
                 default_margin_pct=cfg.entry_default_margin_pct,

@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.89.0 adds ENTRY_ORDER_TYPE=maker_limit and METHODOLOGY.md. THE STRATEGY IS
+FEE-BOUND, NOT SIGNAL-BOUND — read the methodology before proposing anything.
 v3.88.1 records the DERIVED stop and callback on adopted positions, so
 manual trades can be replayed at all.
 v3.88.0 adds MANUAL_INITIAL_GUARD_ONLY — hand-opened trades run with the
@@ -874,6 +876,67 @@ If `trail + TP` beats `trail only`, the trail is giving back too much at the
 top and a fixed target captures it. Note 15% ROI is 1.5% of price at 10x and
 0.75% at 20x — the SAME setting means different things per instance, so
 compare in price, never in ROI.
+
+---
+
+## THE ACTUAL PROBLEM: the strategy is FEE-BOUND (2026-09-25)
+
+    LIVE   n=388   gross +0.1175%   fee 0.0998%   NET +0.0177%   fee = 85% of gross
+    DEMO   n=762   gross +0.0897%   fee 0.0998%   NET -0.0101%   fee = 111% of gross
+
+**The fee is 85% of the edge on live and more than 100% on demo.**
+
+NINE experiments, every one of them testing SIGNAL: CRT, jev verdict, jev
+confidence, jev components, jev picks as a strategy, room ahead, shape, the
+callback multiplier, exit rules. Zero wins. **Not one tested COST**, which is
+the larger term.
+
+    today               gross +0.1175   fee 0.0998   NET +0.0177
+    maker ENTRY         gross +0.1175   fee 0.0700   NET +0.0475    2.7x
+    maker BOTH sides    gross +0.1175   fee 0.0400   NET +0.0775    4.4x
+
+To reach gross/fee = 2.0 by SIGNAL the gross move must rise **+70%**. Nothing
+measured moved it more than ~10%. By COST it needs the fee at 0.0587% —
+maker both sides reaches 0.0400% and clears it.
+
+See **METHODOLOGY.md** (shipped in the repo root) for the full method: the
+single governing metric (`gross / fee`, leverage-free, target >= 2.0), the
+pre-registration format, the experiment queue in order of expected value, and
+what to stop doing.
+
+### Deployed: ENTRY_ORDER_TYPE=maker_limit (v3.89.0, default OFF)
+
+A `TRAILING_STOP_MARKET` entry fires as MARKET and pays taker 0.05%. A
+post-only `LIMIT` resting at the same retracement level pays maker 0.02%.
+Round trip 0.07% instead of 0.10%.
+
+    short -> the limit rests ABOVE the market by callback%  (resting sell)
+    long  -> BELOW  (resting buy)
+
+Priced off `plan.ref_price`, the price the plan was SIZED from — fetching a
+fresh one would size and place against different numbers. `timeInForce: GTX`
+is Binance post-only: REJECTED rather than filled if it would take, which is
+the correct outcome (it means the price moved and the entry would have paid
+taker).
+
+**THE TRADE-OFF IS FILL RATE, and it is the thing to measure.** A trailing
+entry's trigger FOLLOWS the extreme; a static limit does not, so in a move
+that keeps running the limit is left behind and never fills. An unfilled
+entry costs nothing — and 79% of current entries are underwater at first
+sight, so being structurally pickier may help twice — but it is also not a
+trade.
+
+    PRE-REGISTERED
+    HYPOTHESIS  fee/trade falls ~0.100% -> ~0.070% of price with no material
+                fall in gross move
+    METRIC      fee/notional per trade; gross/fee ratio
+    SIZE        100 trades
+    KILL        gross move falls >15%, or fill rate <50%
+
+Run it on DEMO first. If fills are too rare or the gross move collapses
+because the good entries are exactly the ones that run away, the honest
+conclusion is that this strategy is fee-bound at retail tier and the
+timeframe must lengthen until the move per trade is several times the cost.
 
 ---
 

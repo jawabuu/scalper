@@ -631,6 +631,23 @@ class BotConfig:
     # It can NEVER affect a bot trade: it requires this flag AND the absence
     # of `auto` in the entry context. A position whose context never arrived
     # is treated as UNKNOWN, not manual, and keeps full protection.
+    # trailing    (default) TRAILING_STOP_MARKET — fires as MARKET, pays
+    #             taker 0.05%
+    # maker_limit post-only LIMIT at the same retracement level — pays maker
+    #             0.02%, so the round trip is 0.07% instead of 0.10%
+    #
+    # Measured on 388 live trades: fee 0.0998% of price against a gross move
+    # of 0.1175%. The fee is 85% of the edge. Reaching gross/fee = 2.0 by
+    # SIGNAL needs the move to rise 70%; nine signal experiments moved it by
+    # at most ~10%. This is a deterministic 30% cost cut needing no forecast.
+    #
+    # The trade-off is FILL RATE, and it is the thing to measure. A trailing
+    # entry's trigger follows the extreme; a static limit does not, so in a
+    # move that keeps running it is left behind and never fills. An unfilled
+    # entry costs nothing, but it is also not a trade.
+    entry_order_type: str = field(default_factory=lambda: _env(
+        "ENTRY_ORDER_TYPE", "trailing").strip().lower())
+
     manual_initial_guard_only: bool = field(default_factory=lambda: _env_bool(
         "MANUAL_INITIAL_GUARD_ONLY", False))
 
