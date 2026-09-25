@@ -164,10 +164,17 @@ def report(groups: dict) -> None:
         g = groups[k]
         fs = [d["first_sight_px"] for d in g if d["first_sight_px"] is not None]
         under = (sum(1 for v in fs if v < 0) / len(fs)) if fs else float("nan")
+        # Every one of these can be empty for a legitimate cohort: manual
+        # (adopted) trades carry no drift_since_sizing_pct, and the two of
+        # them crashed this report on 2026-09-25. A reporting tool must not
+        # fall over on a cohort it was extended to show.
+        def _med(vals):
+            vals = [v for v in vals if v is not None]
+            return st.median(vals) if vals else float("nan")
         print(f"{_lbl(k):<12}{len(g):>5}"
-              f"{st.median([d['atr'] for d in g]):>10.3f}"
-              f"{st.median([d['lev'] for d in g]):>6.0f}"
-              f"{st.median([d['drift'] for d in g if d['drift'] is not None]):>9.3f}"
+              f"{_med([d['atr'] for d in g]):>10.3f}"
+              f"{_med([d['lev'] for d in g]):>6.0f}"
+              f"{_med([d['drift'] for d in g]):>9.3f}"
               f"{(st.median(fs) if fs else float('nan')):>13.3f}"
               f"{under:>11.0%}")
 
@@ -229,7 +236,10 @@ def warn(groups: dict) -> None:
         print("   within-instance comparison. Price % removes the direct effect")
         print("   but not the sizing and fee differences that come with it.")
 
-    atrs = {k: st.median([d["atr"] for d in groups[k]]) for k in keys}
+    def _m(vals):
+        vals = [v for v in vals if v is not None]
+        return st.median(vals) if vals else None
+    atrs = {k: _m([d["atr"] for d in groups[k]]) for k in keys}
 
     # The floor/ratio split is ENDOGENOUS. The floor binds when ATR is high
     # relative to the distance and the ratio wins when ATR is low, so "ratio"
@@ -296,7 +306,16 @@ def main() -> int:
     # can never be mistaken for a multiplier setting.
     merged = {}
     for r in rows:
-        key = round(r["mult"], 1) if r["mult"] is not None else r["src"]
+        # Bucket to the nearest 0.05, NOT to one decimal.
+        #
+        # A single setting does not produce a single ratio: callback_pct is
+        # rounded before storage, so AUTO_CALLBACK_ATR_MULT=0.75 shows up as
+        # 0.74/0.75/0.76. round(_,1) sent those to 0.7 AND 0.8 and reported
+        # one setting as two cohorts — 0.70 (n=13) and 0.80 (n=77) on live,
+        # 2026-09-25. Splitting a cohort halves its power and invents a
+        # difference between two halves of the same thing.
+        key = (round(r["mult"] * 20) / 20 if r["mult"] is not None
+               else r["src"])
         merged.setdefault(key, []).append(r)
 
     floor_keys = [k for k in merged if isinstance(k, float)]

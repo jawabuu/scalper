@@ -186,8 +186,10 @@ def test_the_regime_check_STILL_FIRES_when_a_third_cohort_exists(capsys, tmp_pat
     sys.argv = ["x", "--journal", str(j)]
     cc.main()
     out = capsys.readouterr().out
-    assert "MARKET REGIME DIFFERS between 0.60 and 1.20" in out or \
-           "MARKET REGIME DIFFERS between 1.20 and 0.60" in out
+    # 0.05 bucketing labels the cohort 1.25, not 1.20 — the setting's real
+    # value rather than a rounding of it.
+    assert "MARKET REGIME DIFFERS between 0.60 and 1.25" in out or \
+           "MARKET REGIME DIFFERS between 1.25 and 0.60" in out
 
 
 def test_a_missing_journal_is_not_a_crash(capsys, tmp_path):
