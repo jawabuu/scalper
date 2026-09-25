@@ -619,6 +619,21 @@ class BotConfig:
     # The gate is SYNCHRONOUS and adds 360-1200ms to an entry decision, on a
     # strategy whose median hold is under two minutes. It FAILS OPEN on every
     # error, timeout and outage — a provider going down must not halt trading.
+    # Run MANUALLY opened positions with the INITIAL GUARD ONLY: the adaptive
+    # trail and the fixed ATR stop, both exchange-side and placed at adoption.
+    # No fail-fast, no profit floor, no armed trail, no floor trail.
+    #
+    # For testing hypotheses by hand on a real account without the reactive
+    # mechanisms interfering. The replay work could only APPROXIMATE what they
+    # cost, because a 1m candle cannot reproduce a tick-by-tick trail; a real
+    # position under the real trail answers it directly.
+    #
+    # It can NEVER affect a bot trade: it requires this flag AND the absence
+    # of `auto` in the entry context. A position whose context never arrived
+    # is treated as UNKNOWN, not manual, and keeps full protection.
+    manual_initial_guard_only: bool = field(default_factory=lambda: _env_bool(
+        "MANUAL_INITIAL_GUARD_ONLY", False))
+
     shadow_gate_mode: str = field(default_factory=lambda: _env(
         "SHADOW_GATE_MODE", "off").strip().lower())
     # Symbols the futures scan must never surface, comma-separated. Matched on

@@ -256,6 +256,10 @@ class GuardConfig:
     # place per step. Set GUARD_RATCHET_ENABLED=true to restore it.
     ratchet_enabled: bool = False
     arm_at_entry: bool = True
+    # Manually opened positions run with the initial guard only — adaptive
+    # trail and fixed ATR stop, nothing reactive. Never affects a bot trade:
+    # see FuturesGuardian._reduced_guard.
+    manual_initial_guard_only: bool = False
     # Which price triggers a stop. Binance defaults to CONTRACT_PRICE — the
     # LAST TRADED price on this book, wick included. MARK_PRICE is an index
     # across venues with smoothing, and exists precisely so a single-venue

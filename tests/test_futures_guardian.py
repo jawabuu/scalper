@@ -5,10 +5,11 @@ Uses a fake exchange so the safety properties are verified as behaviour, not
 assumed: reduce-only on every order, place-then-cancel ordering, and never
 cancelling a non-reduce-only (entry) order.
 """
+import time
 import pytest
 
 from dataclasses import replace
-from bot.futures_guard import GuardConfig, price_for_roi, FuturesPosition
+from bot.futures_guard import GuardConfig, GuardState, price_for_roi, FuturesPosition
 from bot.futures_guardian import FuturesGuardian
 
 
@@ -3131,6 +3132,118 @@ def test_a_rejected_armed_trail_keeps_the_adaptive_trail():
     assert st.adaptive_trail_id == adaptive, \
         "live protection was cancelled for an order that does not exist"
     assert adaptive not in [o for o, _ in fake.cancelled]
+
+
+def test_an_ADOPTED_position_records_its_DERIVED_stop_and_callback():
+    """
+    An auto entry supplies sized_stop_roi and callback_pct via
+    note_entry_context; an adopted one has neither. The six manual trades of
+    2026-09-25 recorded both as None, so replay_exits.py — which reads
+    callback_pct to reconstruct the trail — could not replay them at all.
+    That is the one comparison MANUAL_INITIAL_GUARD_ONLY exists to make.
+    """
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake, adaptive=True)
+    pos = g.fetch_positions()[0]
+    g._pos_meta.setdefault(pos.symbol, {})["entry_context"] = {
+        "captured": "observed", "atr_pct": 1.0}
+    st = GuardState()
+    g._ensure_adaptive_trail(pos, st, stop_roi=20.0)
+    ctx = g._pos_meta[pos.symbol]["entry_context"]
+    assert ctx["sized_stop_roi"] == 20.0
+    assert ctx["callback_pct"] == 2.0          # 20 / 10x leverage
+    assert ctx["callback_source"] == "adaptive_derived"
+
+
+def test_an_EXACT_handoff_is_never_overwritten_by_an_observation():
+    # note_entry_context carries what the entry path actually sized from.
+    # An observation must not clobber it.
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake, adaptive=True)
+    pos = g.fetch_positions()[0]
+    g._pos_meta.setdefault(pos.symbol, {})["entry_context"] = {
+        "auto": True, "sized_stop_roi": 33.0, "callback_pct": 1.11}
+    g._ensure_adaptive_trail(pos, GuardState(), stop_roi=20.0)
+    ctx = g._pos_meta[pos.symbol]["entry_context"]
+    assert ctx["sized_stop_roi"] == 33.0 and ctx["callback_pct"] == 1.11
+
+
+# ── MANUAL_INITIAL_GUARD_ONLY — hand-opened trades, initial guard only ─────
+
+def _guard_with_ctx(ctx, flag=True):
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=100.0)
+    g = _guardian(fake)
+    g.cfg.manual_initial_guard_only = flag
+    pos = g.fetch_positions()[0]
+    # opened_seen_at must survive: fail-fast needs an age, and a helper that
+    # wipes it would make every fail-fast test pass for the wrong reason.
+    meta = dict(g._pos_meta.get(pos.symbol) or {})
+    # A real timestamp, not 0.0: the guardian guards with `if not opened`,
+    # so epoch zero reads as MISSING and every fail-fast test would pass for
+    # the wrong reason.
+    meta["opened_seen_at"] = time.time() - 300
+    if ctx is not None:
+        meta["entry_context"] = ctx
+    else:
+        meta.pop("entry_context", None)
+    g._pos_meta[pos.symbol] = meta
+    return g, pos
+
+
+def test_a_MANUAL_position_runs_with_the_initial_guard_only():
+    g, pos = _guard_with_ctx({"sized_price": 100.0})      # no `auto`
+    assert g._is_manual(pos) is True
+    assert g._reduced_guard(pos) is True
+
+
+def test_a_BOT_position_is_untouched():
+    """
+    The whole point is to change nothing for bot trades. `auto: True` is
+    stamped on every auto entry.
+    """
+    g, pos = _guard_with_ctx({"auto": True, "sized_price": 100.0})
+    assert g._is_manual(pos) is False
+    assert g._reduced_guard(pos) is False
+
+
+def test_a_MISSING_entry_context_is_UNKNOWN_not_manual():
+    """
+    Absence of a context is a missed handoff, not a hand-opened trade.
+    Reading it as manual would silently drop fail-fast and the profit floor
+    from a bot position — a far worse failure than the feature is worth.
+    """
+    g, pos = _guard_with_ctx(None)
+    assert g._is_manual(pos) is False
+    assert g._reduced_guard(pos) is False
+
+
+def test_the_flag_OFF_leaves_even_a_manual_position_fully_guarded():
+    g, pos = _guard_with_ctx({"sized_price": 100.0}, flag=False)
+    assert g._is_manual(pos) is True, "still recognised as manual"
+    assert g._reduced_guard(pos) is False, "but nothing changes with the flag off"
+
+
+def test_fail_fast_is_skipped_for_a_reduced_guard_position():
+    g, pos = _guard_with_ctx({"sized_price": 100.0})
+    st = GuardState()
+    st.peak_roi = 0.0
+    assert g._should_fail_fast(pos, st, current_roi=-20.0) is False
+
+
+def test_fail_fast_STILL_FIRES_for_a_bot_position():
+    # The gate must be the manual check, not a blanket disable.
+    g, pos = _guard_with_ctx({"auto": True, "sized_price": 100.0})
+    st = GuardState()
+    st.peak_roi = 0.0
+    st.roi_checkpoints = {"0": 0.0}
+    g.cfg.fail_fast_s = 60
+    g.cfg.fail_fast_loss_roi = 5.0
+    assert g._should_fail_fast(pos, st, current_roi=-20.0) is True
+
+
+def test_the_default_is_OFF():
+    from bot.config import BotConfig
+    assert BotConfig().manual_initial_guard_only is False
 
 
 def test_an_ASYNCHRONOUSLY_REJECTED_order_is_dropped_from_the_state():

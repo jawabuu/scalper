@@ -3,6 +3,10 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.88.1 records the DERIVED stop and callback on adopted positions, so
+manual trades can be replayed at all.
+v3.88.0 adds MANUAL_INITIAL_GUARD_ONLY — hand-opened trades run with the
+initial guard only, for testing exit hypotheses for real.
 v3.87.0 adds tools/replay_exits.py — what the same entries would have done
 under different EXIT rules.
 v3.86.3 WITHDRAWS the "shape is refuted" overstatement — 2,166 of those rows
@@ -753,6 +757,77 @@ from "no split" will hide the next one too.
 **Only trades entered after this deploy will score.** The refuted result
 above stands on its own — it comes from the shadow rows, which were never
 affected.
+
+---
+
+## MANUAL_INITIAL_GUARD_ONLY — hand-opened trades, initial guard only (v3.88.0)
+
+    KEPT     adaptive trail + fixed ATR stop — both exchange-side, placed at
+             adoption, no poll in the path
+    SKIPPED  fail-fast, profit floor, armed trail, floor trail
+
+Default OFF.
+
+### Why it exists
+
+`replay_exits.py` can only APPROXIMATE what the reactive mechanisms cost: a
+1-minute candle cannot reproduce a tick-by-tick trail, and its own headline
+moved 33 points on 4 of 200 trades. A real position under the real trail
+settles it. This makes that test possible on a live account, by hand, without
+touching what the bot does.
+
+### It can never affect a bot trade
+
+Two conditions, both required: the config flag AND the absence of `auto` in
+the entry context, which `auto_trader` stamps on every entry it makes.
+
+**A position whose entry context never arrived is UNKNOWN, not manual**, and
+keeps the full protection set. Reading a missed handoff as "hand-opened"
+would silently drop fail-fast and the profit floor from a bot position —
+far worse than the feature is worth. There is a test pinning it.
+
+### Two test-harness bugs worth remembering
+
+`opened_seen_at = 0.0` reads as MISSING, because the guardian guards with
+`if not opened`. A fixture using epoch zero makes every fail-fast test pass
+for the wrong reason.
+
+And a helper that REPLACES `_pos_meta` wipes `opened_seen_at` along with it.
+Both were caught by a test asserting fail-fast STILL FIRES on a bot position —
+without that, the gate could have disabled fail-fast for everything and the
+suite would have stayed green.
+
+### Adopted positions now record their DERIVED sizing (v3.88.1)
+
+An auto entry supplies `sized_stop_roi` and `callback_pct` through
+`note_entry_context`. An ADOPTED one has neither — the guardian derives the
+adaptive callback from its own ATR reading and never wrote it down.
+
+The six manual trades of 2026-09-25 recorded both as `None`:
+
+    PONS  +1.93 (peak 3.37)   LSK  +2.76 (4.94)   LSK  -4.70 (-0.00)
+    LTC   +2.66 (3.44)        SUI  +6.58 (9.58)   SUI  -3.29 (1.51)
+
+All six exited on the TRAIL, with no fail-fast and no profit floor — a
+preview of the v3.88.0 regime, and give-back from peak of ~1.4 to 3.0 ROI
+points on the winners. But `replay_exits.py` reads `callback_pct` to
+reconstruct the trail, so NONE of them could be replayed against alternative
+exits — the one comparison this feature exists to make.
+
+`_ensure_adaptive_trail` now writes `sized_stop_roi`, `callback_pct` and
+`callback_source: "adaptive_derived"` into the context, but ONLY where
+`captured == "observed"` and only where absent, so an exact handoff is never
+overwritten by an observation. Both directions have tests.
+
+`callback_source` distinguishes these from entry-path values, so an analysis
+that should not mix them can tell them apart.
+
+### Suggested use
+
+Open by hand on DEMO first and watch which order closes it. The question the
+replay could not answer is whether the real trail, moving tick-by-tick, gives
+back less than a 1-minute simulation says — the error direction is known, the
+magnitude is not.
 
 ---
 

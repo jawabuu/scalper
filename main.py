@@ -116,6 +116,7 @@ if __name__ == "__main__":
         rescue_trail_callback_pct=cfg.guard_rescue_trail_callback_pct,
         ratchet_enabled=cfg.guard_ratchet_enabled,
         arm_at_entry=cfg.guard_arm_at_entry,
+        manual_initial_guard_only=cfg.manual_initial_guard_only,
         stop_working_type=cfg.guard_stop_working_type,
         profit_floor_enabled=cfg.guard_profit_floor_enabled,
         taker_fee_rate=cfg.guard_taker_fee_rate,

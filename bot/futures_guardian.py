@@ -1013,6 +1013,50 @@ class FuturesGuardian:
         except (TypeError, ValueError, ZeroDivisionError):
             return None
 
+    def _is_manual(self, pos) -> bool:
+        """
+        True when this position was NOT opened by the auto-trader.
+
+        `entry_context` carries `auto: True` for every auto entry. A position
+        opened by hand — dashboard, exchange, or anything the guardian adopts
+        as UNTRACKED — has no such flag.
+
+        Absence is read as manual ONLY when an entry context exists at all.
+        A context the guardian never received is unknown, not manual, and
+        must keep the full protection set: silently dropping fail-fast on a
+        bot trade because a handoff was missed would be a serious failure,
+        and the whole point here is to change nothing for bot trades.
+        """
+        try:
+            meta = (self._pos_meta.get(pos.symbol) or {})
+            ctx = meta.get("entry_context")
+            if not ctx:
+                return False              # unknown, not manual
+            return not bool(ctx.get("auto"))
+        except Exception:
+            return False
+
+    def _reduced_guard(self, pos) -> bool:
+        """
+        Should this position run with the INITIAL GUARD ONLY?
+
+        That means the adaptive trail and the fixed ATR stop — placed at
+        adoption, exchange-side — and NOT fail-fast, NOT the profit floor,
+        NOT the armed trail.
+
+        Exists so hypotheses can be tested by hand on a live account without
+        the reactive mechanisms interfering. The replay work (v3.87.x) could
+        only ever approximate what those mechanisms cost, because a 1m candle
+        cannot reproduce a tick-by-tick trail; a real position under the real
+        trail answers it directly.
+
+        OFF by default, and it can never touch a bot trade: it requires BOTH
+        the config flag AND the absence of `auto` in the entry context.
+        """
+        if not getattr(self.cfg, "manual_initial_guard_only", False):
+            return False
+        return self._is_manual(pos)
+
     def _should_fail_fast(self, pos, state, current_roi: float) -> bool:
         """
         Cut a trade that never went green and is now losing.
@@ -1029,6 +1073,10 @@ class FuturesGuardian:
         """
         cfg = self.cfg
         if not getattr(cfg, "fail_fast_s", 0):
+            return False
+        if self._reduced_guard(pos):
+            # Manual position under MANUAL_INITIAL_GUARD_ONLY. The trail and
+            # the fixed stop still protect it; nothing reactive does.
             return False
         if state.peak_roi > _peak_ceiling(cfg):
             return False                      # it has been green — leave it
@@ -1812,6 +1860,8 @@ class FuturesGuardian:
         see. Both are reduceOnly and close the same direction; whichever fires
         first closes the position and the other is rejected harmlessly.
         """
+        if self._reduced_guard(pos):
+            return          # initial guard only — see _reduced_guard
         if not getattr(self.cfg, "arm_at_entry", False):
             return                              # GUARD_ARM_AT_ENTRY=false
         if not self.cfg.use_native_trail:
@@ -1887,6 +1937,8 @@ class FuturesGuardian:
         one closes the position and the other is left reduce-only against a
         flat position, which the exchange will not fill and the sweep cancels.
         """
+        if self._reduced_guard(pos):
+            return          # initial guard only — see _reduced_guard
         if not getattr(self.cfg, "floor_trail_enabled", False):
             return
         if state.floor_trail_id:
@@ -1965,6 +2017,26 @@ class FuturesGuardian:
             return
         lev = pos.effective_leverage or 1.0
         cb = round(abs(stop_roi) / lev, 2)
+        # Record the DERIVED figures on an observed (adopted) entry context.
+        #
+        # An auto entry supplies sized_stop_roi and callback_pct through
+        # note_entry_context; an adopted one has neither, so the six manual
+        # trades of 2026-09-25 recorded both as None. replay_exits.py reads
+        # callback_pct to reconstruct the trail, so those trades could not be
+        # replayed at all — the one comparison MANUAL_INITIAL_GUARD_ONLY
+        # exists to make.
+        #
+        # Written only where absent, so an exact handoff is never overwritten
+        # by an observation.
+        try:
+            _m = self._pos_meta.setdefault(pos.symbol, {})
+            _c = _m.setdefault("entry_context", {})
+            if _c.get("captured") == "observed":
+                _c.setdefault("sized_stop_roi", round(abs(stop_roi), 4))
+                _c.setdefault("callback_pct", cb)
+                _c.setdefault("callback_source", "adaptive_derived")
+        except Exception:
+            pass          # never let bookkeeping stop a trail being placed
         if cb < 0.1 or cb > 10:
             log.warning(f"{pos.symbol}: adaptive trail {cb}% outside the "
                         f"0.1-10% band — leaving the fixed stop alone")
@@ -2284,6 +2356,12 @@ class FuturesGuardian:
         position is OPEN) but NOT from reap_orphan_stops (which runs when the
         symbol has NO position), so it cannot outlive the trade.
         """
+        if self._reduced_guard(pos):
+            # Manual position under MANUAL_INITIAL_GUARD_ONLY: initial guard
+            # only. The floor is poll-driven and keys on peak_roi, which is
+            # SAMPLED and under-records by a median 9.55 ROI points — the
+            # single mechanism most worth testing without.
+            return
         if not getattr(self.cfg, "profit_floor_enabled", True):
             return
         if state.floor_stop_id:
