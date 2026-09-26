@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.90.1 records the FIRST INTERIM RESULT of the maker-entry experiment: fee
+0.0698% as forecast, fill rate 67%. Both criteria pass at n=12.
 v3.90.0 RE-PLACES protective orders the exchange has killed. A live position
 ran unprotected and gave back 14.4 ROI points.
 v3.89.0 adds ENTRY_ORDER_TYPE=maker_limit and METHODOLOGY.md. THE STRATEGY IS
@@ -956,6 +958,57 @@ the larger term.
 To reach gross/fee = 2.0 by SIGNAL the gross move must rise **+70%**. Nothing
 measured moved it more than ~10%. By COST it needs the fee at 0.0587% —
 maker both sides reaches 0.0400% and clears it.
+
+### INTERIM RESULT, 2026-09-26 (n=12 of a pre-registered 100)
+
+    FEE          prior 52 trades  0.1001% of notional
+                 last  12 trades  0.0698%      predicted 0.0700%
+                 every trade between 0.0691 and 0.0704
+
+**The fee half is BANKED.** It is arithmetic, not a sample: the entry fills as
+maker and the exit as taker, so 0.0700% holds in any market. A permanent
+30.3% cost cut.
+
+    FILL RATE    placed          18
+                 rejected -2021   2   would have crossed the book, correctly
+                                      refused by GTX — the mechanism working
+                 resting         16
+                 filled          12   75% of resting, 67% of attempts
+                 cancelled stale  5   TTL expired unfilled
+
+Passes the 50% kill threshold comfortably. Re-check at n=100: a TRENDING
+market is where a static limit gets left behind, and this window may not have
+been one.
+
+    GROSS        +0.3113% vs -0.3546% prior — ROSE. The hypothesis only
+                 required it not to FALL.
+
+### Do NOT read gross/fee = 2.14 as the result
+
+    same 12 trades at TAKER fees would be gross/fee   1.49
+    maker alone                          1.49 -> 2.14    (+43%)
+    the rest (1.49 vs -1.18 prior)                    MARKET
+
+**The strategy is 43% more efficient, not 43% more profitable.** The fee cut
+MULTIPLIES whatever the gross move is — it makes a good market better and a
+bad market no worse in ratio terms, but it does not manufacture edge. Gross
+remains the open problem, and it is exactly where the nine failed experiments
+were aimed.
+
+### The fill filter is also a SELECTION mechanism
+
+Trade count fell to ~12 in 5.5 hours, roughly half the prior rate. Part is
+the 67% fill rate; the operator notes volume had risen appreciably after
+`AUTO_SHORT_RSI_MIN=72` and `AUTO_CALLBACK_ATR_MULT=0.75`, so the reduction
+is welcome rather than a cost.
+
+Worth stating as a hypothesis for later, NOT a conclusion: a limit that fills
+is one where price came back to the level and paused. A limit left behind is
+one where price ran. Those are different populations, and the unfilled ones
+may be systematically worse OR better entries. 5 stale cancellations in 5.5
+hours is the observable; at n=100 it is worth comparing filled-versus-stale
+symbols against what they did afterwards.
+
 
 See **METHODOLOGY.md** (shipped in the repo root) for the full method: the
 single governing metric (`gross / fee`, leverage-free, target >= 2.0), the
