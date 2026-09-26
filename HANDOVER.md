@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.91.1 records the FIRST EXIT FINDING THAT SURVIVES A CONTROL: peak
+discriminates which fail-fast cuts were wrong.
 v3.90.1 records the FIRST INTERIM RESULT of the maker-entry experiment: fee
 0.0698% as forecast, fill rate 67%. Both criteria pass at n=12.
 v3.90.0 RE-PLACES protective orders the exchange has killed. A live position
@@ -936,6 +938,64 @@ point at different causes.
 
 Note also v3.78.0's `_verify_protection` runs ONCE, one cycle after
 placement. It cannot catch an order that dies later. This closes that gap.
+
+---
+
+## PEAK DISCRIMINATES which fail-fast cuts were wrong (2026-09-26)
+
+**The first exit finding in this investigation to survive a control.**
+
+`replay_exits.py --only-exit fail_fast --peak-band LO,HI`, 15 min forward:
+
+    band              n   better   median diff   mean diff [95% CI]
+    peak 0.1-3.0     36     67%      +0.149      +0.159 [-0.066, +0.384]
+    peak < 0.1       53     47%      -0.028      +0.018 [-0.175, +0.242]
+
+    difference in 'better': +19 points, z = 1.81, one-tailed p ~ 0.035
+    P(>=24 of 36 improve | coin flip) = 0.033
+
+**A trade that showed SOMETHING before turning down was worth holding. One
+that never went positive was not.** The control band was run specifically to
+break this and did not — it sits at 47%, indistinguishable from a coin flip,
+exactly where the full 200-trade replay sits (49%).
+
+### Why this is different from the other nine
+
+Every earlier candidate either had no mechanism (shape, room) or dissolved
+into a confound (jev, the ratio cohort). This one made a prediction about a
+SUBSET, was tested against the complement, and the complement behaved as the
+null. That is the shape of a real effect.
+
+### The change, and its cost
+
+    GUARD_FAIL_FAST_MAX_PEAK_ROI=0.1     (currently unset -> ties to
+                                          GUARD_BREAKEVEN_AT_ROI = 3.0)
+
+It stops cutting the 36 of 89 fail-fast exits (40%) whose peak sat between
+0.1 and 3.0.
+
+**IT OPENS A PROTECTION GAP, deliberately.** Today the fail-fast band
+(peak <= 3%) and the profit-floor band (peak >= 3%) MEET. At 0.1 a position
+peaking between 0.1% and 3% has NEITHER — it falls through to the adaptive
+trail alone. The startup warns about this. The replay says that band is where
+holding pays; the gap is the price.
+
+### Read the limits honestly
+
+The SHARE improving clears 0.05 (p=0.033). The SIZE does not — the paired
+interval includes zero on both bands. And the between-band difference is
+p~0.035 one-tailed, p~0.070 two-tailed, at n=36 vs 53.
+
+Also: `actual` on these subsets is 0% win BY CONSTRUCTION — fail-fast only
+fires on losers. `trail only` at 6% win is not a win-rate improvement; it is
+a smaller loss, -0.58% vs -0.67% median.
+
+### Do NOT deploy it yet
+
+The maker-entry experiment is at n=12 of a pre-registered 100. Two changes at
+once and neither is readable — the lesson from the callback multiplier. Let
+the cost work finish first; it is worth more (a permanent 30% cut, already
+banked) and it is arithmetic rather than a sample.
 
 ---
 
