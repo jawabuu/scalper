@@ -371,12 +371,14 @@ if __name__ == "__main__":
                             path=cfg.shadow_path, model=cfg.shadow_model,
                             max_per_minute=cfg.shadow_max_per_minute,
                             dedup_window=cfg.shadow_dedup_window_sec,
-                            gate_mode=cfg.shadow_gate_mode)
+                            gate_mode=cfg.shadow_gate_mode,
+                            ask_jev=cfg.shadow_ask_jev)
                         log.warning(
                             f"Shadow decision log ON (model={cfg.shadow_model}, "
                             f"path={cfg.shadow_path}, "
                             f"dedup={cfg.shadow_dedup_window_sec:.0f}s, "
-                            f"gate={cfg.shadow_gate_mode}) "
+                            f"gate={cfg.shadow_gate_mode}, "
+                            f"ask_jev={cfg.shadow_ask_jev}) "
                             f"— advisory only, "
                             f"per JEV-BRIEF.md. Read via GET /api/shadow.")
                     except Exception as e:

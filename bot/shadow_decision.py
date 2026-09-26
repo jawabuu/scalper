@@ -573,7 +573,8 @@ class ShadowDecisionLogger:
     def __init__(self, path: str = DEFAULT_PATH, model: str = "jev-latest",
                  max_per_minute: int = MAX_PER_MINUTE, client=None,
                  dedup_window: float = DEDUP_WINDOW_SEC,
-                 gate_mode: str = "off"):
+                 gate_mode: str = "off",
+                 ask_jev: bool = True):
         self.path = Path(path)
         self.model = model
         self.max_per_minute = max_per_minute
@@ -592,6 +593,7 @@ class ShadowDecisionLogger:
                         f"treating as 'off'. Valid: off, warn, block.")
             _m = "off"
         self.gate_mode = _m
+        self.ask_jev = bool(ask_jev)
         self.gate_seen = 0
         self.gate_blocked = 0
         self.gate_would_block = 0
@@ -841,6 +843,27 @@ class ShadowDecisionLogger:
         if bot_decision not in VALID_BOT_DECISIONS:
             log.debug(f"shadow decision: unknown bot_decision {bot_decision!r}")
             return
+        # RECORD-ONLY (SHADOW_ASK_JEV=false). Writes the decision row without
+        # calling the API at all.
+        #
+        # The jev VERDICT is dead: gating failed in four forms and trading its
+        # picks lost outright. But the ROW is not — it is the only record of
+        # candidates the bot REFUSED, and that dataset produced the RSI band
+        # finding (n=599 shorts) behind AUTO_SHORT_RSI_MIN=72. It also carries
+        # room_ahead, shape and the triggers, all of which
+        # resolve_shadow_outcomes scores WITHOUT needing a verdict.
+        #
+        # So: keep the dataset, stop spending credits on the part that failed.
+        if not self.ask_jev:
+            state = _candidate_state(symbol, side, row, snap or {})
+            if not self._state_is_new(symbol, side, state):
+                return
+            try:
+                self._write_record_only(symbol, side, bot_decision, state,
+                                        entry_order_id, _triggers(row, side))
+            except Exception as e:
+                log.debug(f"shadow record-only write failed: {_safe_err(e)}")
+            return
         client = self._get_client()
         if client is None:
             return
@@ -880,6 +903,32 @@ class ShadowDecisionLogger:
             args=(symbol, side, bot_decision, state, entry_order_id, triggers),
             daemon=True)
         t.start()
+
+    def _write_record_only(self, symbol, side, bot_decision, state,
+                           entry_order_id, triggers):
+        """
+        A decision row with NO jev fields. Verdict is UNKNOWN and the
+        component scores are absent, which is the honest representation —
+        writing a neutral 0.5 everywhere would put fabricated data in the
+        same file as measured data.
+
+        `resolve_shadow_outcomes` already skips UNKNOWN verdicts in
+        `by_verdict`, so these rows land in `path`, `by_room_ahead_atr`,
+        `path_by_compression` and the RSI joins, and stay out of the jev
+        splits. Nothing downstream needs a change.
+        """
+        rec = ShadowDecision(
+            ts=time.time(), symbol=symbol, side=side,
+            bot_decision=bot_decision, jev_verdict="UNKNOWN",
+            confidence=0.0,
+            # 0.0, not 0.5. A neutral-looking score would sit in the same file
+            # as measured ones and be indistinguishable from a real reading.
+            conviction=0.0, looks_exhausted=0.0, regime_aligned=0.0,
+            structure_intact=0.0, composed_score=0.0,
+            reasons=[], entry_order_id=entry_order_id,
+            model="none (record-only)", fingerprint=FINGERPRINT,
+            inputs_seen=state, triggers=triggers or {})
+        self._write(rec)
 
     def _run(self, symbol, side, bot_decision, state, entry_order_id,
              triggers=None):

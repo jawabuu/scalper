@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.92.0 adds SHADOW_ASK_JEV=false — keep the refused-candidate dataset
+without spending credits on a verdict that failed.
 v3.91.1 records the FIRST EXIT FINDING THAT SURVIVES A CONTROL: peak
 discriminates which fail-fast cuts were wrong.
 v3.90.1 records the FIRST INTERIM RESULT of the maker-entry experiment: fee
@@ -938,6 +940,40 @@ point at different causes.
 
 Note also v3.78.0's `_verify_protection` runs ONCE, one cycle after
 placement. It cannot catch an order that dies later. This closes that gap.
+
+---
+
+## SHADOW_ASK_JEV=false — keep the dataset, drop the verdict (v3.92.0)
+
+Writes the decision row WITHOUT calling the API. No credits, no 360-1200ms
+latency, no rate cap, no 503 backoff.
+
+**The VERDICT is dead** — gating failed in four forms (4.3% pass rate on the
+bot's own entries) and trading its picks lost outright.
+
+**The ROW is not.** It is the only record of candidates the bot REFUSED, and
+that dataset produced the RSI band finding (n=599 shorts) behind
+`AUTO_SHORT_RSI_MIN=72` and the 80+ ceiling case. It also carries
+`room_ahead`, shape and the triggers — all scored by
+`resolve_shadow_outcomes` without needing a verdict.
+
+    jev_verdict     "UNKNOWN"
+    all scores      0.0, NOT a neutral 0.5 — a neutral-looking score would sit
+                    in the same file as measured ones and be
+                    indistinguishable from a real reading
+    model           "none (record-only)"
+    inputs_seen     full
+    triggers        full
+
+`summarize()` already skips UNKNOWN in `by_verdict`, so these rows land in
+`path`, `by_room_ahead_atr`, `path_by_compression` and the RSI joins, and
+stay out of the jev splits. Nothing downstream changes.
+
+Dedup still applies: a free call is still a disk write, and an unchanged
+candidate is still noise.
+
+Default remains `true`. `SHADOW_ENABLED=false` still turns the whole thing
+off — this is the middle setting that was missing.
 
 ---
 

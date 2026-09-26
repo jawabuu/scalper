@@ -656,6 +656,69 @@ def test_backoff_never_touches_the_real_decision(tmp_path):
                                    bot_decision="SKIP") is None
 
 
+# ── RECORD-ONLY: keep the dataset, stop paying for the verdict ─────────────
+
+def test_record_only_writes_a_row_WITHOUT_calling_the_api(tmp_path):
+    """
+    The jev VERDICT is dead — gating failed in four forms and its picks lost.
+    But the ROW is the only record of REFUSED candidates, and that dataset
+    produced the RSI band finding behind AUTO_SHORT_RSI_MIN=72.
+    """
+    p = tmp_path / "s.jsonl"
+    c = _Client()
+    lg = ShadowDecisionLogger(path=str(p), client=c, ask_jev=False)
+    lg.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    time.sleep(0.2)
+    assert c.calls == [], "record-only must not spend a credit"
+    rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    assert len(rows) == 1
+    assert rows[0]["jev_verdict"] == "UNKNOWN"
+
+
+def test_record_only_keeps_the_INPUTS_and_TRIGGERS(tmp_path):
+    # These are what resolve_shadow_outcomes actually scores.
+    p = tmp_path / "s.jsonl"
+    lg = ShadowDecisionLogger(path=str(p), client=_Client(), ask_jev=False)
+    lg.decide_async("X/USDT:USDT", "short",
+                    _row(pct_above_24h_low=3.0), bot_decision="SKIP")
+    time.sleep(0.2)
+    r = json.loads(p.read_text().splitlines()[0])
+    assert r["inputs_seen"]["candidate"]["rsi"] is not None
+    assert r["triggers"]["room_ahead_atr"] is not None
+
+
+def test_record_only_scores_are_ZERO_not_a_neutral_0_5(tmp_path):
+    """
+    A neutral-looking 0.5 would sit in the same file as measured readings and
+    be indistinguishable from one. Fabricated data must not enter the dataset
+    that decides config changes.
+    """
+    p = tmp_path / "s.jsonl"
+    lg = ShadowDecisionLogger(path=str(p), client=_Client(), ask_jev=False)
+    lg.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    time.sleep(0.2)
+    r = json.loads(p.read_text().splitlines()[0])
+    for f in ("conviction", "looks_exhausted", "regime_aligned",
+              "structure_intact", "confidence"):
+        assert r[f] == 0.0, f
+    assert "record-only" in r["model"]
+
+
+def test_record_only_still_DEDUPES(tmp_path):
+    # Free calls are still disk writes; an unchanged candidate is still noise.
+    p = tmp_path / "s.jsonl"
+    lg = ShadowDecisionLogger(path=str(p), client=_Client(), ask_jev=False)
+    for _ in range(5):
+        lg.decide_async("X/USDT:USDT", "short", _row(), bot_decision="SKIP")
+    time.sleep(0.2)
+    assert len(p.read_text().strip().splitlines()) == 1
+
+
+def test_asking_jev_is_still_the_DEFAULT():
+    from bot.config import BotConfig
+    assert BotConfig().shadow_ask_jev is True
+
+
 # ── The GATE — the only path from jev to a real trade ───────────────────────
 
 def test_the_gate_is_OFF_by_default_and_costs_nothing(tmp_path):

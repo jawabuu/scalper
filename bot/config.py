@@ -651,6 +651,22 @@ class BotConfig:
     manual_initial_guard_only: bool = field(default_factory=lambda: _env_bool(
         "MANUAL_INITIAL_GUARD_ONLY", False))
 
+    # Ask jev, or just RECORD the candidate?
+    #
+    # false writes the decision row WITHOUT calling the API — no credits, no
+    # latency, no rate cap, no 503 backoff.
+    #
+    # The jev VERDICT is dead: gating failed in four forms (4.3% pass rate on
+    # the bot's own entries) and trading its picks lost outright. But the ROW
+    # is the only record of candidates the bot REFUSED, and that dataset
+    # produced the RSI band finding (n=599 shorts) behind
+    # AUTO_SHORT_RSI_MIN=72. It also carries room_ahead, shape and the
+    # triggers — all scored by resolve_shadow_outcomes WITHOUT a verdict.
+    #
+    # Keep the dataset, stop paying for the part that failed.
+    shadow_ask_jev: bool = field(default_factory=lambda: _env_bool(
+        "SHADOW_ASK_JEV", True))
+
     shadow_gate_mode: str = field(default_factory=lambda: _env(
         "SHADOW_GATE_MODE", "off").strip().lower())
     # Symbols the futures scan must never surface, comma-separated. Matched on
