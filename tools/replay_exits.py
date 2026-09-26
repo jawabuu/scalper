@@ -137,6 +137,16 @@ def main() -> int:
                    help="take-profit in ROI %% (default 15); converted to "
                         "price %% per trade using that trade's leverage")
     p.add_argument("--demo", action="store_true")
+    # Filters, so a rule change can be replayed on EXACTLY the trades it
+    # would affect. Raising GUARD_FAIL_FAST_MAX_PEAK_ROI from 3.0 to 0.1
+    # stops cutting the 40% of fail-fast exits whose peak sat between them —
+    # and the journal cannot say what those would have done, because
+    # fail-fast closes at -5% ROI regardless of peak, so every band shows the
+    # same final. Only a replay answers it.
+    p.add_argument("--only-exit", default=None,
+                   help="replay only trades with this exit_reason")
+    p.add_argument("--peak-band", default=None,
+                   help="LO,HI on peak_roi (ROI %%, as recorded)")
     p.add_argument("--limit", type=int, default=200,
                    help="most recent N trades (each costs one candle fetch)")
     args = p.parse_args()
@@ -153,6 +163,14 @@ def main() -> int:
     trades = [t for t in _rows(path)
               if _f(t.get("leverage")) and _f(t.get("entry_price"))
               and _f(t.get("opened_at")) and t.get("side")]
+    if args.only_exit:
+        trades = [t for t in trades
+                  if str(t.get("exit_reason")) == args.only_exit]
+    if args.peak_band:
+        lo, hi = (float(v) for v in args.peak_band.split(","))
+        trades = [t for t in trades
+                  if _f(t.get("peak_roi")) is not None
+                  and lo <= _f(t["peak_roi"]) < hi]
     trades = trades[-args.limit:]
     if not trades:
         print("no replayable trades (need leverage, entry_price, opened_at, side)")

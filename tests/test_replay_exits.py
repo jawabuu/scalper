@@ -95,3 +95,17 @@ def test_the_paired_block_flags_intervals_that_exclude_zero():
     import inspect
     src = inspect.getsource(re.main)
     assert "the 95% interval excludes zero" in src
+
+
+def test_the_replay_can_be_filtered_to_one_exit_reason_and_peak_band():
+    """
+    The journal cannot say what a fail-fast trade would have done uncut:
+    fail-fast closes at -5% ROI regardless of peak, so every peak band shows
+    the same final (-0.55% to -0.61% across all four, 2026-09-26). Only a
+    replay restricted to the affected subset answers it.
+    """
+    import inspect
+    src = inspect.getsource(re.main)
+    assert '--only-exit' in src and '--peak-band' in src
+    assert 'str(t.get("exit_reason")) == args.only_exit' in src
+    assert 'lo <= _f(t["peak_roi"]) < hi' in src
