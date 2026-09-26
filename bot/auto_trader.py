@@ -36,6 +36,11 @@ MIN_CALLBACK_PCT = 0.1
 MAX_CALLBACK_PCT = 5.0
 
 
+# How often to re-announce an active halt. Ten minutes: frequent enough that
+# four hours cannot pass unnoticed, rare enough not to bury the log.
+HALT_HEARTBEAT_S = 600.0
+
+
 @dataclass
 class AutoTradeConfig:
     enabled: bool = False
@@ -675,6 +680,9 @@ class SafetyState:
     failed_entry_rsi: dict[str, float] = field(default_factory=dict)
     reentries_today: dict[str, int] = field(default_factory=dict)
     halted_reason: str | None = None
+    # Heartbeat bookkeeping — see the halt branch in check_safety.
+    halted_since: float = 0.0
+    halted_last_log: float = 0.0
 
 
 # Hours east of UTC that the trading "day" rolls over on. The daily baseline
@@ -721,6 +729,8 @@ def roll_day(state: SafetyState, balance: float, now: float | None = None) -> Sa
         state.day_baseline_source = (
             "rollover" if (now - started) <= BASELINE_FRESH_S else "restart")
         state.halted_reason = None
+        state.halted_since = 0.0
+        state.halted_last_log = 0.0
         state.reentries_today = {}
     if state.day_start_balance <= 0:
         state.day_start_balance = balance
@@ -849,6 +859,25 @@ def check_safety(state: SafetyState, cfg: AutoTradeConfig, *, balance: float,
         state.halted_reason = None
 
     if state.halted_reason:
+        # HEARTBEAT. The halt used to log once when it fired and then return
+        # silently for the rest of the day, folded into the per-cycle refusal
+        # counter. An operator lost FOUR HOURS of trading on 2026-09-26
+        # without noticing — a halted bot and a quiet market look identical in
+        # the log.
+        #
+        # Silence is the wrong default for a state that blocks every trade.
+        now_ = _time.time()
+        since = now_ - float(getattr(state, "halted_since", 0) or now_)
+        if not getattr(state, "halted_since", 0):
+            state.halted_since = now_
+        last = float(getattr(state, "halted_last_log", 0) or 0)
+        if now_ - last >= HALT_HEARTBEAT_S:
+            state.halted_last_log = now_
+            _log.warning(
+                f"AUTO-TRADE STILL HALTED ({since/3600:.1f}h): "
+                f"{state.halted_reason}. No entries are being taken. Clears "
+                f"at the next trading-day rollover, or reset it from the "
+                f"dashboard.")
         return False, state.halted_reason
 
     # The limit trails the day's HIGH-WATER MARK, not the opening balance.

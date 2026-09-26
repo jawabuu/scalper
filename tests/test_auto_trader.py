@@ -143,6 +143,44 @@ def test_confirmed_counts_towards_the_streak():
 
 # ── Safety limits ────────────────────────────────────────────────────────────
 
+def test_an_active_halt_KEEPS_ANNOUNCING_ITSELF(caplog):
+    """
+    The halt logged ONCE when it fired and then returned silently for the rest
+    of the day, folded into the per-cycle refusal counter. An operator lost
+    FOUR HOURS of trading on 2026-09-26 without noticing — a halted bot and a
+    quiet market look identical in the log.
+    """
+    import logging
+    from bot.auto_trader import HALT_HEARTBEAT_S
+    a = _at(4494.25)
+    a._check_daily_drawdown(4260.0)
+    with caplog.at_level(logging.WARNING):
+        check_safety(a.state, a.cfg, balance=4260.0, open_positions=0,
+                     symbol="X")
+    assert "STILL HALTED" in caplog.text
+    assert "No entries are being taken" in caplog.text
+
+
+def test_the_heartbeat_does_not_fire_every_cycle(caplog):
+    # Every 2.5s would bury the log it is meant to surface.
+    import logging
+    a = _at(4494.25)
+    a._check_daily_drawdown(4260.0)
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            check_safety(a.state, a.cfg, balance=4260.0, open_positions=0,
+                         symbol="X")
+    assert caplog.text.count("STILL HALTED") == 1
+
+
+def test_the_heartbeat_reports_ELAPSED_time():
+    # "4.0h" is the number that would have caught this.
+    import inspect
+    from bot import auto_trader as at
+    src = inspect.getsource(at.check_safety)
+    assert "since/3600" in src
+
+
 def test_daily_loss_limit_halts_trading(cfg):
     st = roll_day(SafetyState(), 100.0)
     ok, why = check_safety(st, cfg, balance=94.0, open_positions=0, symbol="X")

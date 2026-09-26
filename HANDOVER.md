@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.92.1 makes an active DAILY HALT announce itself every 10 minutes. Four
+hours were lost unnoticed because it logged once and then went quiet.
 v3.92.0 adds SHADOW_ASK_JEV=false — keep the refused-candidate dataset
 without spending credits on a verdict that failed.
 v3.91.1 records the FIRST EXIT FINDING THAT SURVIVES A CONTROL: peak
@@ -974,6 +976,40 @@ candidate is still noise.
 
 Default remains `true`. `SHADOW_ENABLED=false` still turns the whole thing
 off — this is the middle setting that was missing.
+
+---
+
+## The daily halt was SILENT after it fired (v3.92.1)
+
+2026-09-26: one bad trade triggered the daily-loss halt and **four hours of
+trading were lost before anyone noticed.**
+
+The halt logged once when it fired, then every subsequent cycle returned
+`halted_reason` silently, folded into the per-cycle refusal counter. **A
+halted bot and a quiet market look identical in the log.**
+
+Now re-announced every `HALT_HEARTBEAT_S` (600s) with elapsed time:
+
+    AUTO-TRADE STILL HALTED (2.3h): daily loss limit hit: down 3.1% from the
+    high 4494.25 ... No entries are being taken. Clears at the next
+    trading-day rollover, or reset it from the dashboard.
+
+Ten minutes: frequent enough that four hours cannot pass unnoticed, rare
+enough not to bury the log. A test pins that it does NOT fire every cycle.
+
+### It also contaminates the maker fill-rate reading
+
+    cumulative   placed 33  filled 17   52%
+      yesterday  placed 18  filled 12   67%
+      SINCE      placed 15  filled  5   33%   <- includes the 4h halt
+
+**A halt cancels resting entry orders.** Any limit resting when it fired
+counts as placed-but-not-filled through no fault of the maker mechanism. The
+33% marginal rate is NOT a clean measurement and the "below the kill
+threshold" reading taken from it is WITHDRAWN.
+
+Re-measure on a window with no halt before deciding anything about
+`ENTRY_ORDER_TYPE=maker_limit`.
 
 ---
 
