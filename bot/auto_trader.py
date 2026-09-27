@@ -1617,12 +1617,23 @@ class AutoTrader:
                     self._skip_reasons[symbol] = (
                         f"deferred {defer:.0f}s — must keep qualifying")
                     self._record("entry_deferred", "first qualified", symbol)
+                    # LOG IT. _record writes to an in-memory list capped at 40
+                    # entries and _skip_reasons never reaches the log either,
+                    # so a defer that fires on every candidate was completely
+                    # invisible in `docker logs` — the same silence that hid a
+                    # four-hour halt on 2026-09-26. A gate that blocks entries
+                    # must be audible.
+                    _log.info(f"auto-trade: {symbol} DEFERRED — must keep "
+                              f"qualifying for {defer:.0f}s before an entry "
+                              f"is placed")
                     continue
                 waited = _time.time() - first
                 if waited < defer:
                     self._skip_reasons[symbol] = (
                         f"deferred, {defer - waited:.0f}s to go")
                     continue
+                _log.info(f"auto-trade: {symbol} defer satisfied — qualified "
+                          f"continuously for {waited:.0f}s, placing the entry")
 
             ok, why = check_safety(self.state, self.cfg, balance=balance,
                                    open_positions=len(positions), symbol=symbol,

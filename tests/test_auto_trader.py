@@ -145,6 +145,21 @@ def test_confirmed_counts_towards_the_streak():
 
 # ── ENTRY_DEFER_S — the fill-delay finding, as a placement delay ───────────
 
+def test_the_defer_is_AUDIBLE_in_the_log():
+    """
+    _record writes to an in-memory list capped at 40 entries, and
+    _skip_reasons never reaches the log either — so a defer firing on every
+    candidate was completely invisible in `docker logs`. Same silence that
+    hid a four-hour halt on 2026-09-26. A gate that blocks entries must be
+    audible.
+    """
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.run_once)
+    assert "DEFERRED — must keep" in src
+    assert "defer satisfied" in src, "the RELEASE must be visible too"
+
+
 def test_entry_defer_s_reaches_the_auto_trader():
     """
     ENTRY_DEFER_S lived in BotConfig with a 120.0 default and was read in
