@@ -62,6 +62,9 @@ class EntryLimits:
     atr_stop_mult: float = 0.0
     risk_pct: float = 1.0
     atr_stop_min_roi: float = 4.0
+    # Minimum stop distance in PRICE %, leverage-invariant. 0 = off.
+    # See the sizing block for the evidence.
+    atr_stop_min_price_pct: float = 0.0
     atr_stop_max_roi: float = 30.0
 
 
@@ -762,6 +765,35 @@ class EntryService:
             atr_pct = self._atr_pct(symbol)
             if atr_pct:
                 raw_roi = self.limits.atr_stop_mult * atr_pct * leverage
+                # FLOOR THE STOP IN PRICE TERMS, before the ROI bounds.
+                #
+                # margin = risk / (stop_roi/100), so a TIGHTER stop means a
+                # BIGGER position. A tighter stop in price is also easier to
+                # breach, and slippage past it scales with position size. The
+                # two errors compound, and the data says they compound exactly
+                # where the median gives no compensation. Bot trades only,
+                # n=308, sorted by margin:
+                #
+                #   quartile   margin   median px    net    avg loss
+                #   smallest     1.62     +0.186    -0.07    -0.160
+                #   2nd          2.83     +0.150    -2.50    -0.212
+                #   3rd          4.23     +0.141    -4.19    -0.288
+                #   largest      5.31     +0.164    -7.40    -0.443
+                #
+                # Medians FLAT, average loss 2.8x, net monotonically worse.
+                #
+                # Sizing off the stop is correct risk management and ASSUMES
+                # THE STOP HOLDS. On a stop this tight it demonstrably does
+                # not, which is why the assumption breaks. This refuses to
+                # size off a stop too tight to survive.
+                #
+                # In PRICE %, not ROI: a price floor is leverage-invariant,
+                # while atr_stop_min_roi means half the distance at 20x that
+                # it means at 10x.
+                floor_pct = float(getattr(self.limits,
+                                          "atr_stop_min_price_pct", 0.0) or 0.0)
+                if floor_pct > 0:
+                    raw_roi = max(raw_roi, floor_pct * leverage)
                 stop_roi_override = max(self.limits.atr_stop_min_roi,
                                         min(self.limits.atr_stop_max_roi, raw_roi))
             else:

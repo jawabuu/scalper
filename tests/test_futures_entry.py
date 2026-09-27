@@ -86,6 +86,53 @@ def _raw_pos(symbol="DOGE/USDT:USDT"):
 
 # ── sizing maths ─────────────────────────────────────────────────────────────
 
+# ── ATR_STOP_MIN_PRICE_PCT — stop the sizing rule betting most on the worst ─
+
+def test_a_tight_stop_is_FLOORED_in_price_terms():
+    """
+    margin = risk / (stop_roi/100): a TIGHTER stop means a BIGGER position. A
+    tighter stop is also easier to breach, and slippage past it scales with
+    size. Bot trades only, n=308, by margin quartile:
+
+        quartile   margin   median px    net    avg loss
+        smallest     1.62     +0.186    -0.07    -0.160
+        largest      5.31     +0.164    -7.40    -0.443
+
+    Medians FLAT, average loss 2.8x. Sizing off the stop ASSUMES THE STOP
+    HOLDS; on a stop this tight it does not.
+    """
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.preview)
+    assert "raw_roi = max(raw_roi, floor_pct * leverage)" in src
+
+
+def test_the_floor_is_in_PRICE_not_ROI():
+    # A price floor is leverage-invariant; atr_stop_min_roi means half the
+    # distance at 20x that it means at 10x.
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.preview)
+    i = src.index("floor_pct")
+    assert "leverage-invariant" in src[max(0, i-1400):i]
+
+
+def test_the_floor_applies_BEFORE_the_roi_bounds():
+    # Otherwise atr_stop_max_roi could clip it back and the floor would be a
+    # no-op on exactly the high-ATR coins where it matters least.
+    import inspect
+    from bot import futures_entry as fe
+    src = inspect.getsource(fe.EntryService.preview)
+    assert src.index("floor_pct * leverage") < src.index("atr_stop_max_roi, raw_roi")
+
+
+def test_the_floor_is_OFF_by_default():
+    from bot.config import BotConfig
+    from bot.futures_entry import EntryLimits
+    assert BotConfig().atr_stop_min_price_pct == 0.0
+    assert EntryLimits().atr_stop_min_price_pct == 0.0
+
+
 # ── MAKER ENTRY — the cost lever, not another signal ────────────────────────
 
 def _maker_svc(fake):

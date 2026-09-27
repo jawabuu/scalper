@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.94.0 adds ATR_STOP_MIN_PRICE_PCT — the sizing rule bets MOST on the trades
+that pay no better and lose 2.8x more.
 v3.93.0 makes ENTRY_DEFER_S actually work — it was DEAD CONFIG, and fixing it
 exposed a second bug that would have crashed the first deploy.
 v3.92.1 makes an active DAILY HALT announce itself every 10 minutes. Four
@@ -1012,6 +1014,64 @@ threshold" reading taken from it is WITHDRAWN.
 
 Re-measure on a window with no halt before deciding anything about
 `ENTRY_ORDER_TYPE=maker_limit`.
+
+---
+
+## THE SIZING RULE BETS MOST ON THE WORST TRADES (v3.94.0)
+
+**BOT trades only, n=308** (manual trades excluded — they are hand-sized and
+bypass ENTRY_MAX_MARGIN_PCT entirely, and they contaminated the first run of
+this analysis):
+
+    quartile    n   margin   median px     net    avg loss
+    smallest   77    1.62     +0.186     -0.07    -0.160
+    2nd        77    2.83     +0.150     -2.50    -0.212
+    3rd        77    4.23     +0.141     -4.19    -0.288
+    largest    77    5.31     +0.164     -7.40    -0.443
+
+**Medians FLAT (+0.141 to +0.186). Average loss 2.8x. Net monotonically
+worse.** Four bands, no reversals — the cleanest gradient in this
+investigation, and the explanatory variable is something the BOT controls,
+not something the market does.
+
+### The mechanism is arithmetic
+
+`margin = risk / (stop_roi/100)`. A tighter stop means a BIGGER position. A
+tighter stop in price is also easier to breach, and slippage past it scales
+with position size. They compound, and they compound precisely where the
+median gives no compensation.
+
+Sizing off the stop is correct risk management and **assumes the stop holds.**
+On a stop this tight it demonstrably does not — which is why the assumption
+breaks, and why the fix belongs at the sizing step rather than the stop.
+
+### Two ways to fix it — both shipped, use ONE
+
+    ENTRY_MAX_MARGIN_PCT=5        the symptom. One line, reversible.
+                                  Retrospective: -9.34 -> -7.19 (+2.15).
+
+    ATR_STOP_MIN_PRICE_PCT=1.0    the cause. Refuses to size off a stop too
+                                  tight to survive. Leverage-INVARIANT,
+                                  unlike atr_stop_min_roi which means half
+                                  the distance at 20x that it does at 10x.
+
+At 10x on a $91 wallet with 0.5% risk they are the SAME ceiling ($4.55). The
+price floor is the better permanent shape because it states the reason, and
+because it keeps meaning the same thing if leverage ever changes.
+
+Applied BEFORE the ROI bounds, so `atr_stop_max_roi` cannot clip it back.
+
+### Do NOT raise utilisation to compensate
+
+The account is flat 44.9% of the time and holds ONE position 50% of it; max
+concurrent ever observed is 2 against a limit of 6. That looks like idle
+capital, but expectancy is **-0.96% per unit of capital deployed**.
+Deployment MULTIPLIES expectancy. At 2x utilisation the account goes from
+-10.3% to -20.5%.
+
+Idle capital is not waste while expectancy is negative — it is the only thing
+limiting the loss. Raise utilisation AFTER net/trade crosses zero, never
+before.
 
 ---
 

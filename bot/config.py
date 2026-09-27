@@ -349,6 +349,19 @@ class BotConfig:
     atr_timeframe: str = field(default_factory=lambda: _env(
         "ATR_TIMEFRAME", _env("SCANNER_TIMEFRAME", "3m")))
     atr_stop_min_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MIN_ROI", 4.0))
+    # Minimum stop distance in PRICE %, leverage-invariant. 0 = off.
+    #
+    # margin = risk / (stop_roi/100): a tighter stop means a BIGGER position.
+    # A tighter stop is also easier to breach, and slippage past it scales
+    # with size. Bot trades only, n=308, by margin quartile: medians FLAT
+    # (+0.141 to +0.186), average loss 2.8x (-0.160 -> -0.443), net
+    # monotonically worse (-0.07 -> -7.40).
+    #
+    # 1.0 caps margin at risk/(1.0*lev/100) — at 10x and 0.5% of a $91
+    # wallet that is $4.55, the same ceiling as ENTRY_MAX_MARGIN_PCT=5 but
+    # expressed as a cause rather than a symptom, and leverage-invariant.
+    atr_stop_min_price_pct: float = field(default_factory=lambda: _env_float(
+        "ATR_STOP_MIN_PRICE_PCT", 0.0))
     atr_stop_max_roi: float = field(default_factory=lambda: _env_float("ATR_STOP_MAX_ROI", 30.0))
     # Close a position discovered ALREADY past its stop. The loss level has been
     # breached, so closing is what the stop was for; trailing it instead protects

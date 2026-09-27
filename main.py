@@ -189,6 +189,7 @@ if __name__ == "__main__":
                 target_leverage=cfg.entry_target_leverage,
                 atr_stop_mult=cfg.atr_stop_mult,
                 atr_stop_min_roi=cfg.atr_stop_min_roi,
+                atr_stop_min_price_pct=cfg.atr_stop_min_price_pct,
                 atr_stop_max_roi=cfg.atr_stop_max_roi,
                 risk_pct=cfg.entry_risk_pct,
             ))
