@@ -143,6 +143,42 @@ def test_confirmed_counts_towards_the_streak():
 
 # ── Safety limits ────────────────────────────────────────────────────────────
 
+# ── ENTRY_DEFER_S — the fill-delay finding, as a placement delay ───────────
+
+def test_entry_defer_s_reaches_the_auto_trader():
+    """
+    ENTRY_DEFER_S lived in BotConfig with a 120.0 default and was read in
+    run_once via getattr(self.cfg, "entry_defer_s", 0.0) — but the field was
+    never declared on AutoTradeConfig and never passed from main.py, so it
+    resolved to 0 and the defer NEVER RAN. Dead config with a live-looking
+    default.
+    """
+    assert hasattr(AutoTradeConfig(), "entry_defer_s")
+    import inspect, pathlib
+    main = (pathlib.Path(__file__).resolve().parents[1] / "main.py").read_text()
+    assert "entry_defer_s=cfg.entry_defer_s" in main
+
+
+def test_qualified_since_is_initialised_on_the_AUTOTRADER():
+    """
+    run_once has always read self._qualified_since, but it was only ever
+    initialised on StrengthTracker. The first deploy with a non-zero
+    entry_defer_s would have raised AttributeError — the dead config was the
+    only thing keeping that unreachable.
+    """
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader.__init__)
+    assert "self._qualified_since" in src
+
+
+def test_the_defer_default_is_two_minutes():
+    # 0-2 min fills: median +0.066% of price, which does NOT clear a 0.070%
+    # fee. 2-6 min: +0.213%, clearing it 3.0x. n=282, one-tailed p=0.033.
+    from bot.config import BotConfig
+    assert BotConfig().entry_defer_s == 120.0
+
+
 def test_an_active_halt_KEEPS_ANNOUNCING_ITSELF(caplog):
     """
     The halt logged ONCE when it fired and then returned silently for the rest

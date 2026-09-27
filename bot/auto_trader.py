@@ -96,6 +96,29 @@ class AutoTradeConfig:
     # the ceiling.
     long_rsi_max: float = 0.0
     short_rsi_max: float = 0.0
+    # Hold a qualifying candidate for this long before placing the entry.
+    #
+    # ENTRY_DEFER_S existed in BotConfig with a 120.0 default and was read
+    # here via getattr(..., 0.0) — but the field was never declared on this
+    # dataclass and never passed from main.py, so it silently resolved to 0
+    # and the defer NEVER RAN. Dead config with a live-looking default.
+    #
+    # Fill-delay evidence, n=282 (2026-09-26), price % net of leverage:
+    #     0-2 min    n=105   median +0.066%   win 53%   does NOT clear the fee
+    #     2-6 min    n=121   median +0.213%   win 65%   clears it 3.0x
+    #     6-12 min   n= 55   median +0.208%   win 62%   clears it 3.0x
+    #     z = 1.84 on the win rate, one-tailed p = 0.033
+    #
+    # A fill inside two minutes means price came to the limit IMMEDIATELY —
+    # for a short, it kept rising hard into the sell. That is a blow-off being
+    # faded too early, the same thing RSI 85+ and extension_atr >= 2.0 showed.
+    #
+    # NOTE this defers PLACEMENT, not fill. A fill cannot be refused
+    # retroactively — by then the position exists and closing it pays a round
+    # trip for nothing. Deferring placement filters the same cases by a
+    # different route: a candidate that would have filled instantly either
+    # stops qualifying, or is entered later at a level price came back to.
+    entry_defer_s: float = 0.0
     # Which directions may be traded: "all", "long" or "short". A fade
     # strategy's two halves can behave very differently in a given regime, so
     # being able to disable one without redeploying is worth having.
@@ -598,6 +621,10 @@ class StrengthTracker:
 
     def __init__(self):
         self._streaks: dict[str, int] = {}
+        # symbol -> when it FIRST qualified in an unbroken run. Cleared the
+        # moment it stops qualifying, so the defer measures CONTINUOUS
+        # qualification, not elapsed time since first sighting.
+        self._qualified_since: dict[str, float] = {}
         # The scan these streaks were last advanced on, so a repeated read of
         # an unchanged snapshot cannot inflate them.
         self._last_scan_ts: float | None = None
@@ -1006,6 +1033,17 @@ class AutoTrader:
         self._last_run: float = 0.0
         # Which RULE refused candidates last cycle, for the dashboard.
         self._last_refusals: dict[str, int] = {}
+        # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
+        #
+        # run_once has always read this, but it was only ever initialised on
+        # StrengthTracker — so `self._qualified_since.get(symbol)` here would
+        # raise AttributeError the first time entry_defer_s was non-zero.
+        # It never was, because the config was dead (declared in BotConfig,
+        # never declared on AutoTradeConfig, resolved to 0 via getattr). Two
+        # bugs hiding each other: the dead config kept the missing attribute
+        # unreachable, and the missing attribute would have crashed the first
+        # deploy that fixed the config.
+        self._qualified_since: dict[str, float] = {}
         # Optional live-price feed, set by main.py. None means every decision
         # uses the scan snapshot, which is the behaviour this replaced.
         self.stream = None
@@ -1516,6 +1554,13 @@ class AutoTrader:
             decision = evaluate_candidate(
                 row, streak, self.cfg, atr_pct=row.get("atr_pct"))
             if not decision.enter:
+                # The defer clock measures CONTINUOUS qualification. A
+                # candidate that stops qualifying starts again from zero —
+                # otherwise "deferred 2 minutes" would mean "qualified once,
+                # two minutes ago", which is a far weaker filter and would
+                # admit exactly the fast-moving setups the defer exists to
+                # exclude.
+                self._qualified_since.pop(symbol, None)
                 # Record WHY. Rule-level refusals were previously silent, so a
                 # dashboard full of candidates with no entries gave no clue
                 # whether the bot was broken or the rules simply did not match.
@@ -1540,6 +1585,44 @@ class AutoTrader:
                         pass
                 continue
             self._skip_reasons.pop(symbol, None)
+
+            # DEFERRED PLACEMENT. Hold a qualifying candidate for
+            # ENTRY_DEFER_S before placing, and require it to keep qualifying
+            # throughout — the clock resets the moment it stops.
+            #
+            # WHY. Measured on 282 trades, split by the delay between sizing
+            # and fill:
+            #
+            #     0-2 min   n=105   median +0.066% px   win 53%
+            #     2-6 min   n=121   median +0.213% px   win 65%
+            #     6-12 min  n= 55   median +0.208% px   win 62%
+            #
+            #     z = 1.84 on the win rate, one-tailed p = 0.033
+            #
+            # At a ~0.070% round trip the 0-2 minute band DOES NOT CLEAR THE
+            # FEE; the others clear it 3x. A fill inside two minutes means
+            # price ran straight into the limit — for a short, it kept rising
+            # hard into the sell. That is a blow-off being faded too early,
+            # the same thing RSI 85+ and extension_atr >= 2.0 both showed.
+            #
+            # The fill delay itself is an OUTCOME and cannot be required.
+            # Deferring PLACEMENT is the controllable version: a setup that
+            # would have filled instantly either stops qualifying, or is
+            # entered later at a level price genuinely came back to.
+            defer = float(getattr(self.cfg, "entry_defer_s", 0.0) or 0.0)
+            if defer > 0:
+                first = self._qualified_since.get(symbol)
+                if not first:
+                    self._qualified_since[symbol] = _time.time()
+                    self._skip_reasons[symbol] = (
+                        f"deferred {defer:.0f}s — must keep qualifying")
+                    self._record("entry_deferred", "first qualified", symbol)
+                    continue
+                waited = _time.time() - first
+                if waited < defer:
+                    self._skip_reasons[symbol] = (
+                        f"deferred, {defer - waited:.0f}s to go")
+                    continue
 
             ok, why = check_safety(self.state, self.cfg, balance=balance,
                                    open_positions=len(positions), symbol=symbol,
@@ -1590,6 +1673,7 @@ class AutoTrader:
             # Route through the SAME preview/execute path a manual entry uses,
             # so every guardrail (margin cap, leverage resolution, duplicate
             # position check) applies identically.
+            self._qualified_since.pop(symbol, None)
             prev = self.entry.preview(symbol=symbol, side=side,
                                       callback_pct=decision.callback_pct)
             if not prev.get("ok"):

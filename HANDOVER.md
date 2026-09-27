@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.93.0 makes ENTRY_DEFER_S actually work — it was DEAD CONFIG, and fixing it
+exposed a second bug that would have crashed the first deploy.
 v3.92.1 makes an active DAILY HALT announce itself every 10 minutes. Four
 hours were lost unnoticed because it logged once and then went quiet.
 v3.92.0 adds SHADOW_ASK_JEV=false — keep the refused-candidate dataset
@@ -1010,6 +1012,58 @@ threshold" reading taken from it is WITHDRAWN.
 
 Re-measure on a window with no halt before deciding anything about
 `ENTRY_ORDER_TYPE=maker_limit`.
+
+---
+
+## FAST FILLS DO NOT CLEAR THE FEE (2026-09-26) — and ENTRY_DEFER_S was dead
+
+    fill delay        n   median px%   win    vs fee (0.070%)
+    0-2 min         105     +0.066     53%    does NOT clear it
+    2-6 min         121     +0.213     65%    clears 3.0x
+    6-12 min         55     +0.208     62%    clears 3.0x
+
+    z = 1.84 on the win rate, one-tailed p = 0.033.  Median 3.2x apart.
+
+**A fill inside two minutes means price came to the limit IMMEDIATELY** — for
+a short, it kept rising hard into the sell. That is a blow-off being faded too
+early, and it agrees with the two other findings that survived: RSI 85+ is the
+worst band, and `extension_atr >= 2.0` is worse than `>= 1.0`. Moderate
+momentum, not blow-offs.
+
+It may also explain the callback multiplier result: 1.25 filled deeper
+(drift -0.669% vs -0.282%) and therefore SLOWER, and it was the only cohort
+that cleared its own fees.
+
+### It defers PLACEMENT, not fill
+
+A fill cannot be refused retroactively — by then the position exists and
+closing it pays a round trip for nothing, on 105 of 282 trades. Deferring
+placement filters the same cases by another route: a candidate that would
+have filled instantly either stops qualifying, or is entered later at a level
+price genuinely came back to.
+
+### TWO BUGS HIDING EACH OTHER
+
+1. `ENTRY_DEFER_S` was declared in `BotConfig` with a 120.0 default, read in
+   run_once via `getattr(self.cfg, "entry_defer_s", 0.0)` — and **never
+   declared on `AutoTradeConfig` or passed from main.py.** It resolved to 0.
+   The defer never ran. Dead config with a live-looking default.
+2. `self._qualified_since` was read in run_once but **only ever initialised
+   on `StrengthTracker`.** The first deploy with a non-zero defer would have
+   raised AttributeError.
+
+The dead config kept the missing attribute unreachable; the missing attribute
+would have crashed the first deploy that fixed the config. Found by the
+existing `test_every_attribute_run_once_uses_is_initialised` guard, which is
+worth keeping for exactly this.
+
+Both fixed. `ENTRY_DEFER_S=120` now takes effect.
+
+### Expect fewer entries
+
+A candidate must keep qualifying for 120s. Watch `entry_deferred` in the
+refusal counts, and re-read the fill-delay split in a few days — the 0-2
+minute band should empty out.
 
 ---
 

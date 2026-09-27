@@ -645,6 +645,31 @@ class BotConfig:
     # entry's trigger follows the extreme; a static limit does not, so in a
     # move that keeps running it is left behind and never fills. An unfilled
     # entry costs nothing, but it is also not a trade.
+    # Hold a qualifying candidate this long BEFORE placing the entry, and
+    # require it to keep qualifying throughout — the clock resets the moment
+    # it stops.
+    #
+    # Measured on 282 trades, split by sizing-to-fill delay:
+    #     0-2 min   n=105   median +0.066% px   win 53%   <- does NOT clear fees
+    #     2-6 min   n=121   median +0.213% px   win 65%
+    #     6-12 min  n= 55   median +0.208% px   win 62%
+    #   z = 1.84 on win rate, one-tailed p = 0.033
+    #
+    # At a ~0.070% round trip the fast band does not pay for itself. A fill
+    # inside two minutes means price ran straight into the limit — a blow-off
+    # being faded too early, matching what RSI 85+ and extension_atr >= 2.0
+    # showed.
+    #
+    # The fill delay is an OUTCOME and cannot be required. Deferring
+    # PLACEMENT is the controllable version.
+    #
+    # NOTE this defaults ON at 120s, unlike every other experiment here. It
+    # rests on the largest single effect measured in this investigation
+    # (3.2x on the median), but it is still ONE sample — revert to 0 if entry
+    # volume collapses.
+    entry_defer_s: float = field(default_factory=lambda: _env_float(
+        "ENTRY_DEFER_S", 120.0))
+
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())
 

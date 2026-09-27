@@ -310,6 +310,7 @@ if __name__ == "__main__":
                     long_rsi_min=cfg.auto_long_rsi_min,
                     long_rsi_max=cfg.auto_long_rsi_max,
                     short_rsi_max=cfg.auto_short_rsi_max,
+                    entry_defer_s=cfg.entry_defer_s,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     sessions=cfg.auto_sessions,
