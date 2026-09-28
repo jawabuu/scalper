@@ -2764,7 +2764,8 @@ class FuturesGuardian:
         state, stop_price, reason = evaluate(
             pos, price, state, self.cfg,
             initial_stop_override=_stop_roi_used,
-            atr_pct=_atr_pct, recent_tr_pct=_recent_tr_pct)
+            atr_pct=_atr_pct, recent_tr_pct=_recent_tr_pct,
+            reduced_guard=self._reduced_guard(pos))
 
         # peak_roi is MONOTONIC, so one bad price pins it for the life of the
         # position and every later decision is taken against it. 牛来 reached a

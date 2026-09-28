@@ -3,6 +3,8 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.94.1 fixes MANUAL_INITIAL_GUARD_ONLY missing the BREAKEVEN RATCHET — a
+manual position still had its stop moved to a profit lock.
 v3.94.0 adds ATR_STOP_MIN_PRICE_PCT — the sizing rule bets MOST on the trades
 that pay no better and lose 2.8x more.
 v3.93.0 makes ENTRY_DEFER_S actually work — it was DEAD CONFIG, and fixing it
@@ -812,6 +814,32 @@ And a helper that REPLACES `_pos_meta` wipes `opened_seen_at` along with it.
 Both were caught by a test asserting fail-fast STILL FIRES on a bot position —
 without that, the gate could have disabled fail-fast for everything and the
 suite would have stayed green.
+
+### It missed the breakeven ratchet (fixed v3.94.1)
+
+QNT 2026-09-28, `manual_initial_guard_only = True`:
+
+    12:15:54  PEAK +1.3% -> +3.3% ROI
+    12:15:54  Placed stop trigger=242.97
+    12:15:55  Cancelled ALGO order ...729
+    12:15:55  initial protective stop at +2.0% ROI | ROI now +3.3%
+
+The FIXED stop was moved from -14.8% ROI to +2.0% once peak crossed
+`GUARD_BREAKEVEN_AT_ROI=3`, and that is what closed the trade at +1.48%.
+
+The first implementation gated `_ensure_profit_floor`, `_arm_at_entry`,
+`_place_floor_trail` and `_should_fail_fast` — and missed this one **because
+it lives in a pure function (`desired_stop_roi`) rather than a placement
+method.** The give-back line showed only `{fixed, adaptive}` resting, which
+looked correct; the fixed stop had simply moved.
+
+"Bounded only by the initial trailing stop" has to mean the stop does not
+MOVE either. `reduced_guard` is now threaded through `evaluate()` into
+`desired_stop_roi`.
+
+**Lesson for any future exemption**: enumerate by EFFECT, not by method name.
+Four placement sites were gated and the fifth mechanism was an arithmetic
+branch.
 
 ### Adopted positions now record their DERIVED sizing (v3.88.1)
 

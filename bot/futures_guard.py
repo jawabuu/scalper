@@ -645,7 +645,8 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
                      initial_stop_override: float | None = None,
                      leverage: float = 0.0,
                      atr_pct: float | None = None,
-                     recent_tr_pct: float | None = None) -> float:
+                     recent_tr_pct: float | None = None,
+                     reduced_guard: bool = False) -> float:
     """
     The ROI level the protective stop should sit at, given the peak seen so far.
 
@@ -661,7 +662,17 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
     # Breakeven step: the trade has shown a real gain, so stop giving it back
     # all the way to the initial loss level. Only ever tightens — the caller's
     # monotonic check prevents this from loosening an already-higher stop.
-    if cfg.breakeven_at_roi and state.peak_roi >= cfg.breakeven_at_roi:
+    # MANUAL_INITIAL_GUARD_ONLY skips this too. It is a PROFIT LOCK — QNT
+    # 2026-09-28 had its stop moved from -14.8% ROI to +2.0% once peak crossed
+    # +3%, and that is what closed the trade at +1.48%. The first
+    # implementation gated _ensure_profit_floor, _arm_at_entry,
+    # _place_floor_trail and fail-fast, and MISSED this one because it lives
+    # in a pure function rather than a placement method.
+    #
+    # "Bounded only by the initial trailing stop" has to mean the stop does
+    # not move either.
+    if (cfg.breakeven_at_roi and state.peak_roi >= cfg.breakeven_at_roi
+            and not reduced_guard):
         return cfg.breakeven_stop_roi
 
     initial = initial_stop_override if initial_stop_override else cfg.initial_stop_roi
@@ -703,7 +714,10 @@ def evaluate(pos: FuturesPosition, price: float, state: GuardState,
              cfg: GuardConfig,
              initial_stop_override: float | None = None,
              atr_pct: float | None = None,
-             recent_tr_pct: float | None = None
+             recent_tr_pct: float | None = None,
+             # True for a position under MANUAL_INITIAL_GUARD_ONLY: the
+             # breakeven ratchet is a PROFIT LOCK and must not run.
+             reduced_guard: bool = False
              ) -> tuple[GuardState, float | None, str]:
     """
     Full per-tick decision for one position (pure — no exchange calls).
@@ -717,7 +731,8 @@ def evaluate(pos: FuturesPosition, price: float, state: GuardState,
     # noise-width callback costs more ROI the higher the leverage.
     leverage = float(getattr(pos, "effective_leverage", 0.0) or 0.0)
     new_stop_roi = desired_stop_roi(state, cfg, initial_stop_override,
-                                    leverage, atr_pct, recent_tr_pct)
+                                    leverage, atr_pct, recent_tr_pct,
+                                    reduced_guard=reduced_guard)
     newly_armed = (not state.armed) and is_armed(
         state, cfg, leverage, atr_pct, recent_tr_pct)
     if newly_armed:

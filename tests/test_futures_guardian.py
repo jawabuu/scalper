@@ -3290,6 +3290,34 @@ def test_the_flag_OFF_leaves_even_a_manual_position_fully_guarded():
     assert g._reduced_guard(pos) is False, "but nothing changes with the flag off"
 
 
+def test_the_BREAKEVEN_RATCHET_is_skipped_under_reduced_guard():
+    """
+    QNT 2026-09-28. MANUAL_INITIAL_GUARD_ONLY was on and the give-back line
+    showed only {fixed, adaptive} resting — yet the FIXED stop was moved from
+    -14.8% ROI to +2.0% once peak crossed +3%, and that is what closed the
+    trade at +1.48%.
+
+    The first implementation gated _ensure_profit_floor, _arm_at_entry,
+    _place_floor_trail and fail-fast, and MISSED this one because it lives in
+    a pure function rather than a placement method. "Bounded only by the
+    initial trailing stop" has to mean the stop does not MOVE either.
+    """
+    from bot.futures_guard import desired_stop_roi, GuardState, GuardConfig
+    cfg = GuardConfig(breakeven_at_roi=3.0, breakeven_stop_roi=2.0,
+                      initial_stop_roi=15.0, arm_roi=5.0)
+    st = GuardState(); st.peak_roi = 4.0
+    assert desired_stop_roi(st, cfg, leverage=10.0) == 2.0
+    assert desired_stop_roi(st, cfg, leverage=10.0, reduced_guard=True) == -15.0
+
+
+def test_the_ratchet_STILL_RUNS_for_a_normal_position():
+    from bot.futures_guard import desired_stop_roi, GuardState, GuardConfig
+    cfg = GuardConfig(breakeven_at_roi=3.0, breakeven_stop_roi=2.0,
+                      initial_stop_roi=15.0, arm_roi=5.0)
+    st = GuardState(); st.peak_roi = 4.0
+    assert desired_stop_roi(st, cfg, leverage=10.0) == 2.0
+
+
 def test_fail_fast_is_skipped_for_a_reduced_guard_position():
     g, pos = _guard_with_ctx({"sized_price": 100.0})
     st = GuardState()
