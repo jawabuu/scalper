@@ -3290,6 +3290,122 @@ def test_the_flag_OFF_leaves_even_a_manual_position_fully_guarded():
     assert g._reduced_guard(pos) is False, "but nothing changes with the flag off"
 
 
+# ── MANUAL_INITIAL_GUARD_ONLY: the COMPLETE set, enumerated by EFFECT ──────
+#
+# Three mechanisms were missed by gating call sites one at a time:
+#   v3.88.0  gated _ensure_profit_floor, _arm_at_entry, _place_floor_trail,
+#            _should_fail_fast — four PLACEMENT METHODS
+#   v3.94.1  missed the BREAKEVEN RATCHET (a branch in desired_stop_roi)
+#   v3.94.2  missed the RUNTIME ARM (is_armed inside evaluate), which also
+#            supersedes the adaptive trail AND cancels the fixed stop
+#
+# So these tests assert the OUTCOME for a reduced-guard position at every
+# peak level, rather than checking that a particular function was called.
+
+def _rg_cfg():
+    from bot.futures_guard import GuardConfig
+    return GuardConfig(initial_stop_roi=15.0, arm_roi=5.0, callback_roi=3.0,
+                       breakeven_at_roi=3.0, breakeven_stop_roi=2.0)
+
+
+def test_the_stop_NEVER_MOVES_at_any_peak_under_reduced_guard():
+    """
+    "Bounded only by the initial trailing stop" means the stop does not move.
+    Swept across every band so a future mechanism added at some new threshold
+    cannot slip through unnoticed.
+    """
+    from bot.futures_guard import desired_stop_roi, GuardState
+    cfg = _rg_cfg()
+    for peak in (0.0, 1.0, 2.9, 3.0, 3.1, 4.9, 5.0, 5.1, 10.0, 50.0):
+        st = GuardState(); st.peak_roi = peak
+        got = desired_stop_roi(st, cfg, reduced_guard=True)
+        assert got == -15.0, f"peak {peak} moved the stop to {got}"
+
+
+def test_the_stop_DOES_move_at_the_same_peaks_normally():
+    # The control. If this ever matches the test above, the gate has leaked
+    # into normal positions and every bot trade lost its protection.
+    from bot.futures_guard import desired_stop_roi, GuardState
+    cfg = _rg_cfg()
+    got = {}
+    for peak in (0.0, 3.0, 5.0, 10.0):
+        st = GuardState(); st.peak_roi = peak
+        got[peak] = desired_stop_roi(st, cfg)      # plain arm_roi path
+    assert got[0.0] == -15.0          # initial
+    assert got[3.0] == 2.0            # breakeven ratchet
+    assert got[5.0] == 2.0            # armed: 5 - 3 = 2
+    assert got[10.0] == 7.0           # armed: 10 - 3 = 7
+
+
+def test_arming_NEVER_TRIGGERS_under_reduced_guard():
+    """
+    Arming is the single upstream trigger for THREE effects: the armed trail
+    is placed, the adaptive trail is superseded and cancelled, and the fixed
+    stop is cancelled. QNT 2026-09-28 lost all three at once.
+    """
+    from bot.futures_guard import is_armed, GuardState
+    cfg = _rg_cfg()
+    # leverage omitted = the documented plain-arm_roi path. With a leverage
+    # and no ATR, effective_arm_roi raises the threshold for an unrelated
+    # reason (callback cost) and would mask what this test is checking.
+    for peak in (5.0, 7.8, 10.3, 100.0):
+        st = GuardState(); st.peak_roi = peak
+        assert is_armed(st, cfg, reduced_guard=True) is False, peak
+        assert is_armed(st, cfg) is True, f"control failed at {peak}"
+
+
+def test_state_armed_stays_False_through_evaluate_under_reduced_guard():
+    """
+    state.armed is what the guardian keys off to PLACE the armed trail
+    (futures_guardian line ~2853). If evaluate sets it, the trail appears
+    however well is_armed is gated.
+    """
+    from bot.futures_guard import evaluate, GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=90.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    st = GuardState(); st.peak_roi = 20.0
+    st2, _, _ = evaluate(pos, 90.0, st, _rg_cfg(), reduced_guard=True)
+    assert st2.armed is False
+
+
+def test_state_armed_becomes_True_normally():
+    from bot.futures_guard import evaluate, GuardState
+    fake = FakeExchange(positions=[_raw_pos("short", entry=100.0)], price=90.0)
+    g = _guardian(fake)
+    pos = g.fetch_positions()[0]
+    st = GuardState(); st.peak_roi = 20.0
+    st2, _, _ = evaluate(pos, 90.0, st, _rg_cfg())
+    assert st2.armed is True
+
+
+def test_every_reduced_guard_mechanism_is_covered():
+    """
+    A checklist, by EFFECT. Enumerating placement methods missed two of these.
+    Anything added later that can change a position's exit belongs here.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    from bot import futures_guard as fg
+    src = inspect.getsource(FuturesGuardian)
+    guard = inspect.getsource(fg)
+    covered = {
+        "fail-fast":        "_reduced_guard(pos)" in inspect.getsource(
+                                FuturesGuardian._should_fail_fast),
+        "profit floor":     "_reduced_guard(pos)" in inspect.getsource(
+                                FuturesGuardian._ensure_profit_floor),
+        "arm at entry":     "_reduced_guard(pos)" in inspect.getsource(
+                                FuturesGuardian._arm_at_entry),
+        "floor trail":      "_reduced_guard(pos)" in inspect.getsource(
+                                FuturesGuardian._place_floor_trail),
+        "breakeven ratchet": "and not reduced_guard" in guard,
+        "runtime arm":      "if reduced_guard:\n        return False" in guard,
+        "evaluate wiring":  "reduced_guard=self._reduced_guard(pos)" in src,
+    }
+    missing = [k for k, v in covered.items() if not v]
+    assert not missing, f"uncovered mechanisms: {missing}"
+
+
 def test_the_BREAKEVEN_RATCHET_is_skipped_under_reduced_guard():
     """
     QNT 2026-09-28. MANUAL_INITIAL_GUARD_ONLY was on and the give-back line

@@ -2712,7 +2712,8 @@ class FuturesGuardian:
             # First sight: adopt any protective stop already resting so we
             # manage it rather than stacking a second one on top.
             orders = self.fetch_open_orders(pos.symbol)
-            state = adopt_state(pos, orders, roi_pct(pos, price), self.cfg)
+            state = adopt_state(pos, orders, roi_pct(pos, price), self.cfg,
+                                reduced_guard=self._reduced_guard(pos))
             self._record(pos.symbol, "adopted",
                          f"{pos.side} @ {pos.entry_price} | "
                          f"existing stop: {state.stop_roi is not None}")
@@ -2850,7 +2851,18 @@ class FuturesGuardian:
         # it is born armed and the transition never fires. That left it falling
         # through to the fixed stop, which the exchange rejects as "would
         # trigger immediately", looping UNPROTECTED.
-        if self.cfg.use_native_trail and state.armed and not state.native_trail_id:
+        # state.armed is already False under MANUAL_INITIAL_GUARD_ONLY (gated
+        # in is_armed), so this cannot fire for a reduced-guard position. The
+        # explicit check is belt-and-braces: this block places the armed trail
+        # and the QNT 2026-09-28 incident came from exactly this order
+        # appearing on a manual position.
+        #
+        # NOTE the RESCUE path further down is deliberately NOT gated. It sets
+        # state.armed only when the fixed stop was REJECTED, and a trailing
+        # stop is the last protection available — gating it would leave a
+        # reduced-guard position with nothing at all.
+        if (self.cfg.use_native_trail and not self._reduced_guard(pos)
+                and state.armed and not state.native_trail_id):
             trail_id = None
             try:
                 trail_id = self._place_native_trail(pos)

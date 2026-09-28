@@ -436,7 +436,8 @@ def adoptable_stop(orders: list[dict], pos: FuturesPosition) -> dict | None:
 
 
 def adopt_state(pos: FuturesPosition, orders: list[dict], current_roi: float,
-                cfg: GuardConfig) -> GuardState:
+                cfg: GuardConfig,
+                reduced_guard: bool = False) -> GuardState:
     """
     Build initial guard state for a position discovered at startup (or one the
     operator opened by hand), adopting any protective stop already resting.
@@ -464,7 +465,12 @@ def adopt_state(pos: FuturesPosition, orders: list[dict], current_roi: float,
                 f"{pos.symbol}: adopted existing protective stop at "
                 f"{float(stop_price):.6f} ({state.stop_roi:+.1f}% ROI)"
             )
-    state.armed = is_armed(state, cfg)
+    # Adoption normally sees peak_roi = 0 so this is False anyway, but a
+    # restart that restores a peak could arm a reduced-guard position on the
+    # spot. Gate it for the same reason as evaluate(): arming is the single
+    # upstream trigger for the armed trail, the adaptive supersession and the
+    # fixed-stop cancellation.
+    state.armed = is_armed(state, cfg, reduced_guard=reduced_guard)
     return state
 
 
@@ -510,14 +516,32 @@ def effective_arm_roi(cfg: GuardConfig, leverage: float = 0.0,
 
 def is_armed(state: GuardState, cfg: GuardConfig, leverage: float = 0.0,
              atr_pct: float | None = None,
-             recent_tr_pct: float | None = None) -> bool:
+             recent_tr_pct: float | None = None,
+             reduced_guard: bool = False) -> bool:
     """
     Has the peak reached the arming threshold (float-tolerant)?
 
     Leverage and volatility are optional: omitted, this is the pre-v3.72.0
     behaviour against cfg.arm_roi, so callers that do not know a position's
     volatility are never blocked.
+
+    `reduced_guard` (MANUAL_INITIAL_GUARD_ONLY) forces False. Arming is the
+    single upstream trigger for THREE things, which is why the gate belongs
+    HERE and not at each of them:
+
+        1. the armed trail is placed          (guardian, on state.armed)
+        2. the adaptive trail is SUPERSEDED   and cancelled
+        3. the fixed stop is cancelled        and desired_stop_roi switches
+                                              to peak - callback_roi
+
+    QNT 2026-09-28 lost all three: a manual position adopted with a 1.54%
+    adaptive trail had it replaced at +7.8% peak by a 0.30% armed trail —
+    five times tighter — with no fixed stop left behind it. Gating
+    `_arm_at_entry` did not help, because that places the DORMANT trail at
+    adoption; this is the RUNTIME arm inside evaluate().
     """
+    if reduced_guard:
+        return False
     return state.peak_roi >= (
         effective_arm_roi(cfg, leverage, atr_pct, recent_tr_pct) - _ROI_EPS)
 
@@ -656,7 +680,8 @@ def desired_stop_roi(state: GuardState, cfg: GuardConfig,
     validate), the first armed level is strictly positive — the trade is locked
     into profit the moment the trail engages.
     """
-    if is_armed(state, cfg, leverage, atr_pct, recent_tr_pct):
+    if is_armed(state, cfg, leverage, atr_pct, recent_tr_pct,
+                reduced_guard=reduced_guard):
         return state.peak_roi - cfg.callback_roi
 
     # Breakeven step: the trade has shown a real gain, so stop giving it back
@@ -734,7 +759,8 @@ def evaluate(pos: FuturesPosition, price: float, state: GuardState,
                                     leverage, atr_pct, recent_tr_pct,
                                     reduced_guard=reduced_guard)
     newly_armed = (not state.armed) and is_armed(
-        state, cfg, leverage, atr_pct, recent_tr_pct)
+        state, cfg, leverage, atr_pct, recent_tr_pct,
+        reduced_guard=reduced_guard)
     if newly_armed:
         state.armed = True
 

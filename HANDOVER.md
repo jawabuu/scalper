@@ -3,6 +3,10 @@
 **v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
+v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
+single definition so every downstream effect is covered at once.
+v3.95.0 COMPLETES MANUAL_INITIAL_GUARD_ONLY — the runtime arm escaped too.
+Gated at the single upstream trigger, with a contract test file.
 v3.94.1 fixes MANUAL_INITIAL_GUARD_ONLY missing the BREAKEVEN RATCHET — a
 manual position still had its stop moved to a profit lock.
 v3.94.0 adds ATR_STOP_MIN_PRICE_PCT — the sizing rule bets MOST on the trades
@@ -814,6 +818,116 @@ And a helper that REPLACES `_pos_meta` wipes `opened_seen_at` along with it.
 Both were caught by a test asserting fail-fast STILL FIRES on a bot position —
 without that, the gate could have disabled fail-fast for everything and the
 suite would have stayed green.
+
+### It also missed the RUNTIME ARM (fixed v3.94.2)
+
+QNT 2026-09-28, second trade, `manual_initial_guard_only = True`:
+
+    12:37:39  PEAK +1.4% -> +7.8% ROI
+    12:37:39  TRAIL-REQUEST callbackRate: 0.3
+    12:37:39  ARMED native trailing stop ... locks in ~+5% ROI
+    12:37:42  adaptive trail superseded by the armed trail — cancelled
+    12:37:43  Cancelled ALGO order ...50145        <- the FIXED STOP too
+    12:38:00  GIVE-BACK ... resting: {'trail': '2000001472052992'}
+
+The position was adopted with a **1.54%** adaptive trail and ended up on a
+**0.30%** armed trail — five times tighter — with no fixed stop behind it.
+The 0.30% trail is what closed it (best 230.76 x 1.003 = 231.45 against an
+exit of 231.38).
+
+`_arm_at_entry` was gated in v3.88.0, but that places the DORMANT trail at
+adoption. This is the RUNTIME arm: `is_armed()` inside `evaluate()`.
+
+### The fix: gate ARMING, not the things arming causes
+
+Arming is the single upstream trigger for THREE effects:
+
+    1. the armed trail is placed          (guardian, on state.armed)
+    2. the adaptive trail is SUPERSEDED   and cancelled
+    3. the fixed stop is cancelled        and desired_stop_roi switches to
+                                          peak - callback_roi
+
+So `reduced_guard` now lives in `is_armed` itself — one definition, three
+call sites, every downstream path covered. Gating the three effects
+separately is what produced three rounds of this bug.
+
+### THREE MISSES, ONE CAUSE
+
+    v3.88.0  gated four PLACEMENT METHODS
+    v3.94.1  missed the breakeven ratchet — a branch in desired_stop_roi
+    v3.94.2  missed the runtime arm — a predicate inside evaluate
+
+Every miss was a mechanism that changes a position's exit WITHOUT placing an
+order. **Enumerate by effect, and gate at the narrowest point every effect
+flows through.**
+
+### Verified both ways
+
+    peak   NORMAL stop   armed      REDUCED stop   armed
+     0.0        -15.00   False           -15.00   False
+     3.0         +2.00   False           -15.00   False
+     5.0         +2.00    True           -15.00   False
+    10.0         +7.00    True           -15.00   False
+    23.2        +20.20    True           -15.00   False
+
+`test_every_reduced_guard_mechanism_is_covered` is a checklist BY EFFECT —
+anything added later that can change a position's exit belongs in it. The
+normal-path control exists so a future leak into bot positions fails loudly
+rather than silently stripping their protection.
+
+### And it missed the RUNTIME ARM (fixed v3.95.0)
+
+QNT 2026-09-28 12:37, `manual_initial_guard_only = True`:
+
+    12:37:39  PEAK +1.4% -> +7.8% ROI
+    12:37:39  TRAIL-REQUEST callbackRate: 0.3
+    12:37:39  ARMED native trailing stop ... locks in ~+5% ROI
+    12:37:42  adaptive trail superseded by the armed trail — cancelled
+    12:37:43  Cancelled ALGO order ...50145        <- the fixed stop too
+    12:38:00  GIVE-BACK ... resting: {'trail': '2000001472052992'}
+
+A 1.54% adaptive trail was replaced by a 0.30% armed trail — FIVE TIMES
+TIGHTER — and both the adaptive trail and the fixed stop were cancelled
+behind it. Gating `_arm_at_entry` did not help: that places the DORMANT trail
+at adoption. This is the RUNTIME arm inside `evaluate()`.
+
+### The fix: gate the single upstream trigger
+
+Arming is the one trigger for THREE effects:
+
+    1. the armed trail is placed
+    2. the adaptive trail is SUPERSEDED and cancelled
+    3. the fixed stop is cancelled, and desired_stop_roi switches to
+       peak - callback_roi
+
+So the gate belongs in `is_armed()`, not at each of them. `reduced_guard` is
+now threaded into `is_armed`, `desired_stop_roi`, `evaluate` and
+`adopt_state`, plus a belt-and-braces check on the guardian's trail-placement
+block.
+
+**The RESCUE path is deliberately NOT gated.** It arms only when the fixed
+stop was REJECTED, and a trailing stop is then the last protection available;
+gating it would leave a reduced-guard position with nothing. A test pins that
+too.
+
+### Why three mechanisms escaped two implementations
+
+The first pass enumerated PLACEMENT METHODS — `_ensure_profit_floor`,
+`_arm_at_entry`, `_place_floor_trail`, `_should_fail_fast`. Two of the three
+misses live inside `evaluate()` as arithmetic branches and appear in no
+search for order placement; the third is a consequence of the second.
+
+**ENUMERATE BY EFFECT, NOT BY METHOD NAME.**
+
+`tests/test_manual_initial_guard.py` is organised that way: for every
+mechanism that can change a position's exit, one test that it is skipped
+under the flag and one that it STILL RUNS without it. A gate that disables
+something for everyone is as broken as one that disables nothing.
+
+Note for anyone writing tests here: `effective_arm_roi()` is volatility- and
+leverage-aware (v3.72.0). At 10x with `trail_callback_pct=1.0` it resolves to
+**12.0, not `cfg.arm_roi=5.0`**. A fixture using a peak of 9 will silently
+not arm.
 
 ### It missed the breakeven ratchet (fixed v3.94.1)
 
