@@ -3789,10 +3789,32 @@ class FuturesGuardian:
                             return v if v > 0 else None
                         except (TypeError, ValueError):
                             return None
-                    cb_roi = (callback_roi_at(leverage, self.cfg,
-                                              _n(_ctx.get("atr_pct")),
-                                              _n(_ctx.get("recent_tr_pct")))
-                              if leverage else None)
+                    # WHICH trail was actually resting decides the yardstick.
+                    #
+                    # callback_roi_at() returns the ARMED trail's callback
+                    # (~3% ROI). The ADAPTIVE trail's callback is the sized
+                    # stop distance, which is far wider — 15.4% ROI on QNT
+                    # 2026-09-28. Comparing an adaptive-only give-back against
+                    # the armed figure fires the "more than the trail can
+                    # explain" warning on every wide-trail position.
+                    #
+                    # That false alarm was used as evidence in the BTW
+                    # 2026-09-25 investigation. QNT gave back 16.8 ROI points
+                    # from a +18.3% peak and the line called it unexplained —
+                    # but 18.3 - 15.4 = +2.9%, and the last observed ROI was
+                    # +2.92%. The trail explained it exactly.
+                    _armed_cb = (callback_roi_at(leverage, self.cfg,
+                                                 _n(_ctx.get("atr_pct")),
+                                                 _n(_ctx.get("recent_tr_pct")))
+                                 if leverage else None)
+                    _adaptive_cb = _n(_ctx.get("sized_stop_roi")) or (
+                        abs(_n(getattr(st, "stop_roi", None)) or 0.0) or None)
+                    if getattr(st, "native_trail_id", None):
+                        cb_roi = _armed_cb          # armed trail supersedes
+                    elif getattr(st, "adaptive_trail_id", None):
+                        cb_roi = _adaptive_cb or _armed_cb
+                    else:
+                        cb_roi = _armed_cb
                     resting = {k: v for k, v in (
                         ("fixed", getattr(st, "stop_order_id", None)),
                         ("floor", getattr(st, "floor_stop_id", None)),

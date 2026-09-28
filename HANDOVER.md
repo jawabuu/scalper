@@ -5,6 +5,9 @@ three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.95.1 fixes the GIVE-BACK yardstick — it compared every give-back against
+the ARMED trail's callback, firing a false alarm on wide-trail positions. It
+was used as evidence in the BTW investigation; that part is withdrawn.
 v3.95.0 COMPLETES MANUAL_INITIAL_GUARD_ONLY — the runtime arm escaped too.
 Gated at the single upstream trigger, with a contract test file.
 v3.94.1 fixes MANUAL_INITIAL_GUARD_ONLY missing the BREAKEVEN RATCHET — a
@@ -1046,8 +1049,27 @@ this investigation, and unlike the last one it is real.**
     14:51:26  PEAK +7.8% ROI
     14:52:32  CLOSED  final -6.6%   "MORE THAN THE TRAIL CAN EXPLAIN"
 
-The give-back line listed ALL FIVE ids as resting at the close. It could not
-be explained by the trail **because the trail was no longer there.**
+The give-back line listed ALL FIVE ids as resting at the close.
+
+**CORRECTION (v3.95.1): the "more than the trail can explain" part of this
+was a FALSE ALARM and is withdrawn.** That warning compared the give-back
+against `callback_roi_at()`, which returns the ARMED trail's callback (~3%
+ROI). BTW's ADAPTIVE trail had a 9.7% ROI callback, so the warning fired on
+arithmetic, not on evidence. It fires on every wide-trail position — QNT
+2026-09-28 gave back 16.8 points from a +18.3% peak and the line called it
+unexplained, when 18.3 - 15.4 = +2.9% and the last observed ROI was +2.92%.
+
+**What still stands, independently:**
+
+    adaptive trail  9.7% ROI callback -> from peak +7.8% would fire at -1.9%
+    armed trail     1.5% ROI callback, ACTIVATED at +5%
+                                      -> from peak +7.8% would fire at +6.3%
+    actual final                                                      -6.6%
+
+The ARMED trail had activated and should have closed near +6.3%. It did not.
+The PROTECTION listing also genuinely fell 5 -> 4 -> 3 orders while the
+position was open. Those two observations are what the investigation rests
+on now.
 
 14.4 ROI points against a 3% callback. The armed trail had activated (peak
 crossed +5% at 14:47:47) and did not fire. The profit floor at +2% did not
@@ -1076,6 +1098,24 @@ refusing must not be re-placed on every audit for the life of the trade.
 
 New log line to watch: **`PROTECTION-DEAD`**. It means a position was running
 with less protection than the guardian believed.
+
+### Is v3.90.0's `_replace_if_dead` still the right remedy?
+
+Yes, but for a narrower reason than first stated. It acts ONLY on a status
+the algo book CONFIRMS is terminal (REJECTED / EXPIRED / CANCELED) — never on
+absence from the unreliable listing — so it cannot fire spuriously and cannot
+place duplicate stops on a healthy position. It is a safe detector for a real
+failure mode whether or not that mode caused BTW.
+
+What it does NOT do is explain why an ACTIVATED armed trail failed to fire.
+If the order was live on the exchange the whole time, `_replace_if_dead` will
+correctly do nothing and the cause remains open.
+
+**The discriminating evidence is the `PROTECTION-DEAD` line.** It has fired
+ZERO times since deploy against one `PROTECTION-MISSING`, which means the
+algo book reported that order as live (or was unreadable) while the listing
+could not see it. That points at the LISTING being blind rather than orders
+dying — which would make BTW a different problem entirely.
 
 ### What this does NOT explain
 

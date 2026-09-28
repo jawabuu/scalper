@@ -5383,6 +5383,28 @@ def test_an_unexplainable_give_back_is_a_warning_not_a_note():
     assert "MORE THAN THE TRAIL CAN EXPLAIN" in src
 
 
+def test_the_give_back_yardstick_is_the_trail_that_was_RESTING():
+    """
+    callback_roi_at() returns the ARMED trail's callback (~3% ROI). The
+    ADAPTIVE trail's callback is the sized stop distance — 15.4% ROI on QNT
+    2026-09-28. Comparing an adaptive-only give-back against the armed figure
+    fires "MORE THAN THE TRAIL CAN EXPLAIN" on EVERY wide-trail position.
+
+    That false alarm was used as evidence in the BTW 2026-09-25
+    investigation. QNT gave back 16.8 points from a +18.3% peak and the line
+    called it unexplained — but 18.3 - 15.4 = +2.9%, and last observed was
+    +2.92%. The trail explained it exactly.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian)
+    i = src.index("MORE THAN THE TRAIL CAN EXPLAIN")
+    block = src[max(0, i - 2600):i]
+    assert "_adaptive_cb" in block
+    assert 'native_trail_id' in block, "armed trail must take precedence"
+    assert "sized_stop_roi" in block, "adaptive callback IS the sized stop"
+
+
 def test_the_give_back_line_names_every_resting_order():
     import inspect
     from bot.futures_guardian import FuturesGuardian
