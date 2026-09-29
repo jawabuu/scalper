@@ -29,17 +29,17 @@ class _Ex:
     def fapiPublicGetKlines(self, params):
         sym = params["symbol"]
         rows = self.table.get(sym, [])
-        end = params["startTime"] + 26 * 3600 * 1000
+        end = params["startTime"] + 200 * 3600 * 1000
         return [r for r in rows if params["startTime"] <= r[0] < end]
 
 
-def _bars(start_ms, n=26, close0=100.0, drift=0.0, qv=1e6):
+def _bars(start_ms, n=100, close0=100.0, drift=0.0, qv=1e6, step_ms=900_000):
     out = []
     c = close0
     for i in range(n):
         o = c
         c = o * (1 + drift)
-        out.append([start_ms + i*3600*1000, str(o), str(c*1.01), str(o*0.99),
+        out.append([start_ms + i*step_ms, str(o), str(c*1.01), str(o*0.99),
                     str(c), "0", 0, str(qv), 0, "0", "0", "0"])
     return out
 
@@ -52,16 +52,28 @@ def test_quote_volume_comes_from_INDEX_7_not_base_volume():
     symbols pass.
     """
     at = 1_790_000_000
-    ex = _Ex({"AAAUSDT": _bars(int((at - 25*3600) * 1000), qv=2e6)})
+    ex = _Ex({"AAAUSDT": _bars(int((at - 25*3600) * 1000), n=120, qv=2e6)})
     qv, pct = ru.window_stats(ex, "AAA/USDT:USDT", at)
-    assert qv == 24 * 2e6, qv
+    assert qv == 96 * 2e6, qv          # 96 fifteen-minute bars in 24h
+
+
+def test_a_finer_interval_is_the_DEFAULT():
+    """
+    Binance's 24h ticker ROLLS; a kline sum is bucketed, and the coarser the
+    bucket the worse they agree. With 1h bars the first validation run missed
+    12% of the bot's own candidates — and the boundary symbols are exactly
+    the ones near the top-N cut.
+    """
+    import inspect
+    sig = inspect.signature(ru.window_stats)
+    assert sig.parameters["interval"].default == "15m"
 
 
 def test_change_is_measured_across_the_FULL_24h_window():
     at = 1_790_000_000
-    ex = _Ex({"AAAUSDT": _bars(int((at - 25*3600) * 1000), drift=0.01)})
+    ex = _Ex({"AAAUSDT": _bars(int((at - 25*3600) * 1000), n=120, drift=0.001)})
     qv, pct = ru.window_stats(ex, "AAA/USDT:USDT", at)
-    assert 25 < pct < 28, pct          # 1% compounded over 24 bars
+    assert 9 < pct < 11, pct           # 0.1% compounded over 96 bars
 
 
 def test_an_incomplete_window_returns_None_rather_than_guessing():

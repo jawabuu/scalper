@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v3.98.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
+**v3.98.1**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.98.1 moves the rebuild to 15m buckets after the first validation run
+missed 12%.
 v3.98.0 adds tools/rebuild_universe.py — the FIRST STEP toward backtesting,
 and it validates itself before it may be trusted.
 v3.97.0 adds BTC_REGIME_MODE — ONE cell of six clears the fee, and it is
@@ -1517,6 +1519,39 @@ symbols were offered, as opposed to how many.
 **A median miss rate above 10% means the reconstruction is fiction** and the
 tool says so in those words. If it cannot reproduce a week we have logs for,
 it cannot be trusted on a year we do not.
+
+### First validation run: 12% miss, and what it taught
+
+    scan                 candidates  movers  overlap  MISSED
+    2026-09-20T17:28Z             9      22      67%     33%
+    2026-09-21T18:48Z            11      36     100%      0%
+    2026-09-22T20:12Z             9      21      56%     44%
+    2026-09-23T21:54Z            13      28      92%      8%
+    2026-09-24T23:58Z            14      21      79%     21%
+    2026-09-26T00:24Z            10      22      90%     10%
+    2026-09-27T01:54Z            12      21     100%      0%
+    2026-09-28T06:22Z             7      25      86%     14%
+    median miss 12%  -> FAILED its own 10% bar
+
+**Two lessons.**
+
+1. The `movers` column is 2-3x `candidates` because the bot's shadow rows are
+   post-scan CANDIDATES while the rebuild produces pre-scan MOVERS. Movers
+   are a superset, so **extras are expected and only MISSES are failures.**
+   The first output implied otherwise; now stated in the header.
+
+2. The misses cluster, which points at the bucket. Binance's 24h ticker is a
+   ROLLING window; a kline sum is BUCKETED, so with 1h bars the window can be
+   out by up to an hour at each end. The symbols that fall out are the ones
+   near the top-N cut — exactly the boundary. **v3.98.1 defaults to 15m
+   buckets**, cutting that error to a quarter; `--interval 5m` is available
+   and is the next thing to try if 15m still fails.
+
+**Re-run --validate after this change before anything else.** If 15m and 5m
+both stay above 10%, the cause is not the bucket and the remaining suspects
+are the percentile floor's dependence on universe composition, and
+survivorship — neither of which is fixable, and either of which would make a
+backtest fiction.
 
 ### Biases it CANNOT fix, named in the tool's own docstring
 

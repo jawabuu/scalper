@@ -81,22 +81,32 @@ def usdt_symbols(exchange) -> list:
     return sorted(out)
 
 
-def window_stats(exchange, symbol: str, at_ts: float) -> tuple:
+def window_stats(exchange, symbol: str, at_ts: float,
+                 interval: str = "15m") -> tuple:
     """
-    (quote_volume_24h, pct_change_24h) as of `at_ts`, from 1h klines.
+    (quote_volume_24h, pct_change_24h) as of `at_ts`, from klines.
 
     Uses the RAW endpoint, not fetch_ohlcv: ccxt's OHLCV drops quote volume
     and returns base volume only, which is a different number and not what
     the scanner's percentile floor is computed from.
+
+    INTERVAL DEFAULTS TO 15m, NOT 1h. Binance's 24h ticker is a ROLLING
+    window; a kline sum is bucketed, and the coarser the bucket the worse
+    they agree. With 1h bars the window can be out by up to an hour at each
+    end — the first validation run missed 12% of the bot's own candidates,
+    and the boundary symbols are exactly the ones near the top-N cut.
+    15m bars cut that error to a quarter.
     """
-    since = int((at_ts - 25 * 3600) * MS)
+    per_hour = {"1h": 1, "15m": 4, "5m": 12}[interval]
+    need = 24 * per_hour
+    since = int((at_ts - (25 * 3600)) * MS)
     raw = exchange.fapiPublicGetKlines({
         "symbol": symbol.replace("/", "").replace(":USDT", ""),
-        "interval": "1h", "startTime": since, "limit": 26})
+        "interval": interval, "startTime": since, "limit": need + per_hour + 2})
     bars = [b for b in raw if int(b[0]) <= at_ts * MS]
-    if len(bars) < 24:
+    if len(bars) < need:
         return None, None
-    bars = bars[-24:]
+    bars = bars[-need:]
     qv = sum(float(b[7]) for b in bars)          # index 7 = quote asset volume
     first_open, last_close = float(bars[0][1]), float(bars[-1][4])
     if first_open <= 0:
@@ -105,14 +115,15 @@ def window_stats(exchange, symbol: str, at_ts: float) -> tuple:
 
 
 def rebuild(exchange, at_ts: float, *, percentile: float, min_change: float,
-            top_n: int, symbols=None, verbose=True) -> list:
+            top_n: int, symbols=None, verbose=True,
+            interval: str = "15m") -> list:
     syms = symbols or usdt_symbols(exchange)
     rows = []
     for i, s in enumerate(syms, 1):
         if verbose and i % 50 == 0:
             print("  %d/%d ..." % (i, len(syms)), file=sys.stderr)
         try:
-            qv, pct = window_stats(exchange, s, at_ts)
+            qv, pct = window_stats(exchange, s, at_ts, interval)
         except Exception:
             continue
         if qv is None:
@@ -168,6 +179,9 @@ def main() -> int:
     p.add_argument("--percentile", type=float, default=85.0)
     p.add_argument("--min-change", type=float, default=8.0)
     p.add_argument("--top-n", type=int, default=40)
+    p.add_argument("--interval", default="15m", choices=("1h", "15m", "5m"),
+                   help="kline bucket; finer tracks the rolling 24h ticker "
+                        "more closely (default 15m)")
     p.add_argument("--demo", action="store_true")
     args = p.parse_args()
 
@@ -182,13 +196,17 @@ def main() -> int:
             return 1
         print("Validating %d recorded scans. Rebuilt vs what the bot saw.\n"
               % len(scans))
-        print("  %-22s %7s %7s %8s %8s" % ("scan", "actual", "rebuilt",
-                                           "overlap", "missed"))
+        print("  NOTE the bot's rows are CANDIDATES (post-scan); the rebuild")
+        print("  produces MOVERS (pre-scan). Movers are a superset, so EXTRAS")
+        print("  ARE EXPECTED and only MISSES are reconstruction failures.\n")
+        print("  %-22s %7s %7s %8s %8s" % ("scan", "candidates", "movers",
+                                           "overlap", "MISSED"))
         misses = []
         for ts, actual in scans:
             got = {r[0] for r in rebuild(ex, ts, percentile=args.percentile,
                                          min_change=args.min_change,
-                                         top_n=args.top_n, verbose=False)}
+                                         top_n=args.top_n, verbose=False,
+                                         interval=args.interval)}
             inter = actual & got
             miss = (len(actual) - len(inter)) / max(len(actual), 1)
             misses.append(miss)
@@ -201,7 +219,9 @@ def main() -> int:
             print("""
   ABOVE 10%% — THE RECONSTRUCTION IS NOT FAITHFUL.
   Any backtest built on it would be fiction. Likely causes, in order:
-    - the 24h ticker is a ROLLING window; kline sums are bucketed
+    - the 24h ticker is a ROLLING window; kline sums are bucketed.
+      TRY --interval 5m before anything else: it is the cheapest fix and
+      the error scales with bucket size.
     - the percentile floor moves when the universe composition differs
     - symbols listed or delisted since shift both the floor and the ranking
   Do not proceed to --at until this is under 10%%.""")
@@ -219,7 +239,8 @@ def main() -> int:
               "complete)", file=sys.stderr)
         return 1
     movers = rebuild(ex, ts, percentile=args.percentile,
-                     min_change=args.min_change, top_n=args.top_n)
+                     min_change=args.min_change, top_n=args.top_n,
+                     interval=args.interval)
     print("%s — %d movers" % (_iso(ts), len(movers)))
     for s, qv, pct in movers:
         print("  %-22s %10.1fM %+8.2f%%" % (s, qv / 1e6, pct))
