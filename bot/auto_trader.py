@@ -119,6 +119,10 @@ class AutoTradeConfig:
     # different route: a candidate that would have filled instantly either
     # stops qualifying, or is entered later at a level price came back to.
     entry_defer_s: float = 0.0
+    # "off" | "warn" | "block" — see btc_regime_allows for the evidence.
+    btc_regime_mode: str = "off"
+    btc_regime_down_pct: float = -1.0
+    btc_regime_up_pct: float = 1.0
     # Which directions may be traded: "all", "long" or "short". A fade
     # strategy's two halves can behave very differently in a given regime, so
     # being able to disable one without redeploying is worth having.
@@ -370,6 +374,45 @@ def _crt_agrees(row: dict, side: str):
         return agrees(row, side)
     except Exception:
         return None
+
+
+def btc_regime_allows(side: str, btc_change_pct, *,
+                      down: float = -1.0, up: float = 1.0) -> tuple:
+    """
+    Should this SIDE be traded in the current BTC regime?
+
+    Returns (allow, reason). Pure and side-effect free so it can be tested
+    exhaustively without a scanner, a config or a position.
+
+    THE RULE: trade WITH Bitcoin, and in a flat tape trade nothing.
+
+        btc <= down   ->  SHORTS only    (the one cell that clears the fee)
+        btc >= up     ->  LONGS only
+        between       ->  NEITHER        (both sides lose there)
+
+    UNKNOWN btc_change_pct ALLOWS the trade. The scanner can fail to compute
+    it, and a missing reading must not silently halt all trading — that
+    failure mode has cost this system four hours once already.
+    """
+    if btc_change_pct is None:
+        return True, "btc regime unknown — allowing"
+    try:
+        btc = float(btc_change_pct)
+    except (TypeError, ValueError):
+        return True, "btc regime unreadable — allowing"
+    is_short = str(side).lower().startswith("short")
+    if btc <= down:
+        if is_short:
+            return True, f"BTC {btc:+.2f}% — shorts favoured"
+        return False, (f"BTC {btc:+.2f}% is falling; longs there returned "
+                       f"-0.013% median on n=404")
+    if btc >= up:
+        if not is_short:
+            return True, f"BTC {btc:+.2f}% — longs favoured"
+        return False, (f"BTC {btc:+.2f}% is rising; shorts there returned "
+                       f"+0.011% median on n=359, under the 0.070% fee")
+    return False, (f"BTC {btc:+.2f}% is flat ({down} to {up}); neither side "
+                   f"cleared the fee there (shorts -0.058%, longs +0.000%)")
 
 
 def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
@@ -1033,6 +1076,11 @@ class AutoTrader:
         self._last_run: float = 0.0
         # Which RULE refused candidates last cycle, for the dashboard.
         self._last_refusals: dict[str, int] = {}
+        # BTC regime gate counters — see btc_regime_allows. Live on the
+        # AUTOTRADER, not StrengthTracker: run_once reads them, and the
+        # existing attribute guard catches it if they drift back.
+        self._btc_regime_seen: int = 0
+        self._btc_regime_blocked: int = 0
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1253,6 +1301,8 @@ class AutoTrader:
         "required_strength_sweeps": (int, 1, 10),
         "long_rsi_min": (float, 0.0, 100.0),
         "long_rsi_max": (float, 0.0, 100.0),
+        "btc_regime_down_pct": (float, -50.0, 0.0),
+        "btc_regime_up_pct": (float, 0.0, 50.0),
         "short_rsi_max": (float, 0.0, 100.0),
         # A string enum rather than a numeric range: the third element is the
         # set of allowed values instead of an upper bound.
@@ -1609,6 +1659,59 @@ class AutoTrader:
             # Deferring PLACEMENT is the controllable version: a setup that
             # would have filled instantly either stops qualifying, or is
             # entered later at a level price genuinely came back to.
+            # ── BTC REGIME GATE ────────────────────────────────────────
+            #
+            # Refused-candidate outcomes, 2-minute horizon, n=2,401. ALL RSI
+            # bands pooled. The fee is ~0.070% of price:
+            #
+            #   side    BTC      n    win   median px%   clears the fee?
+            #   short   down    79    65%     +0.097     YES
+            #   short   flat   161    46%     -0.058     no
+            #   short   up     359    51%     +0.011     no
+            #   long    down   404    47%     -0.013     no
+            #   long    flat   524    48%     +0.000     no
+            #   long    up     874    51%     +0.014     no
+            #
+            # ONE CELL of six clears it. Shorts in a falling BTC: 51 wins of
+            # 79, p=0.0064 against a coin flip. Within it, RSI 72-75 gives
+            # 78% on n=32 with edge ratio 1.936 — the best figure anywhere in
+            # this investigation.
+            #
+            # It also explains the autumn. Median btc_change_pct over the
+            # window was +0.91 and BTC rose 7.6% on the month, so the bot
+            # spent nearly all of it in regimes with no edge to find. Every
+            # earlier experiment was measured there.
+            #
+            # CAVEATS, because n=79 carries the whole positive cell:
+            #   - BTC-down periods may also have been higher-volatility, and
+            #     a pooled median cannot separate the two.
+            #   - btc_change_pct is a 24h change. It cannot tell a market
+            #     that is falling from one that already fell.
+            # Run mode="warn" first and read what it WOULD have blocked.
+            _btc_mode = str(getattr(self.cfg, "btc_regime_mode", "off")).lower()
+            if _btc_mode in ("warn", "block"):
+                _btc = snap.get("btc_change_pct")
+                _allow, _why = btc_regime_allows(
+                    side, _btc,
+                    down=float(getattr(self.cfg, "btc_regime_down_pct", -1.0)),
+                    up=float(getattr(self.cfg, "btc_regime_up_pct", 1.0)))
+                if not _allow:
+                    self._btc_regime_seen += 1
+                    self._btc_regime_blocked += 1
+                    if _btc_mode == "warn":
+                        _log.info(
+                            f"auto-trade: {symbol} BTC regime (warn) — would "
+                            f"BLOCK {side}, {_why}. "
+                            f"{self._btc_regime_blocked}/"
+                            f"{self._btc_regime_seen} blocked so far.")
+                    else:
+                        self._skip_reasons[symbol] = _why
+                        self._record("btc_regime", _why, symbol)
+                        _log.info(f"auto-trade: {symbol} blocked — {_why}")
+                        continue
+                else:
+                    self._btc_regime_seen += 1
+
             defer = float(getattr(self.cfg, "entry_defer_s", 0.0) or 0.0)
             if defer > 0:
                 first = self._qualified_since.get(symbol)

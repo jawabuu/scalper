@@ -1,10 +1,14 @@
 # Handover — Binance futures scalping bot
 
-**v3.96.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
+**v3.98.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.98.0 adds tools/rebuild_universe.py — the FIRST STEP toward backtesting,
+and it validates itself before it may be trusted.
+v3.97.0 adds BTC_REGIME_MODE — ONE cell of six clears the fee, and it is
+shorts in a falling BTC. Default off, run warn first.
 v3.96.0 adds tools/entry_funnel.py — attributes the entry-rate drop to each
 stage. Also records the DEMO BREAKEVEN FLOOR defect (it locks exactly the fee
 at 20x).
@@ -1473,6 +1477,137 @@ otherwise looks like a config problem.
 
 **It reads the container log ring buffer**, so it sees a few hours at most.
 Re-run it across windows rather than trusting one.
+
+---
+
+## BACKTESTING: what is possible, and the one thing that is not (v3.98.0)
+
+### Already backtestable — and already built
+
+Everything downstream of candidate selection:
+
+    replay_exits.py            alternative EXIT rules on real entries
+    shadow_decisions/outcomes  2,401 refused candidates with forward returns
+                               at 1/2/3/5/10/30 min — a running backtest of
+                               the ENTRY rules
+
+### NOT backtestable as-is: candidate selection
+
+The scanner picks from "top 40 movers by 24h change, above the p85 volume
+floor, across ~525 symbols". That needs the **24h TICKER SNAPSHOT as it
+stood**, and Binance does not serve historical ticker snapshots.
+
+`rebuild_universe.py` reconstructs both numbers from klines instead:
+
+    24h quote volume = sum of quote volume over the trailing 24h
+    24h change       = close(T) / close(T-24h) - 1
+
+Note it uses the RAW klines endpoint, not `fetch_ohlcv`: ccxt returns BASE
+volume and drops quote volume, and the percentile floor is computed from
+QUOTE volume. Using the wrong one moves the floor.
+
+### VALIDATE BEFORE TRUSTING — this is the whole design
+
+    python tools/rebuild_universe.py --validate --samples 8
+
+It replays moments the bot actually scanned and compares the rebuilt set
+against the symbols in `shadow_decisions.jsonl` — the only record of WHICH
+symbols were offered, as opposed to how many.
+
+**A median miss rate above 10% means the reconstruction is fiction** and the
+tool says so in those words. If it cannot reproduce a week we have logs for,
+it cannot be trusted on a year we do not.
+
+### Biases it CANNOT fix, named in the tool's own docstring
+
+    SURVIVORSHIP   delisted symbols absent; newly listed ones appear for
+                   periods they did not exist. Biases toward survivors.
+    THE PERCENTILE the p85 floor comes from the WHOLE universe, so a
+                   differently-composed fetch moves it — a second-order
+                   error compounding with survivorship.
+    FUNDING        not modelled.
+    THE TICKER     Binance's 24h ticker rolls continuously; kline sums are
+                   bucketed. They disagree, most at the window edges.
+
+### Why do this at all, and the discipline it needs
+
+The one finding that matters — shorts in a falling BTC, 65% win, p=0.0064 —
+rests on **n=79**, because BTC fell on only a handful of days this month. A
+bear stretch would turn that into thousands. History is the only way there.
+
+Against that: NINE hypotheses looked good and died this month. A backtest
+with free parameters would have "confirmed" several of them. Forward testing
+was slow AND it was the thing that kept catching the errors.
+
+**So: reconstruct faithfully, replay the rules UNCHANGED, and use it only to
+test hypotheses already formed — never to search for new ones.** Same
+pre-registration as everything else.
+
+---
+
+## TRADE WITH BITCOIN — the strongest signal found (v3.97.0)
+
+Refused-candidate outcomes, 2-minute horizon, n=2,401, ALL RSI bands pooled.
+The round-trip fee is ~0.070% of price:
+
+    side    BTC      n    win   median px%   clears the fee?
+    short   down    79    65%     +0.097     YES
+    short   flat   161    46%     -0.058     no
+    short   up     359    51%     +0.011     no
+    long    down   404    47%     -0.013     no
+    long    flat   524    48%     +0.000     no
+    long    up     874    51%     +0.014     no
+
+**ONE cell of six clears it.** Shorts in a falling BTC: 51 wins of 79,
+p=0.0064 against a coin flip. Within that cell, RSI 72-75 gives 78% on n=32
+with edge ratio 1.936 — the highest figure anywhere in this investigation.
+
+### It explains the whole autumn
+
+Median `btc_change_pct` over the window was **+0.91**, range -3.84 to +7.55,
+and BTC rose 7.6% on the month. The bot spent nearly the entire period in the
+two regimes where nothing clears fees, and only 79 of 2,401 observations fell
+in the one that works.
+
+**Every earlier experiment — CRT, jev, shape, room-ahead, the callback
+multiplier, the exit replays — was measured almost entirely inside regimes
+with no edge to find.** That is worth holding in mind before re-running any
+of them.
+
+### The bands also shift WITH regime (the operator's hypothesis, confirmed)
+
+Longs, RSI 52-60: edge 0.483 when BTC falls, 0.449 when flat, **1.058 when
+BTC rises** (n=129, win 53% vs 39%, z=2.13, one-tailed p=0.017). The upper
+bound genuinely extends in a rising tape. Not implemented — the regime gate
+subsumes most of it and one change at a time.
+
+### BTC_REGIME_MODE: off | warn | block. Default off.
+
+    btc <= BTC_REGIME_DOWN_PCT (-1.0)  ->  SHORTS only
+    btc >= BTC_REGIME_UP_PCT   (+1.0)  ->  LONGS only
+    between                            ->  NEITHER
+
+**RUN WARN FIRST.** This gate can refuse every trade the bot would take, so
+the count of what it WOULD have blocked must be readable before it is
+load-bearing.
+
+**An UNKNOWN btc_change_pct ALLOWS the trade.** The scanner can fail to
+compute it, and a missing reading must never silently halt all trading —
+that failure mode already cost four hours when the daily halt went quiet.
+
+`btc_regime_allows()` is a pure function, so `tests/test_btc_regime.py`
+tests the decision surface EXHAUSTIVELY (both boundaries, both sides, the
+flat band, junk input, NaN, custom thresholds) rather than sampling it. A
+wrong boundary here is silent and costs every trade.
+
+### Caveats, because n=79 carries the whole positive cell
+
+- BTC-down periods may also have been higher-volatility; a pooled median
+  cannot separate the two.
+- `btc_change_pct` is a 24h change. It cannot tell a market that IS falling
+  from one that already fell.
+- The flat band is the widest cohort (685 of 2,401) and refusing it is most
+  of the volume reduction. Expect entries to fall sharply.
 
 ---
 

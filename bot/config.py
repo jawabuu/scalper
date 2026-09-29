@@ -683,6 +683,39 @@ class BotConfig:
     entry_defer_s: float = field(default_factory=lambda: _env_float(
         "ENTRY_DEFER_S", 120.0))
 
+    # ── BTC REGIME GATE: trade WITH Bitcoin, or not at all ────────────────
+    #
+    # off | warn | block.  Default off. Run WARN first.
+    #
+    # Refused-candidate outcomes, 2-min horizon, n=2,401, all RSI bands
+    # pooled. The round-trip fee is ~0.070% of price:
+    #
+    #   side    BTC      n    win   median px%   clears the fee?
+    #   short   down    79    65%     +0.097     YES
+    #   short   flat   161    46%     -0.058     no
+    #   short   up     359    51%     +0.011     no
+    #   long    down   404    47%     -0.013     no
+    #   long    flat   524    48%     +0.000     no
+    #   long    up     874    51%     +0.014     no
+    #
+    # ONE cell of six clears it. 51 wins of 79, p=0.0064. Within it,
+    # RSI 72-75 gives 78% on n=32, edge ratio 1.936.
+    #
+    # Median btc_change_pct over the window was +0.91 and BTC rose 7.6% on
+    # the month, so the bot spent nearly all of it in regimes with no edge.
+    #
+    # CAVEATS: n=79 carries the whole positive cell; BTC-down periods may
+    # also have been higher-volatility; and btc_change_pct is a 24h change,
+    # which cannot tell a falling market from one that already fell.
+    btc_regime_mode: str = field(default_factory=lambda: _env(
+        "BTC_REGIME_MODE", "off").strip().lower())
+    # Thresholds in 24h % change. Between them is "flat", where NEITHER side
+    # cleared the fee and nothing is taken.
+    btc_regime_down_pct: float = field(default_factory=lambda: _env_float(
+        "BTC_REGIME_DOWN_PCT", -1.0))
+    btc_regime_up_pct: float = field(default_factory=lambda: _env_float(
+        "BTC_REGIME_UP_PCT", 1.0))
+
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())
 
