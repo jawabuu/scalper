@@ -1,10 +1,13 @@
 # Handover — Binance futures scalping bot
 
-**v3.75.0**, 2026-09-21. Supersedes the old HANDOVER.md, which had drifted for
+**v3.96.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.96.0 adds tools/entry_funnel.py — attributes the entry-rate drop to each
+stage. Also records the DEMO BREAKEVEN FLOOR defect (it locks exactly the fee
+at 20x).
 v3.95.1 fixes the GIVE-BACK yardstick — it compared every give-back against
 the ARMED trail's callback, firing a false alarm on wide-trail positions. It
 was used as evidence in the BTW investigation; that part is withdrawn.
@@ -1364,6 +1367,112 @@ The maker-entry experiment is at n=12 of a pre-registered 100. Two changes at
 once and neither is readable — the lesson from the callback multiplier. Let
 the cost work finish first; it is worth more (a permanent 30% cut, already
 banked) and it is arithmetic rather than a sample.
+
+---
+
+## THE VERSION STRING WENT STALE FOR TWELVE RELEASES (fixed v3.96.0)
+
+`bot/__init__.py` declared **3.94.2** while 3.95.0, 3.95.1 and 3.96.0 were
+shipped. `HANDOVER.md`'s header declared **3.75.0** — stale since 2026-09-21,
+roughly twenty versions.
+
+Cause: both were updated with `sed`/`str.replace` on the PREVIOUS value. When
+one bump failed to match, every later one also failed, and **neither tool
+errors on a non-match** — sed exits 0, `str.replace` returns the string
+unchanged.
+
+### It caused a wrong conclusion, not just untidiness
+
+The operator deployed "v3.95.0" and the banner read `v3.94.2`. That was taken
+as evidence the runtime-arm gate "must already be in your build", and a
+warning was issued that the position was "one percent from the bug". Both
+wrong: the fix WAS deployed, wearing the wrong number.
+
+**A stale version string is worse than none — it is affirmatively
+misleading**, and it is the only thing an operator has to tell which code is
+running.
+
+### The guard
+
+`tests/test_version.py`:
+  - the version is a plain three-part number
+  - it appears EXACTLY ONCE in the package, so a bump cannot half-apply
+  - **the HANDOVER header matches the code**
+
+The last is the one that would have caught this on 2026-09-21. Any future
+bump must update both or the suite fails.
+
+---
+
+## DEMO's breakeven floor locks EXACTLY the fee (2026-09-29)
+
+Three of eight demo trades peaked well and closed at zero:
+
+    ZRO    peak +5.42%  ->  final -0.27%
+    HBAR   peak +4.34%  ->  final -0.48%
+    AIOT   peak +8.03%  ->  final  0.00%
+
+All crossed `GUARD_BREAKEVEN_AT_ROI=3`, so the stop ratcheted to
+`GUARD_BREAKEVEN_STOP_ROI=2`. **At 20x that is 0.10% of price — exactly the
+round-trip fee.**
+
+    +2% ROI at 20x = 0.10% of price     round trip = ~0.10% of price
+    +2% ROI at 10x = 0.20% of price     clears it twice over
+
+The guardian has warned about this since v3.77.0 ("locks +1% ROI but a round
+trip costs ~1.8% ROI at 20x"). These are the realised outcomes. **Every demo
+trade that goes 4% in favour and comes back is a scratch by construction**,
+which also means demo can never validate anything about profit-taking.
+
+    GUARD_BREAKEVEN_STOP_ROI=4      # 0.20% of price at 20x
+    GUARD_BREAKEVEN_AT_ROI=6        # must stay above the stop
+
+### And demo is NOT "bleeding" — that was a unit error
+
+    LIVE  -1.12 on    72 = -1.56%   (22 trades)
+    DEMO -51.57 on 5,100 = -1.01%   ( 8 trades)
+
+Demo is doing BETTER in the unit that matters. The "-6.45 per trade" reading
+compared dollars across accounts 70x apart — the same error class as pooling
+mixed-leverage exports. NMR (-22.00) and USELESS (-13.38) are 69% of the
+total and BOTH were inside their risk budget ($21.70 risked, $22.00 lost).
+
+---
+
+## WHICH change cut the entries? tools/entry_funnel.py (v3.96.0)
+
+    docker logs $(docker ps -q -f name=scalper-1) 2>&1 \
+        | python tools/entry_funnel.py -
+
+Three changes landed within days and all reduce entries:
+
+    AUTO_SHORT_RSI_MIN=72         admits MORE (should RAISE entries)
+    ENTRY_DEFER_S=120             must keep qualifying for 2 min
+    ENTRY_ORDER_TYPE=maker_limit  a post-only limit may never fill
+
+**And the market moved at the same time**: movers per scan fell from ~40
+(09-21..25) to ~20. That is not a config change and it halves entries on its
+own.
+
+Counting entries cannot separate these. The funnel can, because each stage
+has its own log line and its own attrition:
+
+    movers      the market's offer        <- NOT a config change
+    candidates  scanner screening
+    refusals    the deterministic gates   <- where the RSI band acts
+    deferred    ENTRY_DEFER_S
+    placed      an order reached the exchange
+    filled      maker_limit's fill rate   <- where post-only acts
+
+Refusals are shown as SHARES, never counts: the counter is per CYCLE and
+cycles repeat the same candidates, so absolute numbers are meaningless.
+Lowering `AUTO_SHORT_RSI_MIN` should SHRINK `rsi_band`'s share.
+
+An active daily halt is called out separately — a window containing one
+otherwise looks like a config problem.
+
+**It reads the container log ring buffer**, so it sees a few hours at most.
+Re-run it across windows rather than trusting one.
 
 ---
 
