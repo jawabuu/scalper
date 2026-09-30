@@ -2435,7 +2435,29 @@ class FuturesGuardian:
         # configured one when the peak is intact, less when it is not, and
         # never above the current price. It locks what is actually there
         # rather than failing to lock anything.
-        current = roi_pct(pos, price)
+        # RE-READ THE MARK. `price` arrives from the top of the caller's
+        # sequence, which by here is several API calls old.
+        #
+        # PHA 2026-09-30: adoption read mark 0.07884 at 07:20:24 and the floor
+        # was computed from it at 07:20:29, by which time the armed-trail call
+        # a line earlier had already seen 0.07915 — 0.39% of price, FOUR ROI
+        # POINTS at 10x. The floor was sized for +3.6% while the position was
+        # at -0.3%, so Binance refused it with -2021 "would immediately
+        # trigger". The rejection looked like an exchange problem; the cause
+        # was our own stale input.
+        #
+        # The buffer below is 0.5 ROI points — sized for poll jitter, not for
+        # a four-point move inside one sequence. A fresh mark is the fix;
+        # widening the buffer would only mask it.
+        #
+        # On failure keep the caller's price: a floor computed from a slightly
+        # stale mark still beats no floor at all.
+        fresh = None
+        try:
+            fresh = self.mark_price(pos)
+        except Exception:
+            fresh = None
+        current = roi_pct(pos, fresh if fresh and fresh > 0 else price)
         buffer = max(0.2, abs(level) * 0.25)
         usable = min(level, current - buffer)
         if usable <= 0:
@@ -2445,6 +2467,8 @@ class FuturesGuardian:
             return
         try:
             floor_price = price_for_roi(pos, usable)
+            # Derived from `usable`, which came from the fresh mark above, so
+            # the level and the market it is checked against agree.
             oid = self._place_stop(pos, floor_price)
             if not oid:
                 # A None return is a FAILURE, not a quiet no-op. This path was

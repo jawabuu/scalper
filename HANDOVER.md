@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v3.99.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
+**v3.99.1**, 2026-09-30. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.99.1 sizes the profit floor from a FRESH mark — a stale price made
+Binance's -2021 rejection look like an exchange fault.
 v3.99.0 records BOTTOM QUALITY on refused candidates, and corrects two wrong
 structural claims made on 2026-09-29.
 v3.98.1 moves the rebuild to 15m buckets after the first validation run
@@ -1579,6 +1581,57 @@ was slow AND it was the thing that kept catching the errors.
 **So: reconstruct faithfully, replay the rules UNCHANGED, and use it only to
 test hypotheses already formed — never to search for new ones.** Same
 pre-registration as everything else.
+
+---
+
+## The floor was sized from a STALE mark (v3.99.1)
+
+PHA 2026-09-30, adoption sequence:
+
+    07:20:24  mark 0.07884   read once, at the top
+    07:20:29  mark 0.07915   armed-trail call, 5s later
+    07:20:29  floor computed from the STALE price -> 0.07897 -> -2021
+
+PHA moved 0.39% of price in five seconds — **FOUR ROI POINTS at 10x**. The
+floor was sized for +3.6% while the position sat at -0.3%, so Binance refused
+it: "Order would immediately trigger."
+
+`_ensure_profit_floor` now re-reads `mark_price(pos)` and falls back to the
+caller's price if that fails — a floor from a slightly stale mark still beats
+no floor.
+
+The buffer, `max(0.2, abs(level) * 0.25)` = 0.5 ROI points, is sized for poll
+jitter and cannot absorb a four-point move inside one sequence. Widening it
+would mask the problem rather than fix it.
+
+### This is a DIAGNOSTICS fix, not a P&L fix
+
+With a fresh mark, PHA would have computed `usable <= 0`, taken the early
+return, and placed NOTHING — logging "nothing positive left to protect"
+instead of an exchange rejection. **Same outcome: the trade still closes at
+-0.75%.**
+
+What changes is that `PROTECTION-NO-FLOOR` stops conflating two different
+things: "the peak was given back before we could act" (the market) and
+"something went wrong" (a bug). Those need different responses.
+
+### Two things that were WRONGLY diagnosed first
+
+1. "Forty rejected API calls." **No** — the code already guards this:
+   `if usable <= 0: self._floor_unavailable(...); return` fires BEFORE any
+   placement. Attempts 5 and 40 are counter increments on that early-return
+   path. Only the FIRST attempt ever reached Binance.
+2. "The retrying is the defect." The retry logic is correct. The stale input
+   to the first attempt was the defect.
+
+### The wider issue this exposes
+
+**The adoption sequence makes five or six API calls against ONE price
+snapshot.** On a coin moving 0.4% in five seconds the last call reasons about
+a market that no longer exists. The floor is where it surfaced because it is
+the only one with a HARD PRICE constraint — the trails use callback rates,
+which are relative and therefore immune. Worth auditing if another
+price-absolute order is ever added to that sequence.
 
 ---
 

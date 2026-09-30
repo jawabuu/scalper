@@ -3406,6 +3406,52 @@ def test_every_reduced_guard_mechanism_is_covered():
     assert not missing, f"uncovered mechanisms: {missing}"
 
 
+# ── The profit floor must be sized from a FRESH mark ───────────────────────
+
+def test_the_floor_is_sized_from_a_FRESH_mark_not_the_caller_price():
+    """
+    PHA 2026-09-30. Adoption read mark 0.07884 at 07:20:24; the floor was
+    computed from it at 07:20:29, by which time the armed-trail call a line
+    earlier had already seen 0.07915 — 0.39% of price, FOUR ROI POINTS at 10x.
+
+    The floor was sized for +3.6% while the position was at -0.3%, so Binance
+    refused it with -2021 "would immediately trigger". The rejection read as
+    an exchange problem; the cause was our own stale input.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_profit_floor)
+    assert "fresh = self.mark_price(pos)" in src
+    assert "roi_pct(pos, fresh if fresh and fresh > 0 else price)" in src
+    assert src.index("fresh = self.mark_price") < src.index("current = roi_pct")
+
+
+def test_an_unreadable_mark_FALLS_BACK_to_the_caller_price():
+    # A floor computed from a slightly stale mark still beats no floor.
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_profit_floor)
+    i = src.index("fresh = self.mark_price")
+    assert "except Exception" in src[i:i + 200]
+    assert "else price" in src[i:i + 400]
+
+
+def test_a_given_back_peak_places_NOTHING_rather_than_a_doomed_order():
+    """
+    With a fresh mark, a position that gave the peak back computes
+    usable <= 0 and takes the early return — no API call, and the log says
+    "nothing positive left to protect" instead of reporting an exchange
+    rejection for an order that could never have been accepted.
+    """
+    import inspect
+    from bot.futures_guardian import FuturesGuardian
+    src = inspect.getsource(FuturesGuardian._ensure_profit_floor)
+    i = src.index("if usable <= 0:")
+    j = src.index("floor_price = price_for_roi")
+    assert i < j, "the guard must precede any placement"
+    assert "return" in src[i:j]
+
+
 def test_the_BREAKEVEN_RATCHET_is_skipped_under_reduced_guard():
     """
     QNT 2026-09-28. MANUAL_INITIAL_GUARD_ONLY was on and the give-back line
