@@ -542,8 +542,39 @@ def _candidate_state(symbol: str, side: str, row: dict, snap: dict) -> dict:
             "peak_vol_early": adv.get("peak_vol_early"),
             "turned_up": turn.get("turned_up"),
             "bars_since_low": turn.get("bars_since_low"),
+            # BOTTOM QUALITY, added 2026-09-29.
+            #
+            # "Within 3% of the 24h low" is a DISTANCE test, not a BOTTOM
+            # test. In a rising market that is a pullback inside an uptrend;
+            # in a falling one it is a new low in a downtrend. Same
+            # measurement, opposite meaning — which is why longs work in
+            # BTC-up (edge 1.000) and not in BTC-down (0.746).
+            #
+            # bars_since_low already showed a gradient in BTC-up: 0-1 bars
+            # edge 0.900, 4-7 bars 1.159, win 50% vs 56% — and 61% of long
+            # candidates sit in the WORST band, because the bot buys the low
+            # as it prints. Only p=0.18 at n=72 vs 537, so it needs power.
+            #
+            # turn_rise_pct is the better measure of the same idea (how far
+            # it has actually risen off the low, not how many bars ago) and
+            # was recorded on ENTRY CONTEXTS but NOT here — so it could only
+            # ever be read on the ~300 trades taken, never on the 2,401
+            # refused candidates. These four close that gap.
+            # NOTE the keys INSIDE the turn/taper dicts are bare —
+            # "rise_pct", not "turn_rise_pct". auto_trader renames them on
+            # the way out, and reading the renamed key here would have
+            # recorded None forever: the exact silent-absence bug this block
+            # exists to fix.
+            "turn_rise_pct": turn.get("rise_pct"),
             "taper_ratio": taper.get("taper_ratio"),
             "tapering": taper.get("tapering"),
+            "taper_vol_ratio": taper.get("vol_ratio"),
+            "taper_close_pos": taper.get("close_pos"),
+            # The two distances kept SEPARATE, as the scanner computes them.
+            # dist_to_extreme_pct collapses them into one number and loses
+            # which extreme it refers to.
+            "pct_above_24h_low": row.get("pct_above_24h_low"),
+            "pct_below_24h_high": row.get("pct_below_24h_high"),
             "breakout": breakout.get("breakout"),
             "brk_at_extreme": breakout.get("at_extreme"),
             "brk_gap_widening": breakout.get("gap_widening"),

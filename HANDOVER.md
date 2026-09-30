@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v3.98.1**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
+**v3.99.0**, 2026-09-29. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v3.99.0 records BOTTOM QUALITY on refused candidates, and corrects two wrong
+structural claims made on 2026-09-29.
 v3.98.1 moves the rebuild to 15m buckets after the first validation run
 missed 12%.
 v3.98.0 adds tools/rebuild_universe.py — the FIRST STEP toward backtesting,
@@ -1577,6 +1579,115 @@ was slow AND it was the thing that kept catching the errors.
 **So: reconstruct faithfully, replay the rules UNCHANGED, and use it only to
 test hypotheses already formed — never to search for new ones.** Same
 pre-registration as everything else.
+
+---
+
+## READING ERRORS MADE ON 2026-09-29 — corrections
+
+Recorded because the same mistakes are easy to repeat against this dataset.
+
+### 1. The shadow log is DECISIONS CONSIDERED, not TRADES TAKEN
+
+Two structural claims were built on the raw shadow population without
+filtering `bot_decision`:
+
+    CLAIMED  "candidates run 8:1 long, and longs are badly positioned —
+              18% sit near the 24h HIGH, so AUTO_MAX_DIST_PCT must be
+              measuring the NEAREST extreme rather than the side-appropriate
+              one."
+    ACTUAL   filtered on bot_decision=ENTER:
+
+                                   ENTER    SKIP
+             long  near LOW <0.2     158   15566
+             long  mid 0.2-0.8         1   23116
+             long  near HIGH >0.8      0    8519
+             short near HIGH >0.8    222    4029
+             short mid / near LOW      0    1645
+
+**Every entry is in the correct band.** The 8,519 longs near the high are the
+gate's SUCCESSES sitting in the log as refusals. The gate is side-aware:
+`distance_to_extreme(row, side)`, and its refusal string names "24h low" for
+longs.
+
+**Entries are 222 shorts to 159 longs** — shorts are the MAJORITY of what is
+traded, the opposite of the claimed 1:8. Which matches the operator's own
+reasoning: a bull market produces more fade-the-high setups than dip-buys.
+
+Also withdrawn: "the better-targeted side performs better", which was built
+on top of the same mistake.
+
+**Any query against shadow_decisions.jsonl must filter `bot_decision`**
+unless the question is explicitly about refused candidates. The BTC regime
+analysis uses refused candidates deliberately and is NOT affected.
+
+### 2. Temporal clustering is not a flaw in a REGIME variable
+
+The down/short cell was dismissed because 52 of 79 observations fell on
+09-24. **That is the wrong test for a regime variable.** BTC direction
+persists for days, so a genuine regime effect CANNOT be spread evenly across
+a month in which BTC mostly rose. "Concentrated in one episode" is the right
+objection to a signal that should be independent across observations (shape,
+RSI, room-ahead) — for a regime it is a category error.
+
+### 3. Changing --samples changed WHICH scans were validated
+
+`rebuild_universe --validate` gave 12% then 31%, read as "15m buckets made it
+worse". But `recorded_scans` samples by STRIDE, so `--samples N` selects
+different scans. Controlled on the same scans: 1h 24%, 15m 19%. **Both fail.**
+The tool's sampling should be deterministic; it is not, and that is a real
+design flaw in it.
+
+### 4. Dollars compared across accounts 70x apart
+
+Demo was called "bleeding badly" at -6.45/trade against live's -0.046. As a
+share of wallet: demo -1.01%, live -1.56%. **Demo was doing better.** Same
+error class as pooling mixed-leverage CSV exports.
+
+---
+
+## BOTTOM QUALITY: a distance test is not a bottom test (v3.99.0)
+
+`AUTO_MAX_DIST_PCT` asks "within 3% of the 24h low?". In a RISING market that
+is a pullback inside an uptrend; in a FALLING one it is a new low in a
+downtrend. **Same measurement, opposite meaning** — which is why longs work in
+BTC-up (edge 1.000) and not in BTC-down (0.746).
+
+`bars_since_low` already shows a gradient, longs only:
+
+    BTC UP     band      n   median   win    edge
+               0-1     537   +0.000   50%   0.900   <- 61% of candidates
+               2-3      55   +0.017   51%   0.913
+               4-7      72   +0.035   56%   1.159   <- best
+               8+      210   +0.024   52%   0.976
+
+    BTC DOWN   every band negative or flat, at every bar count
+    BTC FLAT   no gradient
+
+**The bot buys the low as it prints** — 61% of BTC-up long candidates sit in
+the worst band. But z=0.90, p=0.18 at n=72 vs 537: directionally right, not
+established. And **+0.035% does not clear the 0.070% fee**, so even a perfect
+bottom filter would not make longs profitable at current cost.
+
+### What was missing, and why it mattered
+
+`turn_rise_pct` — how far price has actually RISEN off the low, a better
+measure than bar count — printed nothing in all three regimes. It was
+recorded on ENTRY CONTEXTS but **not in the shadow candidate dict**, so it
+could only ever be read on ~300 entered trades, never on the 2,401 refused
+ones.
+
+v3.99.0 adds `turn_rise_pct`, `taper_vol_ratio`, `taper_close_pos`, and BOTH
+distances (`pct_above_24h_low`, `pct_below_24h_high`) kept separate rather
+than collapsed into `dist_to_extreme_pct`, which loses WHICH extreme it
+refers to.
+
+**Trap for whoever extends this:** the keys INSIDE the turn/taper dicts are
+BARE — `rise_pct`, `vol_ratio`, `close_pos`. `auto_trader` renames them on
+the way out. Reading the renamed key records `None` forever, which is exactly
+how `turn_rise_pct` went missing in the first place. A test pins each one.
+
+Recording change only — no behaviour change. Re-run the bars-since-low
+analysis in a fortnight when refused candidates carry these fields.
 
 ---
 

@@ -656,6 +656,57 @@ def test_backoff_never_touches_the_real_decision(tmp_path):
                                    bot_decision="SKIP") is None
 
 
+# ── BOTTOM QUALITY: fields that were only ever on ENTERED trades ───────────
+
+def _cand(**over):
+    row = {"rsi": 50.0, "atr_pct": 1.0, "pct_above_24h_low": 1.4,
+           "pct_below_24h_high": 9.2,
+           "turn": {"turned_up": True, "bars_since_low": 3,
+                    "rise_pct": 0.077},
+           "taper": {"taper_ratio": 0.833, "tapering": True,
+                     "vol_ratio": 1.517, "close_pos": 0.686}}
+    row.update(over)
+    return _candidate_state("X/USDT:USDT", "long", row, {})["candidate"]
+
+
+def test_turn_rise_pct_reads_the_BARE_key_not_the_renamed_one():
+    """
+    The keys INSIDE the turn dict are bare — "rise_pct", not
+    "turn_rise_pct". auto_trader renames them on the way out, and reading the
+    renamed key here records None forever.
+
+    That is not hypothetical: turn_rise_pct was on ENTRY CONTEXTS but absent
+    from the shadow candidate dict, so "how far has it risen off the low"
+    could only be read on ~300 entered trades, never on the 2,401 refused
+    candidates. A regime-conditional bottom test was unanswerable because of
+    one missing key.
+    """
+    assert _cand()["turn_rise_pct"] == 0.077
+
+
+def test_taper_sub_fields_read_their_bare_keys_too():
+    c = _cand()
+    assert c["taper_vol_ratio"] == 1.517
+    assert c["taper_close_pos"] == 0.686
+
+
+def test_BOTH_distances_are_kept_separate():
+    """
+    dist_to_extreme_pct collapses the two into one number and loses WHICH
+    extreme it refers to. "Within 3% of the low" and "within 3% of the high"
+    are opposite setups.
+    """
+    c = _cand()
+    assert c["pct_above_24h_low"] == 1.4
+    assert c["pct_below_24h_high"] == 9.2
+
+
+def test_a_missing_turn_dict_does_not_raise():
+    c = _cand(turn={})
+    assert c["turn_rise_pct"] is None
+    assert c["bars_since_low"] is None
+
+
 # ── RECORD-ONLY: keep the dataset, stop paying for the verdict ─────────────
 
 def test_record_only_writes_a_row_WITHOUT_calling_the_api(tmp_path):
