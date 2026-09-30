@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v3.99.1**, 2026-09-30. Supersedes the old HANDOVER.md, which had drifted for
+**v4.0.0**, 2026-09-30. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.0.0 adds LEG_GATE_MODE — "middle of the move", the first long-side result
+that clears the fee. Default off.
 v3.99.1 sizes the profit floor from a FRESH mark — a stale price made
 Binance's -2021 rejection look like an exchange fault.
 v3.99.0 records BOTTOM QUALITY on refused candidates, and corrects two wrong
@@ -1741,6 +1743,76 @@ how `turn_rise_pct` went missing in the first place. A test pins each one.
 
 Recording change only — no behaviour change. Re-run the bars-since-low
 analysis in a fortnight when refused candidates carry these fields.
+
+---
+
+## "MIDDLE OF THE MOVE" — position in the leg, NOT volume (v4.0.0)
+
+The operator's hypothesis was that mid-move entries work, confirmed by
+volume: shorts when volume has dropped, longs when it is high or rising.
+
+**The intuition was right. The variable was wrong.**
+
+### Volume: a well-powered null, tested FIRST
+
+    LONGS by adv_vol_trend, n=1690 — every band +0.000 median, win 48-50%.
+    peak_vol_early: no effect either side.
+    And the ordering REVERSES with the horizon:
+        10 min   faded +0.082 / surging +0.027
+        30 min   faded +0.014 / surging +0.104
+    A signal that flips with the horizon is not a signal.
+
+    SHORTS pointed the OPPOSITE way to the hypothesis — best band was
+    >1.6 SURGING (57%, n=196), worst was 0.6-0.85 faded (46%). And its own
+    evidence zigzags (+0.038, -0.055, +0.050 across adjacent bands), which
+    is what noise looks like cut five ways.
+
+### Position in the leg: the actual finding
+
+    LONGS by adv_bars     n      2min    win     10min    win
+    4-6                 214    +0.000    47%    +0.002    50%
+    6-9                 340    -0.009    47%    -0.020    48%
+    9-14                416    +0.043    55%    +0.113    58%   <- the band
+    14+                 720    -0.023    46%    +0.005    50%
+
+**241 wins of 416 at 10 minutes, p=0.0007, median +0.113% — which CLEARS
+the ~0.070% round-trip fee.** The first long-side result in this
+investigation to do so.
+
+### Caveats that keep it provisional
+
+- the 2min and 10min columns are the SAME 416 trades measured twice, so
+  their agreement is one result seen twice, NOT independent confirmation;
+- the shape is a single PEAK, not a gradient: 6-9 is NEGATIVE and 14+ is
+  flat. A lone good band between two dead ones is also what a well-cut
+  noise sample looks like — this is how `shape` looked at the same stage;
+- what makes it more credible than `shape`: the mechanism was stated by the
+  operator BEFORE the data was cut, and n=416 against shape's 235.
+
+### DESIGN CONSEQUENCE — the exit does not match the entry
+
+The edge is **2.6x larger at 10 minutes than at 2** (+0.113% vs +0.043%),
+against a **1.7-minute median hold**. The current trail closes these trades
+long before the edge materialises.
+
+**This gate selects the ENTRY. It does not fix the EXIT.** If the live warn
+tally confirms the band, the next question is holding these specific trades
+longer — not the exits in general, which the replay has repeatedly found
+cannot be beaten.
+
+### LEG_GATE_MODE: off | warn | block. Default off.
+
+    LEG_BARS_MIN=9   LEG_BARS_MAX=14   both INCLUSIVE
+
+**LONGS ONLY.** The band was never measured on shorts, so shorts pass
+through untouched rather than inheriting an untested threshold. Extending it
+means measuring shorts first.
+
+**An UNKNOWN adv_bars ALLOWS the trade** — the scanner returns None when the
+leg is under 4 bars or the window is short.
+
+Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
+counts what it would have refused.
 
 ---
 

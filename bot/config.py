@@ -716,6 +716,41 @@ class BotConfig:
     btc_regime_up_pct: float = field(default_factory=lambda: _env_float(
         "BTC_REGIME_UP_PCT", 1.0))
 
+    # ── LEG-POSITION GATE: "middle of the move" ───────────────────────────
+    #   off | warn | block.  Default off.
+    #
+    # LONGS by adv_bars (bars into the current leg), forward outcome:
+    #
+    #   band      n      2min    win     10min    win
+    #   4-6     214    +0.000    47%    +0.002    50%
+    #   6-9     340    -0.009    47%    -0.020    48%
+    #   9-14    416    +0.043    55%    +0.113    58%   <- the band
+    #   14+     720    -0.023    46%    +0.005    50%
+    #
+    # 241/416 at 10 min, p=0.0007, +0.113% CLEARS the ~0.070% fee.
+    #
+    # VOLUME does NOT work here and was tested first: flat across every
+    # adv_vol_trend band at n=1690, and the ordering REVERSES between the
+    # 10- and 30-minute horizons.
+    #
+    # LONGS ONLY — the band was never measured on shorts, so shorts pass
+    # through untouched rather than inheriting an untested threshold.
+    #
+    # CAVEATS: the 2min and 10min columns are the SAME 416 trades measured
+    # twice; and the shape is a single PEAK (6-9 is negative, 14+ flat),
+    # which is also what a well-cut noise sample looks like.
+    #
+    # DESIGN CONSEQUENCE: the edge is 2.6x larger at 10 minutes than at 2,
+    # against a 1.7-minute median hold. This gate selects the ENTRY; it does
+    # NOT fix the exit, and the current trail closes these trades before the
+    # edge materialises.
+    leg_gate_mode: str = field(default_factory=lambda: _env(
+        "LEG_GATE_MODE", "off").strip().lower())
+    leg_bars_min: int = field(default_factory=lambda: int(_env_float(
+        "LEG_BARS_MIN", 9)))
+    leg_bars_max: int = field(default_factory=lambda: int(_env_float(
+        "LEG_BARS_MAX", 14)))
+
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())
 

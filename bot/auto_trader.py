@@ -121,6 +121,10 @@ class AutoTradeConfig:
     entry_defer_s: float = 0.0
     # "off" | "warn" | "block" — see btc_regime_allows for the evidence.
     btc_regime_mode: str = "off"
+    # "off" | "warn" | "block" — see leg_position_allows for the evidence.
+    leg_gate_mode: str = "off"
+    leg_bars_min: int = 9
+    leg_bars_max: int = 14
     btc_regime_down_pct: float = -1.0
     btc_regime_up_pct: float = 1.0
     # Which directions may be traded: "all", "long" or "short". A fade
@@ -374,6 +378,42 @@ def _crt_agrees(row: dict, side: str):
         return agrees(row, side)
     except Exception:
         return None
+
+
+def leg_position_allows(side: str, adv_bars, *, lo: int = 9,
+                        hi: int = 14) -> tuple:
+    """
+    Is this candidate in the MIDDLE of its leg rather than at either end?
+
+    Pure and side-effect free, so the decision surface can be tested
+    exhaustively. Returns (allow, reason).
+
+    LONGS ONLY. The band was measured on longs (n=1690 with outcomes); the
+    equivalent short analysis has NOT been done, so shorts pass through
+    untouched rather than inheriting a threshold that was never tested on
+    them. Extending it to shorts means measuring shorts first.
+
+    An UNKNOWN adv_bars ALLOWS the trade. The scanner returns None when the
+    leg is under 4 bars or the window is short, and a missing reading must
+    never silently halt trading.
+    """
+    if str(side).lower().startswith("short"):
+        return True, "short — leg band measured on longs only"
+    if adv_bars is None:
+        return True, "leg length unknown — allowing"
+    try:
+        bars = int(adv_bars)
+    except (TypeError, ValueError):
+        return True, "leg length unreadable — allowing"
+    if bars < lo:
+        return False, (f"{bars} bars into the leg, band is {lo}-{hi} — too "
+                       f"early (6-9 bars returned -0.020% at 10 min on "
+                       f"n=340)")
+    if bars > hi:
+        return False, (f"{bars} bars into the leg, band is {lo}-{hi} — too "
+                       f"late (14+ bars returned +0.005% at 10 min on "
+                       f"n=720, under the 0.070% fee)")
+    return True, f"{bars} bars into the leg — inside the {lo}-{hi} band"
 
 
 def btc_regime_allows(side: str, btc_change_pct, *,
@@ -1081,6 +1121,9 @@ class AutoTrader:
         # existing attribute guard catches it if they drift back.
         self._btc_regime_seen: int = 0
         self._btc_regime_blocked: int = 0
+        # Leg-position gate counters — see leg_position_allows.
+        self._leg_gate_seen: int = 0
+        self._leg_gate_blocked: int = 0
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1688,6 +1731,64 @@ class AutoTrader:
             #   - btc_change_pct is a 24h change. It cannot tell a market
             #     that is falling from one that already fell.
             # Run mode="warn" first and read what it WOULD have blocked.
+            # ── LEG-POSITION GATE ("middle of the move") ───────────────
+            #
+            # LONGS by adv_bars — how many bars into the current leg — with
+            # the forward outcome measured at 2 and 10 minutes:
+            #
+            #   band      n      2min    win     10min    win
+            #   4-6     214    +0.000    47%    +0.002    50%
+            #   6-9     340    -0.009    47%    -0.020    48%
+            #   9-14    416    +0.043    55%    +0.113    58%   <- the band
+            #   14+     720    -0.023    46%    +0.005    50%
+            #
+            # 241 wins of 416 at 10 minutes, p=0.0007, and +0.113% CLEARS
+            # the ~0.070% round-trip fee. The strongest long result in the
+            # dataset.
+            #
+            # VOLUME DOES NOT WORK HERE and was tested first: longs are flat
+            # across every adv_vol_trend band at n=1690, and the ordering
+            # REVERSES between the 10- and 30-minute horizons. A signal that
+            # flips with the horizon is not a signal. The operator's
+            # "middle of the move" intuition was right; the variable was
+            # position in the leg, not volume.
+            #
+            # TWO HONEST CAVEATS:
+            #  - the 2min and 10min columns are the SAME 416 trades measured
+            #    twice, so agreement across horizons is not independent
+            #    confirmation;
+            #  - the shape is a single PEAK, not a gradient — 6-9 is
+            #    NEGATIVE and 14+ is flat. A lone good band between two dead
+            #    ones is also what a well-cut noise sample looks like.
+            #
+            # DESIGN CONSEQUENCE: the edge is 2.6x larger at 10 minutes than
+            # at 2, against a 1.7-minute median hold. The current trail
+            # closes these trades before the edge materialises. This gate
+            # selects the entry; it does NOT fix the exit.
+            _leg_mode = str(getattr(self.cfg, "leg_gate_mode", "off")).lower()
+            if _leg_mode in ("warn", "block"):
+                _bars = (row.get("advance") or {}).get("adv_bars")
+                _allow, _why = leg_position_allows(
+                    side, _bars,
+                    lo=int(getattr(self.cfg, "leg_bars_min", 9)),
+                    hi=int(getattr(self.cfg, "leg_bars_max", 14)))
+                if not _allow:
+                    self._leg_gate_seen += 1
+                    self._leg_gate_blocked += 1
+                    if _leg_mode == "warn":
+                        _log.info(
+                            f"auto-trade: {symbol} leg gate (warn) — would "
+                            f"BLOCK {side}, {_why}. "
+                            f"{self._leg_gate_blocked}/{self._leg_gate_seen} "
+                            f"blocked so far.")
+                    else:
+                        self._skip_reasons[symbol] = _why
+                        self._record("leg_position", _why, symbol)
+                        _log.info(f"auto-trade: {symbol} blocked — {_why}")
+                        continue
+                else:
+                    self._leg_gate_seen += 1
+
             _btc_mode = str(getattr(self.cfg, "btc_regime_mode", "off")).lower()
             if _btc_mode in ("warn", "block"):
                 _btc = snap.get("btc_change_pct")
