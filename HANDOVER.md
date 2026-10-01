@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.0.0**, 2026-09-30. Supersedes the old HANDOVER.md, which had drifted for
+**v4.1.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.1.0 adds AUTO_MAX_DIST_PROPORTIONAL so the change floor can be lowered
+without turning an extremes gate into a mid-range one.
 v4.0.0 adds LEG_GATE_MODE — "middle of the move", the first long-side result
 that clears the fee. Default off.
 v3.99.1 sizes the profit floor from a FRESH mark — a stale price made
@@ -1813,6 +1815,65 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## CANDIDATE SUPPLY IS BREADTH, AND 8% WAS A JUDGEMENT (v4.1.0)
+
+Movers fell ~40 -> ~15 between 09-21 and 10-01. The cause is market-wide
+participation, not any gate:
+
+    day     breadth   movers        day     breadth   movers
+    09-21      85.4    ~40          09-29      53.6     ~22
+    09-22      74.6    ~40          09-30      58.1     ~18
+    09-23      69.8    ~40          10-01      56.9     ~15
+
+### The supply surface, measured live on 10-01
+
+    vol pct   ch>=3  ch>=4  ch>=5  ch>=6  ch>=8  ch>=10
+    p85          35     29     25     18     17      10   (floor 38.9M)
+    p80          49     36     31     23     20      11   (floor 21.0M)
+    p70          85     65     51     40     28      17   (floor  8.2M)
+    p50         147    108     82     59     39      23   (floor  3.1M)
+    p0          204    142    101     69     40      24   (floor  0.1M)
+
+**At ch>=8 only 40 coins in the ENTIRE 525-symbol universe qualify** — the
+p0 row proves the volume floor is NOT binding. The change floor is.
+
+So `SCAN_MIN_CHANGE_PCT` is the knob, not `SCAN_VOL_PERCENTILE`: p85/ch>=4
+gives 29 movers with the 38.9M liquidity floor INTACT, while p70/ch>=6 gives
+40 by cutting liquidity 5x — bad for a maker-entry strategy whose fill rate
+is already 58%.
+
+**The operator notes 8% was his own judgement in a high-breadth market, not
+a measured threshold.** Holding it fixed while breadth halved is what
+contracted supply; the equivalent judgement today is a lower number.
+
+### Why the distance gate must change WITH it
+
+`AUTO_MAX_DIST_PCT` is ABSOLUTE, so its meaning depends on the range:
+
+    a 15% mover, 3% limit -> the top 20% of the range   (an extreme)
+    a  4% mover, 3% limit -> the top 75% of the range   (mid-range)
+
+The gate is currently EXACT — of 339 entered trades, 158 of 159 longs sat
+below range_pos 0.2 and all 222 shorts above 0.8. Lowering the change floor
+with an absolute limit would silently destroy that property.
+
+`AUTO_MAX_DIST_PROPORTIONAL=true` takes the TIGHTER of the absolute limit
+and `AUTO_MAX_DIST_RANGE_RATIO x |24h change|`. It can only narrow, so
+anything that passes today still passes, and 0.2 reproduces today's geometry
+exactly (a 15% mover keeps its 3%). An unusable 24h change falls back to the
+absolute limit — never to zero, which would refuse everything silently.
+
+The LIVE RE-CHECK uses the same limit, or a candidate could be refused on
+the scan figure and admitted on the live one.
+
+### Deploy order
+
+DEMO first: `SCAN_MIN_CHANGE_PCT=4` + `AUTO_MAX_DIST_PROPORTIONAL=true`.
+Watch movers recover toward ~29 AND the entered-trade range_pos distribution
+stay where it is. Live keeps 8% until demo shows the geometry holds.
 
 ---
 

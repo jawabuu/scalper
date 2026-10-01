@@ -383,6 +383,31 @@ class BotConfig:
     auto_trade_enabled: bool = field(default_factory=lambda: _env_bool("AUTO_TRADE_ENABLED", False))
     auto_interval: int = field(default_factory=lambda: _env_int("AUTO_TRADE_INTERVAL", 30))
     auto_max_dist_pct: float = field(default_factory=lambda: _env_float("AUTO_MAX_DIST_PCT", 3.0))
+
+    # Scale the distance limit with the size of the 24h move.
+    #
+    # AUTO_MAX_DIST_PCT is ABSOLUTE, so what it means depends on the range:
+    #     a 15% mover, 3% limit -> the top 20% of the range  (an extreme)
+    #     a  4% mover, 3% limit -> the top 75% of the range  (mid-range)
+    #
+    # SCAN_MIN_CHANGE_PCT=8 was an operator judgement made in a high-breadth
+    # market, not a measurement. Breadth has fallen ~85 -> ~57 and movers
+    # ~40 -> ~15, so restoring supply means lowering the change floor — and
+    # doing that with an absolute distance limit silently turns an extremes
+    # gate into a mid-range one.
+    #
+    # The gate is currently EXACT: of 339 entered trades, 158 of 159 longs
+    # sat below range_pos 0.2 and all 222 shorts above 0.8. This keeps that
+    # geometry when the change floor drops.
+    #
+    # Proportional mode takes the TIGHTER of the absolute limit and
+    # ratio x |24h change|, so it can only narrow: anything that passes
+    # today still passes.
+    auto_max_dist_proportional: bool = field(default_factory=lambda: _env_bool(
+        "AUTO_MAX_DIST_PROPORTIONAL", False))
+    # 0.2 reproduces today's geometry: a 15% mover keeps its 3% limit.
+    auto_max_dist_range_ratio: float = field(default_factory=lambda: _env_float(
+        "AUTO_MAX_DIST_RANGE_RATIO", 0.2))
     # Absolute floor on the entry callback, as a % of price. The exchange
     # minimum is far below noise width on a mover: the two losers of 2026-09-12
     # triggered on 0.38% and 0.58% retraces, while the winner that morning had

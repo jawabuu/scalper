@@ -296,6 +296,8 @@ if __name__ == "__main__":
                 auto_cfg = AutoTradeConfig(
                     enabled=cfg.auto_trade_enabled,
                     max_dist_to_extreme_pct=cfg.auto_max_dist_pct,
+                    max_dist_proportional=cfg.auto_max_dist_proportional,
+                    max_dist_range_ratio=cfg.auto_max_dist_range_ratio,
                     veto_breakout=cfg.auto_veto_breakout,
                     long_require_convergence=cfg.auto_long_require_convergence,
                     long_require_turn=cfg.auto_long_require_turn,

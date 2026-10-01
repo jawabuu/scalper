@@ -125,6 +125,10 @@ class AutoTradeConfig:
     leg_gate_mode: str = "off"
     leg_bars_min: int = 9
     leg_bars_max: int = 14
+    # Scale the distance limit with the size of the 24h move. See
+    # effective_max_dist — it can only ever TIGHTEN the absolute limit.
+    max_dist_proportional: bool = False
+    max_dist_range_ratio: float = 0.2
     btc_regime_down_pct: float = -1.0
     btc_regime_up_pct: float = 1.0
     # Which directions may be traded: "all", "long" or "short". A fade
@@ -200,6 +204,50 @@ def distance_to_extreme(candidate_row: dict, side: str) -> float | None:
     if v is None:
         return None
     return abs(float(v))
+
+
+def effective_max_dist(cfg, candidate_row: dict) -> tuple:
+    """
+    The distance limit to apply to THIS candidate, and why.
+
+    `AUTO_MAX_DIST_PCT` is ABSOLUTE, so what it means depends entirely on how
+    big the 24h range is:
+
+        a 15% mover, 3% limit -> the top 20% of the range   (an extreme)
+        a  4% mover, 3% limit -> the top 75% of the range   (mid-range)
+
+    The operator chose 8% for SCAN_MIN_CHANGE_PCT by judgement in a
+    high-breadth market, not by measurement. Breadth has since fallen from
+    ~85 to ~57 and movers from ~40 to ~15, so the equivalent judgement today
+    is a lower change floor — but lowering it with an ABSOLUTE distance limit
+    silently converts an extremes gate into a mid-range gate.
+
+    That matters because the gate is currently exact: of 339 entered trades,
+    158 of 159 longs sat below range_pos 0.2 and all 222 shorts above 0.8.
+    Scaling the limit with the move keeps that geometry when the change floor
+    drops.
+
+    Returns (limit_pct, reason). Proportional mode takes the TIGHTER of the
+    absolute limit and `ratio * |24h change|`, so it can only ever narrow —
+    a candidate that passes today still passes.
+    """
+    base = float(getattr(cfg, "max_dist_to_extreme_pct", 3.0) or 3.0)
+    if not getattr(cfg, "max_dist_proportional", False):
+        return base, "absolute"
+    ch = candidate_row.get("change_24h_pct")
+    if ch is None:
+        return base, "absolute (24h change unknown)"
+    try:
+        ch = abs(float(ch))
+    except (TypeError, ValueError):
+        return base, "absolute (24h change unreadable)"
+    if ch <= 0:
+        return base, "absolute (24h change zero)"
+    ratio = float(getattr(cfg, "max_dist_range_ratio", 0.2) or 0.2)
+    scaled = ch * ratio
+    if scaled < base:
+        return scaled, f"{ratio:.2f} x {ch:.1f}% move"
+    return base, "absolute (cap)"
 
 
 def velocity_mode(value) -> str:
@@ -615,11 +663,12 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     if dist is None:
         return AutoDecision(False, symbol, side,
                             reason="24h range unavailable — cannot size the callback")
-    if dist > cfg.max_dist_to_extreme_pct:
+    limit, limit_why = effective_max_dist(cfg, row)
+    if dist > limit:
         extreme = "24h low" if side == "long" else "24h high"
         return AutoDecision(False, symbol, side,
                             reason=f"{dist:.2f}% from the {extreme}, "
-                                   f"limit {cfg.max_dist_to_extreme_pct}%")
+                                   f"limit {limit:.2f}% ({limit_why})")
 
     # LIVE RE-CHECK. Everything above was decided on the scan's market, which
     # can be two minutes old. If a live quote says the price has moved past
@@ -628,13 +677,15 @@ def evaluate_candidate(row: dict, streak: int, cfg: AutoTradeConfig,
     # something that has already gone.
     live_px = row.get("live_price")
     drift_pct, live_dist = live_drift(row, live_px)
-    if live_dist is not None and cfg.max_dist_to_extreme_pct:
-        if live_dist > cfg.max_dist_to_extreme_pct:
+    # The live re-check uses the SAME limit, or a candidate could be refused
+    # on the scan figure and admitted on the live one.
+    if live_dist is not None and limit:
+        if live_dist > limit:
             return AutoDecision(
                 False, symbol, side,
                 reason=(f"stale signal: the scan saw {dist:.2f}% from the 24h "
                         f"{'high' if side == 'short' else 'low'}, live is "
-                        f"{live_dist:.2f}% (limit {cfg.max_dist_to_extreme_pct}%, "
+                        f"{live_dist:.2f}% (limit {limit:.2f}%, "
                         f"drift {drift_pct:+.2f}%)"))
 
     # VOLUME DEFERRAL, SHORTS ONLY. Volume still building into the high means
