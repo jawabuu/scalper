@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.1.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
+**v4.2.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.2.0 adds tools/scorecard.py — score each MECHANISM against its own goal,
+because P&L cannot separate four simultaneous changes.
 v4.1.0 adds AUTO_MAX_DIST_PROPORTIONAL so the change floor can be lowered
 without turning an extremes gate into a mid-range one.
 v4.0.0 adds LEG_GATE_MODE — "middle of the move", the first long-side result
@@ -1815,6 +1817,58 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## SCORE MECHANISMS, NOT P&L (v4.2.0)
+
+    docker logs --since 6h $(docker ps -q -f name=scalper-1) 2>&1 \
+      | docker exec -i $(docker ps -q -f name=scalper-1) \
+          python tools/scorecard.py -
+
+Four changes are live at once — change floor, proportional distance, maker
+entry, stop floor — and more are queued. **P&L cannot separate them, and
+waiting for enough trades to separate them means months.** But each was
+built to do ONE measurable thing, and most are observable long before any
+P&L signal:
+
+    supply        movers per scan          target ~30
+    maker entry   fee as % of notional     target 0.070%
+    maker fill    filled / RESOLVED        kill below 50%
+    defer         started -> placed        diagnostic
+    stop floor    median stop in % price   target >= 1.00%
+    leg gate      blocked share            diagnostic
+    btc regime    blocked share            diagnostic
+
+**A mechanism missing its OWN target is broken whatever P&L does. One
+hitting its target has done its job — whether the goal was worth having is
+a separate and much slower argument.**
+
+Details it gets right because each was learned the hard way: fill rate is
+measured on RESOLVED not placed (pending orders are not failures); a low
+fill rate mentions the HALT confound that produced a wrong kill call on
+09-26; silence on the distance gate is explicitly NOT read as evidence,
+since the reason string prints only when the gate fires; and a gate blocking
+over 80% is called out, because BTC_REGIME_MODE at 91% would have
+near-halted the best week of the investigation.
+
+### SETTLED: ENTRY_DEFER_S vs AUTO_STRENGTH_SWEEPS
+
+Both require persistence, and at the current settings they overlap:
+
+    AUTO_STRENGTH_SWEEPS=2   qualify at 2 SCAN BOUNDARIES, ~120s apart,
+                             SAMPLED
+    ENTRY_DEFER_S=120        keep qualifying for 120s CONTINUOUSLY,
+                             checked every ~30s auto-trade cycle
+
+**The defer is strictly harder.** A candidate that flickers out between
+scans passes sweeps and fails the defer. So anything clearing the defer has
+necessarily been qualifying across two scans — which makes
+`AUTO_STRENGTH_SWEEPS=2` A NO-OP when the defer is on.
+
+`AUTO_STRENGTH_SWEEPS=1` alongside `ENTRY_DEFER_S=120` is the honest
+configuration. Setting sweeps to 2 adds nothing and makes the refusal counts
+harder to read, because `streak` refusals then shadow defer refusals.
 
 ---
 
