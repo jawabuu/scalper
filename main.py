@@ -95,6 +95,10 @@ if __name__ == "__main__":
         from bot.futures_guardian import FuturesGuardian
         from bot.api import set_guardian
         gcfg = GuardConfig(
+            # So a broken exchange payload falls back to the venue's real
+            # setting instead of 1x. LDO 2026-10-01 sized a trail at 5.0% of
+            # price instead of 0.3% because effective leverage resolved to 1.
+            declared_leverage=cfg.entry_target_leverage,
             initial_stop_roi=cfg.guard_initial_stop_roi,
             arm_roi=cfg.guard_arm_roi,
             callback_roi=cfg.guard_callback_roi,

@@ -1051,6 +1051,11 @@ class EntryService:
                     # Price when the order was SIZED. A trailing-stop entry
                     # rests until price retraces, so the fill can be minutes
                     # and several percent away from this.
+                    # The qty the ORDER was placed for. A maker limit fills in
+                    # pieces, so the guardian needs to know whether the
+                    # position it sees is the whole thing before it places a
+                    # trail it will never revise. See _arm_at_entry.
+                    "sized_qty": plan.qty,
                     "sized_price": plan.ref_price,
                 })
         except Exception as e:

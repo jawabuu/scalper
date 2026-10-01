@@ -655,14 +655,43 @@ class FuturesGuardian:
                 # it implies believable".
                 implied = (notional / margin) if margin > 0 else 0.0
                 if margin <= 0 or implied < 1.5:
-                    reconstructed = notional / max(lev, 1)
+                    # RECONSTRUCT FROM A LEVERAGE WE ACTUALLY BELIEVE.
+                    #
+                    # Dividing the notional by the REPORTED leverage forces
+                    # derived leverage to exactly that figure — so when the
+                    # report is itself 1, it manufactures a 1x position out of
+                    # a 20x one. That is the collapse:
+                    #
+                    #   LDO 2026-10-01 17:09:59
+                    #     order qty 4699, notional 2069, margin 103.47
+                    #     only 103 contracts had FILLED -> notional 44.80
+                    #     margin field still 101.90 (the whole order)
+                    #     implied 0.44x -> reconstruct from lev=1 -> 1.00x
+                    #     armed trail sized 5.0% of price instead of 0.3%,
+                    #     activation 9.8% away, never armed.
+                    #
+                    # PARTIAL FILLS ARE WHY THIS APPEARED NOW. A
+                    # TRAILING_STOP_MARKET entry fills in one go; a post-only
+                    # LIMIT fills in pieces, so the notional lags the margin
+                    # for as long as the order is working. Five symbols hit
+                    # this in 28 minutes after ENTRY_ORDER_TYPE=maker_limit.
+                    #
+                    # The operator's ENTRY_TARGET_LEVERAGE is the one figure
+                    # that is true regardless of fill state.
+                    declared = float(
+                        getattr(self.cfg, "declared_leverage", 0.0) or 0.0)
+                    use_lev = lev if lev >= 1.5 else (
+                        declared if declared >= 1.5 else max(lev, 1))
+                    reconstructed = notional / use_lev
                     log.warning(
                         f"{p.get('symbol')}: margin field unusable "
                         f"({margin_raw!r} -> {margin:.4f}, implying {implied:.2f}x "
                         f"leverage on a {notional:.2f} notional). Reconstructing "
-                        f"{reconstructed:.4f} from leverage={lev}. Cross-margin "
-                        f"positions report this differently — verify ROI against "
-                        f"the Binance UI."
+                        f"{reconstructed:.4f} from leverage={use_lev:g}"
+                        + (f" (declared; reported {lev} was unusable)"
+                           if use_lev != lev else "")
+                        + ". A PARTIAL FILL does this: notional lags the "
+                          "margin while a maker limit is still working."
                     )
                     margin = reconstructed
 
@@ -680,6 +709,8 @@ class FuturesGuardian:
                     symbol=p["symbol"], side=side, entry_price=entry,
                     qty=abs(contracts), leverage=max(lev, 1), margin=margin,
                     updated_at=upd,
+                    declared_leverage=float(
+                        getattr(self.cfg, "declared_leverage", 0.0) or 0.0),
                 )
                 # Sanity-check the derived leverage against the reported one.
                 eff = pos.effective_leverage
@@ -688,6 +719,24 @@ class FuturesGuardian:
                         f"{pos.symbol}: derived leverage {eff:.1f}x differs from "
                         f"reported {lev}x — using derived (notional/margin)."
                     )
+                # A COLLAPSE TO 1x IS NEVER NORMAL on a leveraged venue, and
+                # it is silent: every ROI reads small and every stop distance
+                # reads wide. LDO 2026-10-01 sized an armed trail at 5.0% of
+                # price instead of 0.3% this way, with an activation 9.8%
+                # away that could never be reached.
+                #
+                # The usual cause is a PARTIAL REDUCTION: qty falls, the
+                # margin field does not follow, and derived leverage collapses
+                # below the 1.5 guard.
+                if eff < 1.5:
+                    log.error(
+                        f"LEVERAGE-COLLAPSE {pos.symbol}: effective leverage "
+                        f"resolved to {eff:.2f}x (reported {lev}, margin "
+                        f"{margin:.4f}, notional {pos.notional:.4f}). Every "
+                        f"stop distance derived from this is WRONG BY THAT "
+                        f"FACTOR. Usually a partial reduction leaving a stale "
+                        f"margin field. Set ENTRY_TARGET_LEVERAGE so there is "
+                        f"a true value to fall back on.")
                 out.append(pos)
             except Exception as e:
                 log.debug(f"skipping unparseable position {p.get('symbol')}: {e}")
@@ -1922,6 +1971,39 @@ class FuturesGuardian:
         if getattr(state, "armed", False):
             return                  # already past arm_roi — let the arm block
                                     # place it live rather than dormant here
+        # DO NOT ARM A POSITION THAT IS STILL FILLING.
+        #
+        # This trail is placed ONCE and never revised, so it must be sized
+        # against the position that will exist, not a fraction of it.
+        #
+        # LDO 2026-10-01: a maker limit for 4699 contracts had filled 103 when
+        # the guardian adopted it. It sized the armed trail for 103, from a
+        # leverage the partial fill had corrupted to 1x — 5.0% callback with
+        # an activation 9.8% away that never armed. The other 4596 contracts
+        # arrived into a position whose protection was sized for 2% of it.
+        #
+        # A TRAILING_STOP_MARKET entry fills in one go, so this could not
+        # happen before ENTRY_ORDER_TYPE=maker_limit. Five symbols hit it in
+        # 28 minutes.
+        #
+        # Deferring is safe: the fixed stop and the adaptive trail are already
+        # placed by the time this runs, and the next poll re-tries. Arming a
+        # fraction is not.
+        sized_qty = None
+        try:
+            meta = (self._pos_meta or {}).get(pos.symbol) or {}
+            ctx = meta.get("entry_context") or {}
+            sized_qty = ctx.get("sized_qty")
+        except Exception:
+            sized_qty = None
+        if sized_qty and pos.qty and pos.qty < float(sized_qty) * 0.9:
+            log.warning(
+                f"{pos.symbol}: NOT arming at entry — position is {pos.qty:g} "
+                f"of a sized {float(sized_qty):g} ({pos.qty/float(sized_qty):.0%} "
+                f"filled). A maker limit still working would leave this trail "
+                f"sized for a fraction of the final position. Retrying next "
+                f"poll; the fixed stop and adaptive trail are already placed.")
+            return
         arm_roi = float(getattr(self.cfg, "arm_roi", 0) or 0)
         if arm_roi <= 0:
             return

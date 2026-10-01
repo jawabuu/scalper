@@ -1,10 +1,14 @@
 # Handover — Binance futures scalping bot
 
-**v4.2.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
+**v4.3.1**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.3.1 fixes the ROOT CAUSE: a PARTIAL FILL corrupts derived leverage, and
+maker entries fill in pieces.
+v4.3.0 stops effective_leverage collapsing to 1x — it sized a trail SIXTEEN
+TIMES too wide and left a position on its fixed stop alone.
 v4.2.0 adds tools/scorecard.py — score each MECHANISM against its own goal,
 because P&L cannot separate four simultaneous changes.
 v4.1.0 adds AUTO_MAX_DIST_PROPORTIONAL so the change floor can be lowered
@@ -1817,6 +1821,100 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## LEVERAGE COLLAPSE TO 1x — a trail sized 16x too wide (v4.3.0)
+
+LDO, demo, 2026-10-01:
+
+    16:09:52  ARMED native trailing stop (callback 0.3% price = 6% ROI at 20x)
+    16:11-12  position partially reduced, four orders cancelled
+    17:10:03  ARMED native trailing stop (callback 5.0% price = 5% ROI at 1x)
+    17:10:03  ARMED trail ... DORMANT until price reaches it (9.822% away)
+
+**`at 1x`.** `effective_leverage` resolved to 1 instead of 20, so the armed
+trail was sized at 5.0% of price instead of 0.3% — SIXTEEN TIMES TOO WIDE —
+with an activation 9.8% away that could never be reached. The position ran on
+its fixed stop alone and drifted 13 ROI points past where the dashboard said
+its stop was.
+
+### ROOT CAUSE (v4.3.1): a PARTIAL FILL, caused by maker entries
+
+    16:07:49  ENTRY PLACED qty=4699 margin=103.47 notional=2069.44
+    17:09:59  margin field unusable (101.90 implying 0.44x on a 44.80 notional)
+              Reconstructing 44.8050 from leverage=1
+    17:10:02  adaptive trail 20.0% outside the 0.1-10% band — leaving the
+              fixed stop alone
+    17:10:02  TRAIL-REQUEST qty=103.0 callbackRate 5.0 activatePrice 0.4785
+
+**Only 103 of 4699 contracts had filled.** Notional read 44.80 while the
+margin field still showed 101.90 for the whole order — implied 0.44x.
+
+The reconstruction then made it worse: dividing the notional by the REPORTED
+leverage forces derived leverage to exactly that figure, and the report was
+1. So a 20x position became a 1x one.
+
+**THIS COULD NOT HAPPEN BEFORE `ENTRY_ORDER_TYPE=maker_limit`.** A
+TRAILING_STOP_MARKET entry fills in one go; a post-only LIMIT fills in
+pieces, so the notional lags the margin for as long as the order is working.
+Five symbols hit it in 28 minutes: MOVE, USELESS, BLUR, GRASS, LDO.
+
+And LDO came out worse than the trail alone: `adaptive trail 20.0% outside
+the 0.1-10% band` means it got NO adaptive trail either. Fixed stop only,
+for a position whose armed trail could never arm.
+
+### Two fixes
+
+1. **Reconstruct from a leverage we believe**: reported if >= 1.5, else the
+   operator's declared `ENTRY_TARGET_LEVERAGE`, else the old behaviour.
+2. **Do not arm a position that is still filling.** The armed trail is placed
+   ONCE and never revised, so it must be sized against the position that will
+   exist. `sized_qty` is now on the entry handoff; if the live position is
+   under 90% of it, arming defers to the next poll. The fixed stop and
+   adaptive trail are already placed by then, so deferring is safe — arming a
+   fraction is not.
+
+A missing `sized_qty` (operator-opened positions, restarts) does NOT block
+arming.
+
+### The mechanism
+
+    qty 4699 -> 103     partial reduction
+    notional            103 x 0.4359 = 44.90
+    margin              30.65  (STALE, still reflects the larger position)
+    derived             1.46   -> just under the >= 1.5 guard
+    reported field      1      -> fallback returns 1.0
+
+**Returning 1.0 is not a safe default, it is the WORST one.** Every ROI
+figure reads small and every stop distance reads wide by the leverage factor,
+and nothing downstream can tell.
+
+### The fix
+
+`FuturesPosition.declared_leverage` carries `ENTRY_TARGET_LEVERAGE` onto the
+position. Order of preference: derived (if >= 1.5) -> reported (if >= 1.5) ->
+declared (if >= 1.5) -> 1. Derived still wins when healthy, so a position
+opened at a different leverage is never mis-sized.
+
+And the collapse is now LOUD — `LEVERAGE-COLLAPSE` at ERROR, naming the
+margin, the notional and the likely cause.
+
+### Watch for it
+
+    docker logs $(docker ps -q -f name=scalper-1) 2>&1 | grep LEVERAGE-COLLAPSE
+
+Any position that is partially reduced is a candidate. The underlying issue —
+a stale margin field after a reduction — is NOT fixed; this makes the
+consequence survivable and visible rather than silent.
+
+### How it was found
+
+The operator noticed two demo positions had lived 30+ minutes against a
+1.3-minute median hold and asked why the trail was not firing. The dashboard
+showed LDO at peak +34.42% with a stop at +28.02% and current +21.16% — the
+stop ABOVE the price, which should have triggered. It had not, because the
+order resting on the exchange was a 5% callback that had never armed.
 
 ---
 

@@ -41,6 +41,9 @@ class FuturesPosition:
     # effectively the FILL time, which is the only honest reference for how
     # late the guardian was. Optional: not every construction site has it.
     updated_at: float | None = None
+    # The operator's ENTRY_TARGET_LEVERAGE, so a broken exchange payload has
+    # something TRUE to fall back to instead of 1x. See effective_leverage.
+    declared_leverage: float = 0.0
 
     def __post_init__(self):
         if self.side not in ("long", "short"):
@@ -69,6 +72,27 @@ class FuturesPosition:
             # by it, which is silent and total. Prefer the reported field.
             if derived >= 1.5:
                 return derived
+        # NEITHER SOURCE IS USABLE.
+        #
+        # LDO 2026-10-01: the position was partially reduced (qty 4699 -> 103)
+        # and the margin field did not follow, so derived leverage collapsed
+        # from ~20 to 1.46 — just under the guard above — and the reported
+        # field came back as 1. The guardian then sized the armed trail as
+        # "callback 5.0% price = 5% ROI at 1x" instead of 0.3% at 20x:
+        # SIXTEEN TIMES TOO WIDE, with an activation 9.8% away that could
+        # never be reached. The position ran on the fixed stop alone and
+        # drifted 13 ROI points past where the dashboard said its stop was.
+        #
+        # Returning 1.0 is not a safe default, it is the WORST one: every ROI
+        # figure reads small and every stop distance reads wide, and nothing
+        # downstream can tell. Prefer the reported field, then the operator's
+        # declared ENTRY_TARGET_LEVERAGE, and only then 1.
+        reported = float(self.leverage or 0.0)
+        if reported >= 1.5:
+            return reported
+        declared = float(self.declared_leverage or 0.0)
+        if declared >= 1.5:
+            return declared
         return float(self.leverage or 1)
 
 
@@ -186,6 +210,10 @@ class GuardConfig:
     # The result is clamped so it can never be absurdly tight or wide.
     atr_stop_mult: float = 0.0
     atr_stop_min_roi: float = 4.0
+    # ENTRY_TARGET_LEVERAGE, so a broken exchange payload falls back to the
+    # venue's real setting instead of 1x, which silently widens every stop by
+    # the leverage factor. See FuturesPosition.effective_leverage.
+    declared_leverage: float = 0.0
     atr_stop_max_roi: float = 30.0
     # When a position is discovered ALREADY worse than its stop, the exchange
     # rejects the stop ("would trigger immediately"). Trailing it instead
