@@ -1763,6 +1763,51 @@ class FuturesGuardian:
             self._log_trail_response(pos, params, order)
             return order
 
+    def _trail_covers_position(self, pos, state) -> bool:
+        """
+        Does the resting native trail still cover the whole position?
+
+        A TRAILING_STOP_MARKET is reduceOnly and sized once. If the position
+        grew after it was placed — a maker limit filling in pieces — the order
+        can close only the qty it was placed for, and the remainder is left
+        open when it fires.
+
+        USELESS 2026-10-02: trail placed for 392 contracts, position grew past
+        1200 heading for 7937. Peak +13.25% fell through a +7.25% stop that
+        could not close it.
+
+        Returns True when there is nothing to do (no trail, no recorded qty,
+        or the coverage is still good). Cancels and clears a short trail so the
+        normal placement path replaces it on the next poll.
+        """
+        tid = getattr(state, "native_trail_id", None)
+        placed = float(getattr(state, "native_trail_qty", 0) or 0)
+        live = float(getattr(pos, "qty", 0) or 0)
+        if not tid or placed <= 0 or live <= 0:
+            return True
+        if live <= placed * 1.05:
+            return True
+        log.error(
+            f"TRAIL-UNDERSIZED {pos.symbol}: the resting trail {tid} covers "
+            f"{placed:g} of {live:g} contracts ({placed/live:.0%}). It is "
+            f"reduceOnly, so firing it would leave {live-placed:g} open. "
+            f"Cancelling so a correctly sized one replaces it.")
+        try:
+            self.exchange.cancel_order(tid, pos.symbol)
+        except Exception as e:
+            # Queue it rather than leaving a stale reduceOnly order behind:
+            # neither the listing nor the cancel result is trustworthy here,
+            # so the bot's own queue is the durable record.
+            log.warning(f"{pos.symbol}: could not cancel undersized trail "
+                        f"{tid} ({_safe_err(e)}) — queued.")
+            self._queue_pending_cancel(pos.symbol, tid)
+        state.native_trail_id = None
+        state.native_trail_qty = 0.0
+        state.armed = False          # let arm-at-entry/runtime re-place it
+        self._record(pos.symbol, "trail_undersized",
+                     f"{placed:g}/{live:g} contracts, re-placing")
+        return False
+
     def _place_native_trail(self, pos: FuturesPosition,
                             rescue: bool = False,
                             callback_pct: float | None = None,
@@ -1778,6 +1823,40 @@ class FuturesGuardian:
         position's leverage; that is why the lock-in check happens here rather
         than at startup.
         """
+        # A TRAIL IS SIZED FOR A qty AND NEVER REVISED. If the position is
+        # still filling, the order covers a FRACTION of what will exist — and
+        # because it is reduceOnly, firing it leaves the rest open.
+        #
+        # USELESS 2026-10-02 05:22: a maker limit for 7937 contracts had
+        # filled 392 (5%). The armed trail went on for 392, the adaptive trail
+        # was cancelled as "superseded", and stop_order_id was None. The
+        # position grew past 1200 contracts covered by a trail that could
+        # close 392 of them, and sailed from +13.25% peak down through a
+        # +7.25% stop that could not close it.
+        #
+        # This guard lives HERE, in the shared placement helper, because the
+        # first attempt put it in _arm_at_entry only and the RUNTIME arm path
+        # walked straight past it. Guarding one call site and missing its
+        # sibling is the same error that left MANUAL_INITIAL_GUARD_ONLY
+        # incomplete twice.
+        #
+        # Deferring is safe: the fixed stop and the adaptive trail are placed
+        # before this runs, and the next poll retries. A trail sized for 5% of
+        # the position is not.
+        sized_qty = None
+        try:
+            meta = (self._pos_meta or {}).get(pos.symbol) or {}
+            sized_qty = (meta.get("entry_context") or {}).get("sized_qty")
+        except Exception:
+            sized_qty = None
+        if sized_qty and pos.qty and pos.qty < float(sized_qty) * 0.9:
+            log.warning(
+                f"{pos.symbol}: NOT placing a native trail — position is "
+                f"{pos.qty:g} of a sized {float(sized_qty):g} "
+                f"({pos.qty/float(sized_qty):.0%} filled). A reduceOnly trail "
+                f"sized now would close only that fraction and leave the rest "
+                f"open. Retrying next poll.")
+            return None
         lev = pos.effective_leverage
         if rescue:
             # RESCUE trail: the fixed stop was refused and this is the only
@@ -2036,6 +2115,7 @@ class FuturesGuardian:
         if not trail_id:
             return
         state.native_trail_id = trail_id
+        state.native_trail_qty = float(getattr(pos, "qty", 0) or 0)
         self._all_stop_ids.setdefault(pos.symbol, []).append(trail_id)
         log.warning(
             f"{pos.symbol}: ARMED AT ENTRY — trail resting with activation at "
@@ -2866,6 +2946,11 @@ class FuturesGuardian:
                 state._verified = True
             elif not getattr(state, "_verify_due", 0):
                 state._verify_due = time.time() + self.poll_interval
+
+        # Does the resting trail still cover the position? A maker limit
+        # filling in pieces grows it after the trail was sized. Checked every
+        # poll because the growth is gradual.
+        self._trail_covers_position(pos, state)
 
         _atr_pct, _recent_tr_pct = self._vol_for(pos)
         state, stop_price, reason = evaluate(

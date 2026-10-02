@@ -117,6 +117,11 @@ class GuardState:
     # set the exchange manages the trail tick-by-tick and the guardian stops
     # repositioning anything.
     native_trail_id: str | None = None
+    # The qty the native trail was PLACED for. A trail is reduceOnly and never
+    # revised, so if the position later grows past it the order can only close
+    # part of the position. USELESS 2026-10-02 had a trail for 392 contracts
+    # on a position heading for 7937. See _trail_covers_position.
+    native_trail_qty: float = 0.0
     # True once the armed trail has REPLACED a fixed stop. Distinct from
     # native_trail_id, because a trail armed at ENTRY replaces nothing — the
     # initial fixed stop still has to be placed.

@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.4.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
+**v4.5.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.5.0 stops a reduceOnly trail being sized for a FRACTION of a position
+that is still filling, and notices when one is outgrown.
 v4.4.0 lets replay_exits.py test FAIL-FAST levels offline on live's own
 trades — demo can no longer stand in for live.
 v4.3.1 fixes the ROOT CAUSE: a PARTIAL FILL corrupts derived leverage, and
@@ -1823,6 +1825,55 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## A reduceOnly TRAIL SIZED FOR 5% OF THE POSITION (v4.5.0)
+
+USELESS, demo, 2026-10-02 05:22:
+
+    05:22:17  margin field unusable ... Reconstructing from leverage=20
+              (declared; reported 1 was unusable)        <- v4.3.1 WORKED
+    05:22:27  TRAIL-REQUEST qty=392  callbackRate 0.3    <- sized_qty was 7937
+    05:22:28  ARMED native trailing stop (0.3% = 6% ROI at 20x)  <- correct
+    05:22:30  adaptive trail superseded by the armed trail — cancelled
+
+The leverage fix held and the callback was right. **But the position was 5%
+filled.** The trail went on for 392 of 7937 contracts, the adaptive trail was
+cancelled as superseded, and `stop_order_id` was None.
+
+The position then grew past 1200 contracts covered by a reduceOnly order that
+could close 392 of them — and fell from a +13.25% peak straight through a
++7.25% stop that **could not close it**.
+
+### Two failures, the second only possible because of the first
+
+**1. The trail was PLACED while the position was still filling.** v4.3.1 put
+that guard in `_arm_at_entry`, but this trail came from the RUNTIME arm path,
+which walked straight past it. The guard now lives in
+`_place_native_trail` — the SHARED helper every path uses.
+
+**Guarding one call site and missing its sibling is the same error that left
+MANUAL_INITIAL_GUARD_ONLY incomplete TWICE** (the breakeven ratchet, then the
+runtime arm). When a behaviour has several entry points, gate the helper.
+
+**2. Nothing noticed afterwards.** `GuardState.native_trail_qty` now records
+what a trail was placed for, and `_trail_covers_position` runs every poll: if
+live qty exceeds it by more than 5%, the trail is cancelled (queued if the
+cancel fails) and `armed` is cleared so a correctly sized one replaces it.
+New log line: **`TRAIL-UNDERSIZED`**.
+
+The 5% tolerance exists so rounding and small reductions do not churn
+protective orders.
+
+### Why this only appeared now
+
+A `TRAILING_STOP_MARKET` entry fills in one go. A post-only LIMIT fills in
+pieces, so every position is briefly a fraction of itself.
+`ENTRY_ORDER_TYPE=maker_limit` made a previously impossible state routine.
+
+**Anything that reads position state during the fill window is suspect.** The
+leverage collapse and this are the same root cause seen twice.
 
 ---
 
