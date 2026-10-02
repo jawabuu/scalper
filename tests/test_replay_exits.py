@@ -174,3 +174,87 @@ def test_the_variants_are_configurable_from_the_cli():
     src = inspect.getsource(re.main)
     assert "--ff-roi" in src and "--ff-peak-ceiling" in src
     assert "ff_pct=ff_roi / lev" in src, "ROI must be converted to price %"
+
+
+# ── RUNNER MODE: widen the trail once ahead and never deeply red ──────────
+
+def test_runner_mode_widens_the_trail_above_the_threshold():
+    """
+    Continuation on 312 demo trades is a near-constant ~1/3 at every level
+    (5->10: 53%, 10->20: 38%, 20->40: 30%, 40->60: 38%). A power-law tail is
+    the condition under which letting winners run beats banking them.
+    """
+    # rises to +3%, then retraces 1.2% from the high
+    c = [(0, 100.0, 103.0, 100.0, 103.0), (1, 103.0, 103.0, 101.8, 101.8)]
+    _px, why = re.replay(c, "long", 100.0, callback_pct=1.0, stop_pct=None,
+                         tp_pct=None)
+    assert why == "trail", "a 1% callback fires on a 1.2% retrace"
+    _px, why = re.replay(c, "long", 100.0, callback_pct=1.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0)
+    assert why != "trail", "at 2x the callback is 2%, so it survives"
+
+
+def test_runner_mode_does_NOT_apply_below_the_threshold():
+    c = [(0, 100.0, 101.0, 100.0, 101.0), (1, 101.0, 101.0, 99.8, 99.8)]
+    _px, why = re.replay(c, "long", 100.0, callback_pct=1.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=5.0, runner_mult=2.0)
+    assert why == "trail", "peak never reached the runner threshold"
+
+
+def test_a_trade_that_went_DEEPLY_RED_is_not_a_runner():  # noqa: D401
+    """
+    Of 27 trades peaking >= +20% ROI, only 2 ever dipped below -5% and NONE
+    below -10%. A trade that goes deeply red is not a future big winner, so
+    it must not be granted extra room.
+    """
+    # dips to -6% first, then rallies to +3%, then retraces
+    c = [(0, 100.0, 100.0, 94.0, 94.0),
+         (1, 94.0, 110.0, 94.0, 110.0),
+         (2, 110.0, 110.0, 101.0, 101.0)]
+    _px, why = re.replay(c, "long", 100.0, callback_pct=8.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0,
+                         runner_max_trough_pct=5.0)
+    assert why == "trail", "the -6% dip disqualifies it from runner mode"
+
+
+def test_the_trough_filter_can_be_disabled():
+    # A WIDE callback so the dip itself does not trigger the trail — with a
+    # 1% callback a -6% dip exits on bar 0 before any rally can happen.
+    c = [(0, 100.0, 100.0, 94.0, 94.0),
+         (1, 94.0, 110.0, 94.0, 110.0),
+         (2, 110.0, 110.0, 92.0, 92.0)]
+    # best = 110. At 1x the trigger is 101.2; at 2x it is 92.4. A retrace to
+    # 92 clears BOTH, so the two branches are distinguished by the LABEL.
+    _px, why = re.replay(c, "long", 100.0, callback_pct=8.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0,
+                         runner_max_trough_pct=None)
+    assert why == "runner", "filter off -> the -6% dip does not disqualify it"
+    _px, why = re.replay(c, "long", 100.0, callback_pct=8.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0,
+                         runner_max_trough_pct=5.0)
+    assert why == "trail", "filter on -> the dip disqualifies it"
+
+
+def test_runner_exits_are_LABELLED_separately():
+    # So the exit mix shows how often the wider trail actually mattered.
+    c = [(0, 100.0, 105.0, 100.0, 105.0), (1, 105.0, 105.0, 102.0, 102.0)]
+    _px, why = re.replay(c, "long", 100.0, callback_pct=1.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0)
+    assert why == "runner"
+
+
+def test_shorts_are_handled_symmetrically():
+    # best = 97 (a +3% short gain). At 2x the callback is 2.0%, so the
+    # trigger is 97 * 1.02 = 98.94 — the retrace must clear THAT, not 1%.
+    c = [(0, 100.0, 100.0, 97.0, 97.0), (1, 97.0, 99.5, 97.0, 99.5)]
+    _px, why = re.replay(c, "short", 100.0, callback_pct=1.0, stop_pct=None,
+                         tp_pct=None, runner_at_pct=2.0, runner_mult=2.0)
+    assert why == "runner"
+
+
+def test_the_cli_exposes_all_three_knobs():
+    import inspect
+    src = inspect.getsource(re.main)
+    for flag in ("--runner-at", "--runner-mult", "--runner-max-trough"):
+        assert flag in src
+    assert "runner_at_pct=at_roi / lev" in src, "ROI must convert to price %"

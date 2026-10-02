@@ -69,7 +69,8 @@ def _rows(path: Path) -> list:
 
 
 def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
-           use_trail=True, ff_pct=None, ff_after_bars=1, ff_peak_ceiling=None):
+           use_trail=True, ff_pct=None, ff_after_bars=1, ff_peak_ceiling=None,
+           runner_at_pct=None, runner_mult=2.0, runner_max_trough_pct=None):
     """
     Walk 1m candles and return the exit price under one rule set.
 
@@ -87,13 +88,36 @@ def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
     #     (_peak_ceiling = GUARD_BREAKEVEN_AT_ROI)
     # Both conditions matter. Modelling it as a plain stop would cut trades
     # the real rule never touches and overstate the saving.
+    # RUNNER MODE. Once a trade is meaningfully ahead AND has never been
+    # deeply red, widen the trail so a continuation can express itself.
+    #
+    # The continuation structure on 312 demo trades:
+    #     reached  5% -> reached 10%:  53%
+    #     reached 10% -> reached 20%:  38%
+    #     reached 20% -> reached 40%:  30%
+    #     reached 40% -> reached 60%:  38%
+    # A near-constant rate is a POWER-LAW TAIL: the expected remaining move
+    # does not shrink as the move grows, which is the condition under which
+    # letting winners run beats banking them.
+    #
+    # And the filter is clean: of 27 trades peaking >= +20% ROI, only 2 ever
+    # dipped below -5% and NONE below -10%. Big winners declare themselves
+    # early, so "give it room" and "cut it fast" apply to DIFFERENT trades.
+    #
+    # NOTE patience is not the differentiator — median hold at +20% peak is
+    # 1.3 min, same as everything else. The runner is not slow, it is still
+    # running. This widens the trail; it does not hold for time.
     peak_pct = 0.0
+    trough_pct = 0.0
     for bar_i, (_ts, _o, high, low, close) in enumerate(candles):
         adverse = high if short else low
         favourable = low if short else high
         fav_pct = ((entry - favourable) / entry * 100 if short
                    else (favourable - entry) / entry * 100)
         peak_pct = max(peak_pct, fav_pct)
+        adv_pct = ((adverse - entry) / entry * 100 if short
+                   else (entry - adverse) / entry * 100)
+        trough_pct = min(trough_pct, -adv_pct)
 
         # 0. fail-fast, before the wider rules — it is the tightest level and
         #    the real guardian evaluates it on its own poll, not after them.
@@ -110,9 +134,16 @@ def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
             if (short and adverse >= hit) or (not short and adverse <= hit):
                 return hit, "stop"
         if use_trail and callback_pct:
-            trig = best * (1 + callback_pct / 100) if short else best * (1 - callback_pct / 100)
+            cb = callback_pct
+            runner = (runner_at_pct is not None
+                      and peak_pct >= runner_at_pct
+                      and (runner_max_trough_pct is None
+                           or trough_pct >= -abs(runner_max_trough_pct)))
+            if runner:
+                cb = callback_pct * runner_mult
+            trig = best * (1 + cb / 100) if short else best * (1 - cb / 100)
             if (short and adverse >= trig) or (not short and adverse <= trig):
-                return trig, "trail"
+                return trig, ("runner" if runner else "trail")
 
         # 2. only then the favourable one
         if tp_pct is not None:
@@ -166,6 +197,15 @@ def main() -> int:
                    help="replay only trades with this exit_reason")
     p.add_argument("--peak-band", default=None,
                    help="LO,HI on peak_roi (ROI %%, as recorded)")
+    p.add_argument("--runner-at", type=float, nargs="*", default=[],
+                   help="widen the trail once peak ROI%% reaches this, e.g. "
+                        "--runner-at 5 10 20")
+    p.add_argument("--runner-mult", type=float, nargs="*", default=[2.0],
+                   help="how much wider, as a multiple of the callback")
+    p.add_argument("--runner-max-trough", type=float, default=5.0,
+                   help="runner mode only applies if the trade never dipped "
+                        "below this ROI%% (0 disables the filter). Of 27 "
+                        "trades peaking >= +20%%, only 2 ever dipped below -5%%")
     p.add_argument("--ff-roi", type=float, nargs="*", default=[],
                    help="fail-fast cut levels in ROI%% to simulate, e.g. "
                         "--ff-roi 3 3.5 4 5 (current live is 5)")
@@ -207,8 +247,10 @@ def main() -> int:
           f"{args.minutes} min forward — {len(ripe)} candle fetches, "
           f"expect ~{max(1, len(ripe)//60)} min\n", file=sys.stderr)
 
-    ORDER = ["actual", "trail only", "trail + TP", "TP only"] + [
-        "fail-fast %g%%" % v for v in args.ff_roi]
+    ORDER = (["actual", "trail only", "trail + TP", "TP only"]
+             + ["runner %g%%x%g" % (a, m)
+                for a in args.runner_at for m in args.runner_mult]
+             + ["fail-fast %g%%" % v for v in args.ff_roi])
     out = {k: ([], []) for k in ORDER}
     for i, t in enumerate(ripe, 1):
         if len(ripe) >= 50 and i % 25 == 0:
@@ -245,6 +287,16 @@ def main() -> int:
                     ("TP only",    dict(tp_pct=tp_pct, use_trail=False))]
         ceiling = (args.ff_peak_ceiling / lev
                    if args.ff_peak_ceiling is not None else None)
+        # RUNNER variants: widen the trail once ahead and never deeply red.
+        for at_roi in args.runner_at:
+            for mult in args.runner_mult:
+                variants.append((
+                    "runner %g%%x%g" % (at_roi, mult),
+                    dict(tp_pct=None, use_trail=True,
+                         runner_at_pct=at_roi / lev, runner_mult=mult,
+                         runner_max_trough_pct=(args.runner_max_trough / lev
+                                                if args.runner_max_trough
+                                                else None))))
         for ff_roi in args.ff_roi:
             variants.append((
                 "fail-fast %g%%" % ff_roi,

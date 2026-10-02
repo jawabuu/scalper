@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.5.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
+**v4.6.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.6.0 adds RUNNER MODE to the replay — the continuation rate is a power-law
+tail, and big winners never go deeply red first.
 v4.5.0 stops a reduceOnly trail being sized for a FRACTION of a position
 that is still filling, and notices when one is outgrown.
 v4.4.0 lets replay_exits.py test FAIL-FAST levels offline on live's own
@@ -1825,6 +1827,68 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## THE CONTINUATION RATE IS A POWER-LAW TAIL (v4.6.0)
+
+312 demo bot trades, by peak ROI:
+
+    reached  5% -> reached 10%:  71 of 133 = 53%
+    reached 10% -> reached 20%:  27 of  71 = 38%
+    reached 20% -> reached 40%:   8 of  27 = 30%
+    reached 40% -> reached 60%:   3 of   8 = 38%
+
+**A near-constant continuation rate at every level.** The expected remaining
+move does not shrink as the move grows — which is precisely the condition
+under which letting winners run beats banking them.
+
+### And big winners declare themselves EARLY
+
+    of 27 trades that peaked >= +20% ROI:
+       2 ever dipped below  -5% ROI
+       0 ever dipped below -10% ROI
+
+So "give it room" and "cut it fast" are NOT in conflict — they apply to
+DIFFERENT trades, separable by whether the position has ever been meaningfully
+red. A tight cut costs 2 of 27 big winners.
+
+### Patience is NOT the differentiator
+
+    peak >=  5%   median hold  1.2 min
+    peak >= 10%   median hold  1.2 min
+    peak >= 20%   median hold  1.3 min
+    peak >= 40%   median hold  5.2 min   (n=8)
+    peak >= 60%   median hold 16.2 min   (n=3)
+
+A +20% trade is as fast as everything else. **The runner is not slow, it is
+still running.** So the change is not "hold longer" — it is "widen the trail
+once ahead", which is a different mechanism.
+
+### CAUTION: the two long-runner examples are SURVIVORSHIP
+
+LDO and USELESS both ran 30+ minutes because their protection was BROKEN —
+an undersized reduceOnly trail that could not close the position. The trades
+that stay open are precisely the ones whose exits failed. The equivalent
+trade that ran to +60% and gave it all back closes and disappears into the
+journal, so it is never on screen.
+
+The continuation statistics above are the real evidence; the two screenshots
+are not.
+
+### Testing it offline
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+      python tools/replay_exits.py --minutes 15 \
+        --runner-at 5 10 20 --runner-mult 1.5 2 3
+
+Runner mode widens the callback by `--runner-mult` once peak ROI reaches
+`--runner-at`, but ONLY if the trade never dipped below
+`--runner-max-trough` (default 5% ROI). Runner exits are labelled separately
+in the exit mix, so it is visible how often the wider trail actually mattered.
+
+Demo cannot test this — it now samples a different population. Offline replay
+against LIVE's own trades is the only clean test.
 
 ---
 
