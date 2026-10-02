@@ -29,7 +29,10 @@ Bounds that the operator's rules do not cover, added deliberately:
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+
+from bot.trade_plan import PlanConfig, build_plan
 
 # Binance trailing-stop callbackRate limits.
 MIN_CALLBACK_PCT = 0.1
@@ -125,6 +128,8 @@ class AutoTradeConfig:
     leg_gate_mode: str = "off"
     leg_bars_min: int = 9
     leg_bars_max: int = 14
+    # "off" | "log" | "enforce". See bot/trade_plan.py.
+    trade_plan_mode: str = "off"
     # Scale the distance limit with the size of the 24h move. See
     # effective_max_dist — it can only ever TIGHTEN the absolute limit.
     max_dist_proportional: bool = False
@@ -1175,6 +1180,10 @@ class AutoTrader:
         # Leg-position gate counters — see leg_position_allows.
         self._leg_gate_seen: int = 0
         self._leg_gate_blocked: int = 0
+        # Trade-plan counters — see bot/trade_plan.py.
+        self._plan_seen: int = 0
+        self._plan_refused: int = 0
+        self._plan_cfg = PlanConfig()
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1816,6 +1825,45 @@ class AutoTrader:
             # at 2, against a 1.7-minute median hold. The current trail
             # closes these trades before the edge materialises. This gate
             # selects the entry; it does NOT fix the exit.
+            # ── TRADE PLAN (log-only unless TRADE_PLAN_MODE=enforce) ──
+            #
+            # Propose side/entry/stop/targets from THIS coin's structure,
+            # record it, and change nothing. Scoring proposals against what
+            # happened afterwards is how the RSI band and the continuation
+            # structure were found — at no risk.
+            #
+            # The replay that motivated this:
+            #     rule                median     mean    TOTAL   win
+            #     actual              +0.057   -0.153   -30.39   53%
+            #     tiered 1%/2% SL2    +0.614   -0.196   -38.99   62%
+            # Tiering gave the best median, win rate and paired difference of
+            # anything tested — and the worst total, because a FLAT 2% stop
+            # fired on 34% of trades. A stop that fires on a third of trades
+            # is not marking "wrong", it is marking "price moved a bit".
+            _plan_mode = str(getattr(self.cfg, "trade_plan_mode",
+                                     "off")).lower()
+            if _plan_mode in ("log", "enforce"):
+                try:
+                    _plan = build_plan(row, side, self._plan_cfg)
+                    self._plan_seen += 1
+                    if _plan.refused:
+                        self._plan_refused += 1
+                    self._record("trade_plan", json.dumps(_plan.as_dict()),
+                                 symbol)
+                    if _plan.refused:
+                        _log.info(f"auto-trade: {symbol} PLAN refused — "
+                                  f"{_plan.refused} "
+                                  f"({self._plan_refused}/{self._plan_seen})")
+                    else:
+                        _log.info(
+                            f"auto-trade: {symbol} PLAN {side} entry "
+                            f"{_plan.entry:g} stop {_plan.stop:g} "
+                            f"({_plan.stop_pct:.2f}%, {_plan.basis}) targets "
+                            + " ".join("%g" % t for t, _f in _plan.targets)
+                            + f" rr {_plan.rr:.2f} room {_plan.room_pct:.2f}%")
+                except Exception as e:
+                    _log.debug(f"plan build failed for {symbol}: {e}")
+
             _leg_mode = str(getattr(self.cfg, "leg_gate_mode", "off")).lower()
             if _leg_mode in ("warn", "block"):
                 _bars = (row.get("advance") or {}).get("adv_bars")

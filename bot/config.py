@@ -776,6 +776,28 @@ class BotConfig:
     leg_bars_max: int = field(default_factory=lambda: int(_env_float(
         "LEG_BARS_MAX", 14)))
 
+    # ── TRADE PLAN: side/entry/stop/targets from the coin's own structure ──
+    #   off | log | enforce.  Default off. LOG changes nothing.
+    #
+    # Today every trade gets the same global configuration — same callback
+    # formula, same ATR-multiple stop, same fail-fast. The gates decide
+    # WHETHER to enter; nothing decides HOW to trade what was entered.
+    #
+    # The replay that motivated this (199 live entries, 240 min forward):
+    #     rule                median     mean    TOTAL   win
+    #     actual              +0.057   -0.153   -30.39   53%
+    #     tiered 1%/2% SL2    +0.614   -0.196   -38.99   62%
+    # Tiering gave the BEST median, win rate and paired difference of
+    # anything tested — and the WORST total, because a FLAT 2% stop fired on
+    # 34% of trades. A stop that fires on a third of trades is not marking
+    # "this trade is wrong", it is marking "price moved a bit".
+    #
+    # pct_below_24h_high, pct_above_24h_low, room_ahead_atr and
+    # range_pos_24h are already computed on every candidate and used ONLY to
+    # accept or refuse it. None of them sets a stop or a target.
+    trade_plan_mode: str = field(default_factory=lambda: _env(
+        "TRADE_PLAN_MODE", "off").strip().lower())
+
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())
 

@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.7.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
+**v4.8.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.8.0 adds TRADE PLANS — per-coin stop and targets from structure, log-only
+by default.
 v4.7.0 adds a TIERED position-trade rule — the first exit model that is not
 all-or-nothing.
 v4.6.0 adds RUNNER MODE to the replay — the continuation rate is a power-law
@@ -1862,6 +1864,63 @@ moved a threshold. `actual` has the best median in every single run.
 
 **The exits are not the problem. The STRUCTURE is the question that had not
 been asked.**
+
+---
+
+## TIERED RESULT, and the TRADE PLAN it motivated (v4.8.0)
+
+199 live entries, 240 min forward:
+
+    rule                median      mean     TOTAL    win
+    actual              +0.057    -0.153    -30.39    53%
+    trail only          -0.259    +0.044     +8.85    40%
+    TP only             +1.353    +0.070    +13.95    50%
+    tiered 1%/2% SL2    +0.614    -0.196    -38.99    62%
+
+**Tiering gave the best median, the best win rate and the best paired
+difference of ANY rule tested** — paired median +0.298 vs actual. It also gave
+the worst total.
+
+    68 of 199 (34%) hit the flat -2% stop
+    ~142 price-points lost there against ~78 gathered by 127 tiered exits
+
+**A stop that fires on a third of trades is not marking "this trade is
+wrong", it is marking "price moved a bit".** The tiering works; the flat stop
+throws it away.
+
+Note also `TP only` at median +1.353 with 100 take-profits and 99 stops — the
+largest median of all. The trail gives back more than it protects when the
+setup has a real target.
+
+### bot/trade_plan.py — levels from the coin, not from a constant
+
+    stop     just beyond the extreme the setup FADED, plus an ATR buffer so
+             noise alone does not reach it
+    targets  fractions of the ROOM AHEAD — the move the thesis predicts
+    risk     derived; a plan whose reward does not justify its risk is
+             REFUSED rather than resized
+
+`build_plan` is PURE — no exchange, no state, no clock — so a plan can be
+rebuilt from a shadow log months later and scored against what happened. That
+is the method that produced the RSI band and continuation findings.
+
+    TRADE_PLAN_MODE=log        propose and record, change nothing
+    TRADE_PLAN_MODE=enforce    reserved; not wired to execution yet
+
+### THE TENSION IT IMMEDIATELY EXPOSED
+
+`AUTO_MAX_DIST_PCT=3` admits entries up to 3% from the extreme being faded,
+so a stop placed BEYOND that extreme is necessarily 3%+ plus the buffer.
+
+**At the 3.5% cap the risk per trade is SEVEN TIMES the ~0.5% ATR stop used
+today.** The same margin therefore risks seven times as much, so a plan-based
+trade must be SIZED FROM ITS OWN STOP, not from the global risk budget — or
+it is simply a much bigger bet wearing a new name.
+
+Tightening `AUTO_MAX_DIST_PCT` is the other way to resolve it: entries nearer
+the extreme give nearer stops. **This is the open design question**, and the
+log-mode data will show how often each refusal reason fires before anything
+is decided.
 
 ---
 
