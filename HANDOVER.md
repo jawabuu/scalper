@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.6.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
+**v4.7.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.7.0 adds a TIERED position-trade rule — the first exit model that is not
+all-or-nothing.
 v4.6.0 adds RUNNER MODE to the replay — the continuation rate is a power-law
 tail, and big winners never go deeply red first.
 v4.5.0 stops a reduceOnly trail being sized for a FRACTION of a position
@@ -1827,6 +1829,70 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## RUNNER MODE FAILED, AND WHY (v4.6.0 result, 60-min window)
+
+    rule             mean    timeouts
+    trail only     -0.122        6
+    runner 10%x2   -0.175        6
+    runner 10%x3   -0.184       10
+    runner 20%x2   -0.122        6
+    runner 20%x3   -0.155        6
+
+Three of four variants WORSE than the plain trail, the fourth identical to
+three decimals, `better` at 46-49%. Timeouts down to 6, so the censoring that
+spoiled the 15-minute run is gone — this is a fair test.
+
+**Why the continuation structure did not translate.** The 53/38/30/38 rates
+are real, but they are measured on trades that REACHED each level. A wider
+trail does not change the odds of continuing; it changes what you give back
+on the two-thirds that DO NOT. At a 30% continuation rate the continuation
+must pay more than 2.3x the extra give-back, and it does not.
+
+**That arithmetic should have been done before building it.**
+
+### The deeper point: six exit variants, all the same shape
+
+The original replay, fail-fast removal, the peak-band split, three TP
+variants, four tighter fail-fast levels, ten runner variants. Every one kept
+the SCALP'S STRUCTURE — all-or-nothing exit, ATR-noise-sized stop — and
+moved a threshold. `actual` has the best median in every single run.
+
+**The exits are not the problem. The STRUCTURE is the question that had not
+been asked.**
+
+---
+
+## TIERED EXITS: a position trade, not a scalp (v4.7.0)
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+      python tools/replay_exits.py --minutes 240 --tiered \
+        --tier-at 1 2 --tier-frac 0.34 0.33 --tier-stop 2.0 --tier-trail
+
+The operator's framing: the gates pick good coins; the SCALP is what limits
+the return. A coin at its daily high and dropping may keep dropping.
+
+What this has that nothing else here does: **PARTIAL EXITS.** Bank a third at
++1%, a third at +2%, let the rest run. That banks profit AND keeps upside,
+which no all-or-nothing rule can do — and it is exactly why runner mode
+failed. Widening risks the whole position to capture the one-in-three;
+tiering banks two-thirds before that risk arises.
+
+The stop is STRUCTURAL (-2% of price, where the trade is wrong) rather than
+ATR noise (~0.5%). **That is FOUR TIMES the current risk per trade**, so
+results must be read in price terms with the stop distance stated — never in
+ROI, which hides it.
+
+Details that matter: EVERY slice is charged the full round-trip fee, because
+partial exits mean more round trips and fees are the dominant cost here. The
+stop is checked BEFORE the tiers, so a bar spanning both counts as the stop.
+And the remainder only trails once a tier has filled — before that the
+structural stop is the whole protection, by design.
+
+**Use --minutes 240.** A tiered exit is meant to run for hours; 60 minutes
+censored runner mode and would censor this worse.
 
 ---
 

@@ -155,6 +155,79 @@ def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
     return close, "timeout"
 
 
+
+def replay_tiered(candles, side, entry, stop_pct, tiers, trail_pct=None):
+    """
+    A POSITION-TRADE exit, not a scalp: structural stop, TIERED take-profits,
+    and a runner on what is left.
+
+    Every other rule here is all-or-nothing, which is why widening a trail
+    never helped — it risks the WHOLE position to capture the one-in-three
+    continuation. Tiering banks most of it BEFORE that risk arises, so the
+    runner is free.
+
+    `tiers` is [(gain_pct, fraction), ...] in PRICE %, applied in order. The
+    remainder trails at `trail_pct` from its own high-water mark, or runs to
+    the end of the window.
+
+    The stop is STRUCTURAL (where the trade is wrong) rather than ATR noise.
+    At -2% of price that is FOUR TIMES the current risk per trade, so results
+    must be read in price terms with the stop distance stated — never in ROI,
+    which hides it.
+
+    Returns (weighted_pnl_pct, label). Each slice is charged the full
+    round-trip fee: partial exits mean MORE round trips, and a tiered rule
+    that ignored that would look better than it is.
+    """
+    short = str(side).lower().startswith("short")
+    remaining = 1.0
+    realised = 0.0
+    filled = []
+    best = entry
+    pending = list(tiers)
+
+    for _ts, _o, high, low, close in candles:
+        adverse = high if short else low
+        favourable = low if short else high
+
+        # the stop takes the WHOLE remainder, and is checked first
+        hit = entry * (1 + stop_pct / 100) if short else entry * (1 - stop_pct / 100)
+        if stop_pct is not None and (
+                (short and adverse >= hit) or (not short and adverse <= hit)):
+            realised += remaining * pnl_pct(side, entry, hit)
+            return realised, ("stop" if not filled else "stop after %d tier(s)"
+                              % len(filled))
+
+        # tiers, in order
+        while pending:
+            gain, frac = pending[0]
+            tgt = entry * (1 - gain / 100) if short else entry * (1 + gain / 100)
+            if (short and favourable <= tgt) or (not short and favourable >= tgt):
+                take = min(frac, remaining)
+                realised += take * pnl_pct(side, entry, tgt)
+                remaining -= take
+                filled.append(gain)
+                pending.pop(0)
+                if remaining <= 1e-9:
+                    return realised, "all tiers"
+            else:
+                break
+
+        best = min(best, favourable) if short else max(best, favourable)
+
+        # the runner trails only once a tier has filled — before that the
+        # structural stop is the whole protection, by design
+        if trail_pct and filled and remaining > 0:
+            trig = best * (1 + trail_pct / 100) if short else best * (1 - trail_pct / 100)
+            if (short and adverse >= trig) or (not short and adverse <= trig):
+                realised += remaining * pnl_pct(side, entry, trig)
+                return realised, "runner trail after %d tier(s)" % len(filled)
+
+    realised += remaining * pnl_pct(side, entry, candles[-1][4])
+    return realised, ("timeout" if not filled
+                      else "timeout after %d tier(s)" % len(filled))
+
+
 def pnl_pct(side, entry, exit_px):
     short = str(side).lower().startswith("short")
     raw = (entry - exit_px) / entry if short else (exit_px - entry) / entry
@@ -197,6 +270,19 @@ def main() -> int:
                    help="replay only trades with this exit_reason")
     p.add_argument("--peak-band", default=None,
                    help="LO,HI on peak_roi (ROI %%, as recorded)")
+    p.add_argument("--tiered", action="store_true",
+                   help="simulate a POSITION trade: structural stop, tiered "
+                        "take-profits, runner on the remainder")
+    p.add_argument("--tier-at", type=float, nargs="*", default=[1.0, 2.0],
+                   help="take-profit levels in PRICE %%, in order")
+    p.add_argument("--tier-frac", type=float, nargs="*", default=[0.34, 0.33],
+                   help="fraction closed at each level")
+    p.add_argument("--tier-stop", type=float, default=2.0,
+                   help="STRUCTURAL stop in PRICE %% — where the trade is "
+                        "wrong, not ATR noise. 2%% is 4x the current risk per "
+                        "trade, so read results in price terms, never ROI")
+    p.add_argument("--tier-trail", action="store_true",
+                   help="trail the remainder once a tier has filled")
     p.add_argument("--runner-at", type=float, nargs="*", default=[],
                    help="widen the trail once peak ROI%% reaches this, e.g. "
                         "--runner-at 5 10 20")
@@ -247,7 +333,11 @@ def main() -> int:
           f"{args.minutes} min forward — {len(ripe)} candle fetches, "
           f"expect ~{max(1, len(ripe)//60)} min\n", file=sys.stderr)
 
+    TIER_NAME = ("tiered %s SL%g" % (
+        "/".join("%g%%" % g for g in args.tier_at), args.tier_stop)
+        if args.tiered else None)
     ORDER = (["actual", "trail only", "trail + TP", "TP only"]
+             + ([TIER_NAME] if TIER_NAME else [])
              + ["runner %g%%x%g" % (a, m)
                 for a in args.runner_at for m in args.runner_mult]
              + ["fail-fast %g%%" % v for v in args.ff_roi])
@@ -297,6 +387,16 @@ def main() -> int:
                          runner_max_trough_pct=(args.runner_max_trough / lev
                                                 if args.runner_max_trough
                                                 else None))))
+        # TIERED position-trade variants.
+        if args.tiered:
+            tiers = [(g, f) for g, f in zip(args.tier_at, args.tier_frac)]
+            name = "tiered %s SL%g" % (
+                "/".join("%g%%" % g for g in args.tier_at), args.tier_stop)
+            px_pnl, why = replay_tiered(
+                candles, side, entry, stop_pct=args.tier_stop, tiers=tiers,
+                trail_pct=(cb if args.tier_trail else None))
+            out[name][0].append(px_pnl)
+            out[name][1].append(why)
         for ff_roi in args.ff_roi:
             variants.append((
                 "fail-fast %g%%" % ff_roi,

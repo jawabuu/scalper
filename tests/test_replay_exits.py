@@ -258,3 +258,92 @@ def test_the_cli_exposes_all_three_knobs():
     for flag in ("--runner-at", "--runner-mult", "--runner-max-trough"):
         assert flag in src
     assert "runner_at_pct=at_roi / lev" in src, "ROI must convert to price %"
+
+
+# ── TIERED: a POSITION trade, not a scalp ─────────────────────────────────
+
+def _long(bars):
+    """bars = [(high, low)] -> candle tuples at entry 100."""
+    return [(i, 100.0, h, l, l) for i, (h, l) in enumerate(bars)]
+
+
+def test_tiers_fill_IN_ORDER_and_bank_their_fractions():
+    """
+    Every other rule here is all-or-nothing, which is why widening a trail
+    never helped: it risks the WHOLE position to capture a one-in-three
+    continuation. Tiering banks most of it BEFORE that risk arises.
+    """
+    c = _long([(100.5, 100.0), (101.5, 101.0), (102.5, 102.0)])
+    pnl, why = re.replay_tiered(c, "long", 100.0, stop_pct=2.0,
+                                tiers=[(1.0, 0.34), (2.0, 0.33)])
+    assert "tier" in why
+    # 0.34 at +1%, 0.33 at +2%, 0.33 running to a +2% close, each slice
+    # charged the 0.09% round trip:
+    #   0.34*(1.00-0.09) + 0.33*(2.00-0.09) + 0.33*(2.00-0.09) = 1.570
+    assert abs(pnl - 1.570) < 0.01, pnl
+
+
+def test_EVERY_SLICE_is_charged_the_full_round_trip_fee():
+    """
+    Partial exits mean MORE round trips. A tiered rule that charged the fee
+    once would look better than it is — and fees are the dominant cost here,
+    at 0.070% against a 0.1175% median gross move.
+    """
+    import inspect
+    src = inspect.getsource(re.replay_tiered)
+    assert src.count("pnl_pct(side, entry") >= 3
+
+
+def test_the_stop_takes_the_WHOLE_remainder():
+    c = _long([(100.0, 97.9)])
+    pnl, why = re.replay_tiered(c, "long", 100.0, stop_pct=2.0,
+                                tiers=[(1.0, 0.34), (2.0, 0.33)])
+    assert why == "stop"
+    assert pnl < -2.0, "full size at -2% plus fees"
+
+
+def test_a_stop_AFTER_a_tier_is_labelled_and_smaller():
+    # The banked tier must survive the stop, or tiering would be pointless.
+    c = _long([(101.5, 100.0), (100.0, 97.9)])
+    pnl, why = re.replay_tiered(c, "long", 100.0, stop_pct=2.0,
+                                tiers=[(1.0, 0.34)])
+    assert "stop after 1 tier" in why
+    assert pnl > -2.0, "the +1% slice offsets part of the loss"
+
+
+def test_the_stop_is_checked_BEFORE_the_tiers():
+    # A bar that spans both must count as the stop. Taking profit on a bar
+    # that also breached the stop would flatter every result.
+    import inspect
+    src = inspect.getsource(re.replay_tiered)
+    assert src.index('return realised, ("stop"') < src.index("while pending")
+
+
+def test_the_runner_only_trails_ONCE_A_TIER_HAS_FILLED():
+    """
+    Before any tier fills, the structural stop is the whole protection — by
+    design. Trailing from the start would make this just another scalp.
+    """
+    import inspect
+    src = inspect.getsource(re.replay_tiered)
+    assert "if trail_pct and filled and remaining > 0:" in src
+
+
+def test_all_tiers_filling_closes_the_position():
+    c = _long([(103.0, 100.0)])
+    pnl, why = re.replay_tiered(c, "long", 100.0, stop_pct=2.0,
+                                tiers=[(1.0, 0.5), (2.0, 0.5)])
+    assert why == "all tiers"
+
+
+def test_shorts_mirror_longs():
+    c = [(0, 100.0, 100.0, 98.5, 98.5)]
+    pnl, why = re.replay_tiered(c, "short", 100.0, stop_pct=2.0,
+                                tiers=[(1.0, 0.5)])
+    assert "tier" in why and pnl > 0
+
+
+def test_the_cli_defaults_state_the_STRUCTURAL_stop():
+    import inspect
+    src = inspect.getsource(re.main)
+    assert "--tier-stop" in src and "4x the current risk" in src
