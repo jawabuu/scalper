@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.3.1**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
+**v4.4.0**, 2026-10-01. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.4.0 lets replay_exits.py test FAIL-FAST levels offline on live's own
+trades — demo can no longer stand in for live.
 v4.3.1 fixes the ROOT CAUSE: a PARTIAL FILL corrupts derived leverage, and
 maker entries fill in pieces.
 v4.3.0 stops effective_leverage collapsing to 1x — it sized a trail SIXTEEN
@@ -1821,6 +1823,53 @@ leg is under 4 bars or the window is short.
 
 Deployed 2026-09-30: `warn` on live, `block` on demo. Demo trades it, live
 counts what it would have refused.
+
+---
+
+## DEMO CAN NO LONGER TEST OUTCOMES, ONLY MECHANISMS (2026-10-01)
+
+Demo now runs `SCAN_MIN_CHANGE_PCT=4`, `AUTO_MIN_ATR_PCT=0.25`, proportional
+distance, at 20x on a feed reading ATR at 0.751x. Live runs 0.5 ATR at 10x
+with `ch>=8`.
+
+**They no longer sample the same population.** Demo measures "do marginal
+setups work?"; live measures "do core setups work?". They are ORTHOGONAL, not
+anti-correlated — both could be good, both could be bad.
+
+So any outcome measured on demo does NOT transfer to live. Demo remains
+useful for MECHANISM tests (does the gate fire, does the order rest, does the
+leverage resolve) and for finding structural defects, which is where it has
+earned its keep: the 0.751 ATR factor, the breakeven floor locking exactly
+the fee, the ROI-vs-price denomination problem, and the leverage collapse all
+surfaced there.
+
+### Which is why exit changes must now be tested OFFLINE
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+      python tools/replay_exits.py --minutes 15 --ff-roi 3 3.5 4 5
+
+`--ff-roi` simulates alternative `GUARD_FAIL_FAST_LOSS_ROI` levels against
+LIVE's own trades and real forward candles. No deploy, no risk, bigger
+sample, and it tests the exact population the change would apply to.
+
+**The model keeps fail-fast's real conditions**, which a plain stop would
+not:
+  - the 60s delay (`GUARD_FAIL_FAST_S`) — no cut on the first bar;
+  - the peak ceiling (`--ff-peak-ceiling`, default 3.0 = GUARD_BREAKEVEN_AT_ROI)
+    — a trade that has been meaningfully green is not fail-fast's business.
+
+Without both, it would cut trades the live rule never touches and overstate
+the saving.
+
+### The hypothesis it exists to test
+
+    75% of winners never dip past -0.32% of price
+    fail_fast currently cuts at -0.50% (GUARD_FAIL_FAST_LOSS_ROI=5 at 10x)
+
+Tightening is the only untouched lever on the payoff ratio, and it is the one
+that ALSO LOWERS THE BAR: break-even is
+`avg_loss / (avg_win + avg_loss)`, so smaller losses move both sides toward
+each other. Modelled at -0.35%: ratio 0.65 -> ~0.80, break-even 61% -> 56%.
 
 ---
 

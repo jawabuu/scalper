@@ -109,3 +109,68 @@ def test_the_replay_can_be_filtered_to_one_exit_reason_and_peak_band():
     assert '--only-exit' in src and '--peak-band' in src
     assert 'str(t.get("exit_reason")) == args.only_exit' in src
     assert 'lo <= _f(t["peak_roi"]) < hi' in src
+
+
+# ── FAIL-FAST VARIANTS: test the cut offline, on LIVE's own trades ─────────
+
+def _bars(entry, lows, highs=None):
+    highs = highs or [e * 1.001 for e in lows]
+    return [(i, entry, h, l, l) for i, (l, h) in enumerate(zip(lows, highs))]
+
+
+def test_fail_fast_waits_for_the_DELAY_before_cutting():
+    """
+    GUARD_FAIL_FAST_S=60 means the cut cannot fire on the first minute.
+    Modelling it as a plain stop would cut trades the live rule never
+    touches and overstate the saving.
+    """
+    # dips hard on bar 0, recovers after
+    c = _bars(100.0, [99.0, 100.5, 101.0])
+    px, why = re.replay(c, "long", 100.0, callback_pct=None, stop_pct=None,
+                        tp_pct=None, ff_pct=0.5, ff_after_bars=1)
+    assert why != "fail_fast", "bar 0 is inside the 60s delay"
+
+
+def test_fail_fast_fires_after_the_delay():
+    c = _bars(100.0, [99.9, 99.0, 99.0])
+    px, why = re.replay(c, "long", 100.0, callback_pct=None, stop_pct=None,
+                        tp_pct=None, ff_pct=0.5, ff_after_bars=1)
+    assert why == "fail_fast"
+    assert abs(px - 99.5) < 1e-6
+
+
+def test_the_PEAK_CEILING_blocks_the_cut():
+    """
+    _peak_ceiling ties fail-fast to GUARD_BREAKEVEN_AT_ROI: a trade that has
+    been meaningfully green is NOT fail-fast's business. Ignoring that would
+    cut winners the live rule protects.
+    """
+    # goes +1% on bar 0 (above a 0.3% ceiling), then dips
+    c = [(0, 100.0, 101.0, 100.0, 101.0), (1, 101.0, 101.0, 99.0, 99.0)]
+    px, why = re.replay(c, "long", 100.0, callback_pct=None, stop_pct=None,
+                        tp_pct=None, ff_pct=0.5, ff_after_bars=1,
+                        ff_peak_ceiling=0.3)
+    assert why != "fail_fast", "peak exceeded the ceiling"
+
+
+def test_without_a_ceiling_the_same_trade_IS_cut():
+    c = [(0, 100.0, 101.0, 100.0, 101.0), (1, 101.0, 101.0, 99.0, 99.0)]
+    _px, why = re.replay(c, "long", 100.0, callback_pct=None, stop_pct=None,
+                         tp_pct=None, ff_pct=0.5, ff_after_bars=1,
+                         ff_peak_ceiling=None)
+    assert why == "fail_fast"
+
+
+def test_fail_fast_is_checked_BEFORE_the_wider_rules():
+    # It is the tightest level, and the guardian evaluates it on its own
+    # poll. Checking the stop first would attribute the exit wrongly.
+    import inspect
+    src = inspect.getsource(re.replay)
+    assert src.index('"fail_fast"') < src.index('"stop"')
+
+
+def test_the_variants_are_configurable_from_the_cli():
+    import inspect
+    src = inspect.getsource(re.main)
+    assert "--ff-roi" in src and "--ff-peak-ceiling" in src
+    assert "ff_pct=ff_roi / lev" in src, "ROI must be converted to price %"

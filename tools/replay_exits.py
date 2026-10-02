@@ -69,7 +69,7 @@ def _rows(path: Path) -> list:
 
 
 def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
-           use_trail=True):
+           use_trail=True, ff_pct=None, ff_after_bars=1, ff_peak_ceiling=None):
     """
     Walk 1m candles and return the exit price under one rule set.
 
@@ -81,9 +81,28 @@ def replay(candles, side, entry, callback_pct, stop_pct, tp_pct,
     """
     short = str(side).lower().startswith("short")
     best = entry
-    for _ts, _o, high, low, close in candles:
+    # FAIL-FAST, modelled as the guardian applies it:
+    #   * only after ff_after_bars have passed (GUARD_FAIL_FAST_S=60 -> 1 bar)
+    #   * only while the peak has stayed at or below ff_peak_ceiling
+    #     (_peak_ceiling = GUARD_BREAKEVEN_AT_ROI)
+    # Both conditions matter. Modelling it as a plain stop would cut trades
+    # the real rule never touches and overstate the saving.
+    peak_pct = 0.0
+    for bar_i, (_ts, _o, high, low, close) in enumerate(candles):
         adverse = high if short else low
         favourable = low if short else high
+        fav_pct = ((entry - favourable) / entry * 100 if short
+                   else (favourable - entry) / entry * 100)
+        peak_pct = max(peak_pct, fav_pct)
+
+        # 0. fail-fast, before the wider rules — it is the tightest level and
+        #    the real guardian evaluates it on its own poll, not after them.
+        if (ff_pct is not None and bar_i >= ff_after_bars
+                and (ff_peak_ceiling is None or peak_pct <= ff_peak_ceiling)):
+            hit = (entry * (1 + ff_pct / 100) if short
+                   else entry * (1 - ff_pct / 100))
+            if (short and adverse >= hit) or (not short and adverse <= hit):
+                return hit, "fail_fast"
 
         # 1. the adverse extreme, checked FIRST and always
         if stop_pct is not None:
@@ -147,6 +166,12 @@ def main() -> int:
                    help="replay only trades with this exit_reason")
     p.add_argument("--peak-band", default=None,
                    help="LO,HI on peak_roi (ROI %%, as recorded)")
+    p.add_argument("--ff-roi", type=float, nargs="*", default=[],
+                   help="fail-fast cut levels in ROI%% to simulate, e.g. "
+                        "--ff-roi 3 3.5 4 5 (current live is 5)")
+    p.add_argument("--ff-peak-ceiling", type=float, default=3.0,
+                   help="fail-fast only applies while peak ROI%% stayed at or "
+                        "below this (GUARD_BREAKEVEN_AT_ROI, default 3)")
     p.add_argument("--limit", type=int, default=200,
                    help="most recent N trades (each costs one candle fetch)")
     args = p.parse_args()
@@ -182,7 +207,9 @@ def main() -> int:
           f"{args.minutes} min forward — {len(ripe)} candle fetches, "
           f"expect ~{max(1, len(ripe)//60)} min\n", file=sys.stderr)
 
-    out = {k: ([], []) for k in ("actual", "trail only", "trail + TP", "TP only")}
+    ORDER = ["actual", "trail only", "trail + TP", "TP only"] + [
+        "fail-fast %g%%" % v for v in args.ff_roi]
+    out = {k: ([], []) for k in ORDER}
     for i, t in enumerate(ripe, 1):
         if len(ripe) >= 50 and i % 25 == 0:
             print(f"  {i}/{len(ripe)} ...", file=sys.stderr)
@@ -208,10 +235,22 @@ def main() -> int:
         if fin is not None:
             out["actual"][0].append(fin / lev - FEE_PCT_ROUND_TRIP)
             out["actual"][1].append(t.get("exit_reason") or "?")
-        for name, kw in (
-                ("trail only", dict(tp_pct=None, use_trail=True)),
-                ("trail + TP", dict(tp_pct=tp_pct, use_trail=True)),
-                ("TP only",    dict(tp_pct=tp_pct, use_trail=False))):
+        # FAIL-FAST VARIANTS. Current is GUARD_FAIL_FAST_LOSS_ROI, and the
+        # question is whether cutting TIGHTER raises the payoff ratio:
+        # 75% of winners never dip past -0.32% of price, while the cut sits
+        # at -0.50%. Each variant keeps the real conditions — a 60s delay and
+        # the peak ceiling — so it cannot cut trades the live rule would not.
+        variants = [("trail only", dict(tp_pct=None, use_trail=True)),
+                    ("trail + TP", dict(tp_pct=tp_pct, use_trail=True)),
+                    ("TP only",    dict(tp_pct=tp_pct, use_trail=False))]
+        ceiling = (args.ff_peak_ceiling / lev
+                   if args.ff_peak_ceiling is not None else None)
+        for ff_roi in args.ff_roi:
+            variants.append((
+                "fail-fast %g%%" % ff_roi,
+                dict(tp_pct=None, use_trail=True, ff_pct=ff_roi / lev,
+                     ff_peak_ceiling=ceiling)))
+        for name, kw in variants:
             px, why = replay(candles, side, entry, cb, stop_pct, **kw)
             out[name][0].append(pnl_pct(side, entry, px))
             out[name][1].append(why)
@@ -220,8 +259,9 @@ def main() -> int:
           f"{args.minutes} min forward, TP at {args.tp_roi}% ROI.\n")
     print(f"  {'rule':<16}{'n':>5}{'median':>10}{'mean':>9}{'TOTAL':>10}"
           f"{'p10':>9}{'p90':>9}{'win':>7}   exits")
-    for k in ("actual", "trail only", "trail + TP", "TP only"):
-        describe(k, *out[k])
+    for k in ORDER:
+        if out.get(k) and out[k][0]:
+            describe(k, *out[k])
 
     # PAIRED comparison. The same trade appears under every rule, so the
     # unpaired spread hugely overstates the uncertainty: most of the variance
@@ -236,7 +276,7 @@ def main() -> int:
               "difference taken per trade")
         print(f"  {'rule':<16}{'median diff':>13}{'mean diff':>11}"
               f"{'95% CI on mean':>22}{'better':>8}")
-        for k in ("trail only", "trail + TP", "TP only"):
+        for k in ORDER[1:]:
             v = out[k][0]
             if len(v) != len(base):
                 continue
