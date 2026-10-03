@@ -65,6 +65,9 @@ class TradePlan:
     basis: str = ""                 # which extreme the stop was set against
     room_pct: float = 0.0           # distance to the opposite 24h extreme
     refused: str | None = None      # why this is not tradeable, if it is not
+    # Targets as % of entry, which is the unit the plan is actually built in.
+    # Absolute prices are derived and only present when an entry was supplied.
+    target_pcts: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -77,6 +80,7 @@ class TradePlan:
             "rr": round(self.rr, 3),
             "basis": self.basis,
             "room_pct": round(self.room_pct, 4),
+            "target_pcts": [[g, f] for g, f in self.target_pcts],
             "refused": self.refused,
         }
 
@@ -123,72 +127,88 @@ def build_plan(row: dict, side: str, cfg: PlanConfig | None = None,
     """
     Propose a plan for this candidate, or refuse it with a reason.
 
-    Pure: no exchange, no state, no clock. Everything comes from the scanner
-    row, so a plan can be rebuilt from a shadow log months later and scored
-    against what actually happened.
+    WORKS IN PERCENTAGES, NOT PRICES. The scanner row carries
+    `pct_below_24h_high` and `pct_above_24h_low` — the structure already
+    expressed as distances — and `distance_to_extreme` uses them today. The
+    first version of this read `row["price"]`, which does not exist: 338 of
+    338 plans refused with "no entry price" and the generator never ran.
+
+    Percentages are also the honest unit here. Everything else that matters
+    on this bot — fees, ATR, callbacks, the payoff ratio — is a % of price,
+    and absolute levels would have to be recomputed from a stale quote
+    anyway. Absolute prices are filled in ONLY when an entry is supplied.
+
+    Pure: no exchange, no state, no clock. A plan can be rebuilt from a
+    shadow log months later and scored against what actually happened.
     """
     cfg = cfg or PlanConfig()
     short = str(side).lower().startswith("short")
-    px = float(entry if entry is not None else (row.get("price") or 0) or 0)
-    hi = row.get("high_24h")
-    lo = row.get("low_24h")
-    atr_pct = row.get("atr_pct")
+    sym = str(row.get("symbol") or "")
 
     def _refuse(why: str) -> TradePlan:
-        return TradePlan(symbol=str(row.get("symbol") or ""), side=side,
-                         entry=px, stop=0.0, targets=[], refused=why)
+        return TradePlan(symbol=sym, side=side, entry=float(entry or 0),
+                         stop=0.0, targets=[], refused=why)
 
-    if px <= 0:
-        return _refuse("no entry price")
-    if hi is None or lo is None:
+    to_high = row.get("pct_below_24h_high")
+    to_low = row.get("pct_above_24h_low")
+    if to_high is None or to_low is None:
         return _refuse("no 24h range — the structure is unknown")
-    hi, lo = float(hi), float(lo)
-    if hi <= lo:
-        return _refuse("degenerate 24h range")
+    try:
+        to_high, to_low = abs(float(to_high)), abs(float(to_low))
+    except (TypeError, ValueError):
+        return _refuse("24h range unreadable")
 
-    # THE STOP: just beyond the extreme this setup is fading.
-    # A short fades the 24h high, so it is wrong when price RECLAIMS it.
-    buf = (float(atr_pct or 0) * cfg.stop_buffer_atr) / 100.0
+    atr_pct = row.get("atr_pct")
+    buf = abs(float(atr_pct or 0)) * cfg.stop_buffer_atr
+
+    # A short fades the 24h HIGH, so it is wrong when price reclaims it; the
+    # room it has is the distance down to the 24h low. A long is the mirror.
     if short:
-        stop = hi * (1 + buf)
+        stop_pct = to_high + buf
+        room_pct = to_low
         basis = "24h high + %.2f ATR" % cfg.stop_buffer_atr
-        room = px - lo
     else:
-        stop = lo * (1 - buf)
+        stop_pct = to_low + buf
+        room_pct = to_high
         basis = "24h low - %.2f ATR" % cfg.stop_buffer_atr
-        room = hi - px
-
-    stop_pct = abs(stop - px) / px * 100.0
-    room_pct = room / px * 100.0
 
     if room_pct < cfg.min_room_pct:
         return _refuse("only %.2f%% room to the far extreme, need %.2f%%"
                        % (room_pct, cfg.min_room_pct))
     if stop_pct < cfg.min_stop_pct:
-        # The structure says the stop is very close. That is not a licence to
-        # use it: inside the noise it fires on nothing in particular.
+        # The structure saying the stop is very close is not a licence to use
+        # it: inside the noise floor it fires on nothing in particular. That
+        # is the 0.4% callback that cost QNT 19 ROI points.
         return _refuse("structural stop %.2f%% is inside the noise floor "
                        "(%.2f%%)" % (stop_pct, cfg.min_stop_pct))
     if stop_pct > cfg.max_stop_pct:
         return _refuse("structural stop %.2f%% exceeds the %.2f%% cap"
                        % (stop_pct, cfg.max_stop_pct))
 
-    # THE TARGETS: fractions of the room the thesis predicts.
-    targets = []
-    for frac, size in zip(cfg.target_fracs, cfg.target_sizes):
-        move = room * frac
-        tgt = px - move if short else px + move
-        targets.append((tgt, size))
-    if not targets:
+    # Targets as fractions of the room the thesis predicts, in % of entry.
+    tgt_pcts = [(room_pct * frac, size)
+                for frac, size in zip(cfg.target_fracs, cfg.target_sizes)]
+    if not tgt_pcts:
         return _refuse("no targets configured")
 
-    reward_pct = abs(targets[-1][0] - px) / px * 100.0
+    reward_pct = tgt_pcts[-1][0]
     rr = reward_pct / stop_pct if stop_pct > 0 else 0.0
     if rr < cfg.min_rr:
         return _refuse("reward/risk %.2f below %.2f (%.2f%% reward on a "
                        "%.2f%% stop)" % (rr, cfg.min_rr, reward_pct, stop_pct))
 
-    return TradePlan(symbol=str(row.get("symbol") or ""), side=side,
-                     entry=px, stop=stop, targets=targets,
-                     stop_pct=stop_pct, reward_pct=reward_pct, rr=rr,
-                     basis=basis, room_pct=room_pct)
+    # Absolute levels only when an entry price is actually supplied.
+    px = float(entry or 0)
+    if px > 0:
+        stop = px * (1 + stop_pct / 100) if short else px * (1 - stop_pct / 100)
+        targets = [((px * (1 - g / 100) if short else px * (1 + g / 100)), f)
+                   for g, f in tgt_pcts]
+    else:
+        stop = 0.0
+        targets = [(0.0, f) for _g, f in tgt_pcts]
+
+    return TradePlan(symbol=sym, side=side, entry=px, stop=stop,
+                     targets=targets, stop_pct=stop_pct,
+                     reward_pct=reward_pct, rr=rr, basis=basis,
+                     room_pct=room_pct,
+                     target_pcts=[(round(g, 4), f) for g, f in tgt_pcts])

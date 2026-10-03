@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.8.0**, 2026-10-02. Supersedes the old HANDOVER.md, which had drifted for
+**v4.8.1**, 2026-10-03. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.8.1 fixes trade plans reading a price key a scanner row does not have —
+338 of 338 refused and the generator never ran.
 v4.8.0 adds TRADE PLANS — per-coin stop and targets from structure, log-only
 by default.
 v4.7.0 adds a TIERED position-trade rule — the first exit model that is not
@@ -1906,6 +1908,29 @@ is the method that produced the RSI band and continuation findings.
 
     TRADE_PLAN_MODE=log        propose and record, change nothing
     TRADE_PLAN_MODE=enforce    reserved; not wired to execution yet
+
+### v4.8.1: it read a key that does not exist
+
+    338 PLAN refused — no entry price      (338 of 338)
+
+`build_plan` read an entry price off the scanner row. **A scanner row has no
+price.** Every plan refused, and the refusal looked exactly like "there are no
+good setups" — the same silent-absence failure as `turn.get("rise_pct")` vs
+`turn_rise_pct`, and as `ENTRY_DEFER_S` resolving to 0 for weeks.
+
+The structure was already on the row as **`pct_below_24h_high`** and
+**`pct_above_24h_low`** — the two fields `distance_to_extreme` has always
+used. So the plan is now built in PERCENTAGES:
+
+    short:  stop = pct_below_24h_high + buffer    room = pct_above_24h_low
+    long:   stop = pct_above_24h_low  + buffer    room = pct_below_24h_high
+
+Percentages are the honest unit anyway: fees, ATR, callbacks and the payoff
+ratio are all % of price, and absolute levels would have to be recomputed
+from a stale quote. Prices are derived ONLY when an entry is supplied.
+
+A test now pins both field names, because a key that does not exist fails as
+a refusal and is indistinguishable from a quiet market.
 
 ### THE TENSION IT IMMEDIATELY EXPOSED
 

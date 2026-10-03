@@ -1844,7 +1844,8 @@ class AutoTrader:
                                      "off")).lower()
             if _plan_mode in ("log", "enforce"):
                 try:
-                    _plan = build_plan(row, side, self._plan_cfg)
+                    _plan = build_plan(row, side, self._plan_cfg,
+                                       entry=row.get("live_price"))
                     self._plan_seen += 1
                     if _plan.refused:
                         self._plan_refused += 1
@@ -1856,11 +1857,12 @@ class AutoTrader:
                                   f"({self._plan_refused}/{self._plan_seen})")
                     else:
                         _log.info(
-                            f"auto-trade: {symbol} PLAN {side} entry "
-                            f"{_plan.entry:g} stop {_plan.stop:g} "
-                            f"({_plan.stop_pct:.2f}%, {_plan.basis}) targets "
-                            + " ".join("%g" % t for t, _f in _plan.targets)
-                            + f" rr {_plan.rr:.2f} room {_plan.room_pct:.2f}%")
+                            f"auto-trade: {symbol} PLAN {side} stop "
+                            f"{_plan.stop_pct:.2f}% ({_plan.basis}) targets "
+                            + "/".join("%.2f%%" % g
+                                       for g, _f in _plan.target_pcts)
+                            + f" rr {_plan.rr:.2f} room "
+                              f"{_plan.room_pct:.2f}%")
                 except Exception as e:
                     _log.debug(f"plan build failed for {symbol}: {e}")
 
