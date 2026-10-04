@@ -113,7 +113,28 @@ class PlanConfig:
     # nearer the extreme give nearer stops.
     max_stop_pct: float = 3.50
     # Targets as fractions of the ROOM AHEAD, with the size closed at each.
-    target_fracs: tuple = (0.25, 0.50)
+    #
+    # CALIBRATED FROM THE REFUSED-CANDIDATE DISTRIBUTION, not chosen.
+    # Forward moves of 2,401 candidates that we never closed, so no scalp
+    # bias, at 30 minutes:
+    #
+    #     median +0.090%   p75 +0.983%   p90 +2.236%   p99 +6.444%
+    #
+    # The first version used (0.25, 0.50). On a typical 15.5% room that put
+    # target 1 at +3.89% of price — between p90 and p99, reachable by 2-4%
+    # of candidates. A two-tier plan would almost never fill its first tier.
+    #
+    # And the 25% assumption was off by twenty-fold: candidates near the 24h
+    # high move a median of +0.203% in 30 minutes against ~15% of room, so
+    # about 1.3% of the room is actually covered.
+    #
+    # These fractions put target 1 near +0.35% and target 2 near +1.00% on a
+    # 15.5% room — roughly the median and p75 of what candidates actually do.
+    #
+    # NOTE the near-high band outperforms the near-low (+0.203% vs -0.016%),
+    # so targets may eventually need to differ BY SIDE rather than share one
+    # fraction. Not enough data to split them yet.
+    target_fracs: tuple = (0.022, 0.065)
     target_sizes: tuple = (0.34, 0.33)
     # Refuse a plan whose reward does not justify its risk. Sizing around a
     # bad plan is how a scalp becomes a hope.

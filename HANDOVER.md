@@ -1,10 +1,15 @@
 # Handover — Binance futures scalping bot
 
-**v4.8.1**, 2026-10-03. Supersedes the old HANDOVER.md, which had drifted for
+**v4.10.0**, 2026-10-04. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.10.0 runs the resolver on the DAY ROLLOVER, bounded, so staleness cannot
+go unnoticed again.
+v4.9.0 fixes the OUTCOME PIPELINE, silently dead since 09-26. 43,079 decision
+rows were discarded and every analysis for a week rested on a five-day window
+from BEFORE the bug fixes.
 v4.8.1 fixes trade plans reading a price key a scanner row does not have —
 338 of 338 refused and the generator never ran.
 v4.8.0 adds TRADE PLANS — per-coin stop and targets from structure, log-only
@@ -2088,6 +2093,87 @@ pieces, so every position is briefly a fraction of itself.
 
 **Anything that reads position state during the fill window is suspect.** The
 leverage collapse and this are the same root cause seen twice.
+
+---
+
+## THE OUTCOME PIPELINE WAS DEAD FOR A WEEK (v4.9.0)
+
+    decision rows        80,784   09-20 17:28 .. 10-04 01:52
+    collapsed groups      3,833   09-20 17:28 .. 09-26 18:14
+    rows DISCARDED       43,079
+
+`collapse()` drops rows whose `jev_verdict` is UNKNOWN — correct since
+v3.69.0, when UNKNOWN meant "the API call failed".
+
+**But `SHADOW_ASK_JEV=false` (v3.92.0) writes UNKNOWN BY DESIGN.** That choice
+was deliberate and is still right: a fabricated neutral verdict sitting in
+the same file as measured ones is worse than an absent one. What was missed
+is that an existing filter already treated UNKNOWN as worthless.
+
+**So turning jev off to save credits silently stopped the outcome pipeline.**
+
+### What this means for everything concluded this week
+
+Every finding since 09-30 was computed on observations ending **09-26** — a
+five-day window, before the bug fixes, in one market:
+
+    RSI bands · BTC regime · breadth · continuation structure · leg gate
+    volume analysis · entry distance · extension_atr
+
+None is invalidated. All are NARROWER than they were described: "n=2,401"
+was really "five days, 2,401 observations". The regime findings are the most
+exposed, since BTC direction and breadth ARE properties of that window.
+
+### The fix
+
+`collapse` now keeps an UNKNOWN row when `model` contains "record-only", and
+still drops a failed call (UNKNOWN with a real model name) and pre-v3.69.0
+rows (UNKNOWN with no model). Tests pin all four cases plus the requirement
+that record-only and jev rows collapse TOGETHER — they are the same decision
+stream.
+
+### THE RESOLVER MUST RUN ON A SCHEDULE
+
+It had not run in ten days. Even with this fix, a manual resolver is a
+single point of silent staleness, and staleness here is invisible: the
+summary looks healthy, the counts rise, and the window quietly stops moving.
+
+    docker exec $(docker ps -q -f name=scalper-1) \
+      python tools/resolve_shadow_outcomes.py
+
+### v4.10.0: resolve on the day rollover
+
+    SHADOW_RESOLVE_ON_ROLLOVER=true
+    SHADOW_RESOLVE_MAX=500
+
+The rollover already exists, runs on the right cadence, and lives inside the
+process that owns the data. The hook fires once per trading day, in a daemon
+thread, and never raises into the trading loop.
+
+**BOUNDED ON PURPOSE.** One exchange call per observation, so an unbounded
+run on a 43,000-row backlog would compete with the guardian and the scanner
+for the same rate limit. Dropping scan quality at midnight to resolve
+yesterday's data is a bad trade. Each run takes `SHADOW_RESOLVE_MAX`
+**oldest-first** — which keeps the resolved period CONTIGUOUS rather than
+pocked with holes no analysis can reason about — and the rest drains over
+later days.
+
+It runs BEFORE the `cfg.enabled` check: the resolver is a reporting job, and
+auto-trade being paused is exactly when a stale dataset would go unnoticed
+longest.
+
+`--limit` is on the CLI too, for draining the backlog by hand without one
+burst of thousands of calls.
+
+### ACTION after deploying v4.9.0
+
+1. run the resolver repeatedly until `observations` stops rising
+2. confirm the window reaches 10-04
+3. THEN re-run the RSI band split — the finding most relied upon, never
+   tested outside 09-20..09-24
+4. then the entry-distance query, which answers AUTO_MAX_DIST_PCT
+
+Until step 2 passes, change NOTHING on live.
 
 ---
 

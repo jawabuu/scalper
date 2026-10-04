@@ -798,6 +798,23 @@ class BotConfig:
     trade_plan_mode: str = field(default_factory=lambda: _env(
         "TRADE_PLAN_MODE", "off").strip().lower())
 
+    # Run the outcome resolver once per trading day, in the background.
+    #
+    # It had not run in TEN DAYS, and staleness here is INVISIBLE: the summary
+    # looks healthy, the counts rise, and the window quietly stops moving. On
+    # 2026-10-04 the decision log ran to 10-04 while the newest observation
+    # was 09-26 — every analysis for a week rested on five days of data from
+    # before the bug fixes.
+    #
+    # BOUNDED: one exchange call per observation, so an unbounded run on a
+    # backlog would compete with the guardian and the scanner for the same
+    # rate limit. Each run takes SHADOW_RESOLVE_MAX oldest-first and the rest
+    # drains over later days.
+    shadow_resolve_on_rollover: bool = field(default_factory=lambda: _env_bool(
+        "SHADOW_RESOLVE_ON_ROLLOVER", False))
+    shadow_resolve_max: int = field(default_factory=lambda: int(_env_float(
+        "SHADOW_RESOLVE_MAX", 500)))
+
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())
 

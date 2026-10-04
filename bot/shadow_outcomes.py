@@ -144,12 +144,32 @@ def collapse(rows: list, window: float = COLLAPSE_SEC) -> list:
     each group — the first judgement is the one made without the benefit of
     the scanner having looked again.
 
-    Rows with jev_verdict UNKNOWN are dropped: they carry no judgement, only
-    a failed call. Everything written before v3.69.0 is such a row.
+    A row with jev_verdict UNKNOWN is dropped ONLY when it is a FAILED CALL.
+    A RECORD-ONLY row also carries UNKNOWN, by design, and must be kept.
+
+    SHADOW_ASK_JEV=false (v3.92.0) writes the decision row without calling the
+    API, and sets jev_verdict to "UNKNOWN" rather than inventing a neutral
+    verdict — a fabricated score sitting in the same file as measured ones is
+    worse than an absent one. But this filter has dropped UNKNOWN since
+    v3.69.0, when UNKNOWN meant only "the call failed".
+
+    So turning jev off to save credits SILENTLY STOPPED THE OUTCOME PIPELINE.
+    On 2026-10-04 the decision log ran to 10-04 01:52 while the newest
+    observation was 09-26 18:14: **43,079 rows discarded**, and every analysis
+    for a week rested on a five-day window from before the bug fixes.
+
+    Record-only rows are identified by `model`, which the writer sets to
+    "none (record-only)". They carry no verdict but they carry the inputs,
+    the triggers and the side — everything an outcome needs.
     """
-    usable = [r for r in rows
-              if r.get("jev_verdict") not in (None, "UNKNOWN")
-              and r.get("ts") is not None]
+    def _usable(r) -> bool:
+        if r.get("ts") is None:
+            return False
+        if r.get("jev_verdict") not in (None, "UNKNOWN"):
+            return True
+        return "record-only" in str(r.get("model") or "")
+
+    usable = [r for r in rows if _usable(r)]
     usable.sort(key=lambda r: r["ts"])
     groups: dict = {}
     order: list = []
@@ -181,7 +201,7 @@ def _resolved_keys(path: Path) -> set:
 
 def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
             horizons=HORIZONS_MIN, collapse_sec: float = COLLAPSE_SEC,
-            now: float | None = None) -> int:
+            now: float | None = None, limit: int | None = None) -> int:
     """
     Label every decision old enough to have an outcome. Returns rows written.
 
@@ -203,6 +223,15 @@ def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
     ripe = [g for g in groups
             if (g[0].get("symbol"), g[0].get("ts")) not in done
             and now - g[0]["ts"] >= longest * 60]
+    # ONE EXCHANGE CALL PER OBSERVATION. A backlog of tens of thousands would
+    # compete with the guardian and the scanner for the same rate limit, so a
+    # scheduled run takes a bounded bite and lets the rest drain over later
+    # runs. OLDEST FIRST: the gap nearest the existing window closes first,
+    # which keeps the resolved period contiguous rather than pocked with
+    # holes that no analysis can reason about.
+    if limit is not None and len(ripe) > limit:
+        ripe.sort(key=lambda g: g[0]["ts"])
+        ripe = ripe[:limit]
     if ripe:
         # One candle fetch per observation, rate-limited, through the proxy.
         # A rebuild of a few hundred rows runs for minutes and the only

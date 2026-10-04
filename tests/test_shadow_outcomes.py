@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+import bot.shadow_outcomes as so
 from bot.shadow_outcomes import (
     collapse, resolve, summarize, ShadowOutcome, HORIZONS_MIN,
 )
@@ -532,3 +533,55 @@ def test_the_CLI_horizon_default_matches_the_hold_time():
 def test_summarize_on_an_empty_file_is_not_an_error(tmp_path):
     s = summarize(str(tmp_path / "none.jsonl"))
     assert s["observations"] == 0
+
+
+# ── RECORD-ONLY rows must reach the outcome pipeline ──────────────────────
+
+def test_a_RECORD_ONLY_row_is_KEPT_despite_an_UNKNOWN_verdict():
+    """
+    SHADOW_ASK_JEV=false writes the decision row WITHOUT calling the API and
+    sets jev_verdict to "UNKNOWN" by design — a fabricated neutral verdict
+    sitting in the same file as measured ones is worse than an absent one.
+
+    But `collapse` has dropped UNKNOWN since v3.69.0, when UNKNOWN meant only
+    "the call failed". So turning jev off to save credits SILENTLY STOPPED
+    THE OUTCOME PIPELINE: on 2026-10-04 the decision log ran to 10-04 01:52
+    while the newest observation was 09-26 18:14 — 43,079 rows discarded, and
+    every analysis for a week rested on a five-day window from BEFORE the bug
+    fixes.
+    """
+    rows = [{"ts": 1000.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "UNKNOWN", "model": "none (record-only)"}]
+    assert len(so.collapse(rows)) == 1
+
+
+def test_a_FAILED_CALL_is_still_dropped():
+    # UNKNOWN with a real model name is a failed call: no judgement, nothing
+    # to learn from. That filter was correct and must stay.
+    rows = [{"ts": 1000.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "UNKNOWN", "model": "jev-latest"}]
+    assert so.collapse(rows) == []
+
+
+def test_a_row_with_NO_model_and_UNKNOWN_is_dropped():
+    # Everything written before v3.69.0 looks like this.
+    rows = [{"ts": 1000.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "UNKNOWN"}]
+    assert so.collapse(rows) == []
+
+
+def test_a_real_verdict_is_kept_whatever_the_model():
+    rows = [{"ts": 1000.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "ENTER", "model": "jev-latest"}]
+    assert len(so.collapse(rows)) == 1
+
+
+def test_record_only_and_jev_rows_COLLAPSE_TOGETHER():
+    # The two kinds are the same decision stream; grouping must not split on
+    # how the row happened to be written.
+    rows = [{"ts": 1000.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "ENTER", "model": "jev-latest"},
+            {"ts": 1010.0, "symbol": "A/USDT:USDT", "side": "short",
+             "jev_verdict": "UNKNOWN", "model": "none (record-only)"}]
+    g = so.collapse(rows, window=900.0)
+    assert len(g) == 1 and len(g[0]) == 2

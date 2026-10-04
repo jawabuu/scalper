@@ -21,7 +21,7 @@ import pytest
 from bot.trade_plan import PlanConfig, TradePlan, build_plan
 
 
-def _row(to_high=2.0, to_low=15.0, atr=1.0, sym="X/USDT:USDT"):
+def _row(to_high=0.2, to_low=16.7, atr=1.0, sym="X/USDT:USDT"):
     """
     The row as the SCANNER builds it: distances in %, not prices.
 
@@ -48,17 +48,17 @@ def test_the_row_keys_are_the_ones_the_SCANNER_actually_emits():
 # ── the stop comes from the extreme the setup FADED ───────────────────────
 
 def test_a_SHORT_is_wrong_when_price_reclaims_the_24h_high():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short")
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short")
     assert p.refused is None, p.refused
-    # 1.8% to the high plus a 0.5 ATR buffer = 2.3% beyond where it sits
-    assert abs(p.stop_pct - 2.3) < 1e-6
+    # 0.2% to the high plus a 0.5 ATR buffer = 0.7% beyond where it sits
+    assert abs(p.stop_pct - 0.7) < 1e-6
     assert "24h high" in p.basis
 
 
 def test_a_LONG_is_wrong_when_price_loses_the_24h_low():
-    p = build_plan(_row(to_high=19.6, to_low=2.2, atr=1.0), "long")
+    p = build_plan(_row(to_high=19.6, to_low=0.3, atr=1.0), "long")
     assert p.refused is None, p.refused
-    assert abs(p.stop_pct - 2.7) < 1e-6
+    assert abs(p.stop_pct - 0.8) < 1e-6
     assert "24h low" in p.basis
 
 
@@ -67,27 +67,31 @@ def test_the_stop_distance_is_PER_COIN_not_a_constant():
     The whole point. A flat 2% fired on 34% of trades; 'wrong' is 0.4% away
     on one coin and 3% on another because the coins are different.
     """
-    near = build_plan(_row(to_high=0.45, to_low=18.0, atr=0.5), "short")
-    far = build_plan(_row(to_high=2.7, to_low=16.0, atr=0.5), "short")
+    near = build_plan(_row(to_high=0.10, to_low=18.0, atr=0.5), "short")
+    far = build_plan(_row(to_high=0.35, to_low=16.0, atr=0.5), "short")
     assert near.refused is None and far.refused is None
-    assert near.stop_pct < far.stop_pct
-    # 0.71% vs 2.9% on the SAME 24h range — the distance comes from where
+    # 0.35% vs 0.60% on comparable ranges — the distance comes from where
     # price sits, not from a constant.
-    assert abs(near.stop_pct - far.stop_pct) > 1.5
+    assert far.stop_pct > near.stop_pct * 1.5
 
 
 def test_the_ATR_buffer_keeps_noise_off_the_stop():
-    tight = build_plan(_row(to_high=0.9, to_low=17.0, atr=0.2), "short")
-    loose = build_plan(_row(to_high=0.9, to_low=17.0, atr=2.0), "short")
+    # a wide room so BOTH clear reward/risk — the point here is the buffer,
+    # not the rr gate
+    tight = build_plan(_row(to_high=0.2, to_low=30.0, atr=0.2), "short")
+    loose = build_plan(_row(to_high=0.2, to_low=30.0, atr=2.0), "short")
+    assert tight.refused is None and loose.refused is None
     assert loose.stop_pct > tight.stop_pct, "more noise -> more room"
 
 
 # ── targets are fractions of the ROOM the thesis predicts ────────────────
 
 def test_targets_are_fractions_of_the_room_ahead():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short")
-    assert abs(p.target_pcts[0][0] - 16.7 * 0.25) < 1e-3
-    assert abs(p.target_pcts[1][0] - 16.7 * 0.50) < 1e-3
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short")
+    # fractions are CALIBRATED from the refused-candidate distribution:
+    # at 30 min the median candidate moves +0.090%, p75 +0.983%.
+    assert abs(p.target_pcts[0][0] - 16.7 * 0.022) < 1e-3
+    assert abs(p.target_pcts[1][0] - 16.7 * 0.065) < 1e-3
 
 
 def test_absolute_levels_appear_ONLY_when_an_entry_is_supplied():
@@ -100,7 +104,7 @@ def test_absolute_levels_appear_ONLY_when_an_entry_is_supplied():
 
 
 def test_target_sizes_are_carried_so_the_plan_can_be_TIERED():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short")
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short")
     assert p.refused is None, p.refused
     assert [f for _t, f in p.targets] == [0.34, 0.33]
     assert sum(f for _t, f in p.targets) < 1.0, "a runner must remain"
@@ -125,9 +129,9 @@ def test_a_stop_INSIDE_THE_NOISE_is_refused_not_used():
 
 
 def test_a_stop_BEYOND_THE_CAP_is_refused():
-    # entry 105 against a 110 high is a 5% structural stop — past the 3.5%
-    # cap, so the plan is refused rather than quietly taken at 10x the risk.
-    p = build_plan(_row(to_high=4.5, to_low=14.0, atr=0.5), "short")
+    # 4.5% from the high is a 4.75% structural stop — past the 3.5% cap, so
+    # the plan is refused rather than quietly taken at 10x the risk.
+    p = build_plan(_row(to_high=4.5, to_low=99.0, atr=0.5), "short")
     assert p.refused and "cap" in p.refused
 
 
@@ -145,13 +149,13 @@ def test_the_cap_EXPOSES_a_real_tension_and_says_so():
 
 
 def test_a_POOR_reward_to_risk_is_refused():
-    cfg = PlanConfig(min_rr=50.0)
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short", cfg)
+    cfg = PlanConfig(min_rr=500.0)
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short", cfg)
     assert p.refused and "reward/risk" in p.refused
 
 
 def test_rr_is_computed_from_the_LAST_target():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short")
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short")
     assert p.refused is None, p.refused
     assert abs(p.rr - p.reward_pct / p.stop_pct) < 1e-9
 
@@ -167,14 +171,14 @@ def test_unusable_input_is_REFUSED_not_guessed(row):
 
 
 def test_a_missing_atr_does_not_crash():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=None), "short")
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=None), "short")
     assert isinstance(p, TradePlan)
 
 
 # ── it is a proposal, and must be auditable ──────────────────────────────
 
 def test_as_dict_round_trips_everything_needed_to_score_it_later():
-    p = build_plan(_row(to_high=1.8, to_low=16.7, atr=1.0), "short")
+    p = build_plan(_row(to_high=0.2, to_low=16.7, atr=1.0), "short")
     d = p.as_dict()
     for k in ("symbol", "side", "entry", "stop", "targets", "stop_pct",
               "reward_pct", "rr", "basis", "room_pct", "refused"):

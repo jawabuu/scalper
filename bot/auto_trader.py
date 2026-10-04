@@ -30,6 +30,7 @@ Bounds that the operator's rules do not cover, added deliberately:
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 
 from bot.trade_plan import PlanConfig, build_plan
@@ -130,6 +131,10 @@ class AutoTradeConfig:
     leg_bars_max: int = 14
     # "off" | "log" | "enforce". See bot/trade_plan.py.
     trade_plan_mode: str = "off"
+    # Run the outcome resolver once per trading day. See
+    # _resolve_outcomes_on_rollover — it had not run in ten days.
+    shadow_resolve_on_rollover: bool = False
+    shadow_resolve_max: int = 500
     # Scale the distance limit with the size of the 24h move. See
     # effective_max_dist — it can only ever TIGHTEN the absolute limit.
     max_dist_proportional: bool = False
@@ -1184,6 +1189,9 @@ class AutoTrader:
         self._plan_seen: int = 0
         self._plan_refused: int = 0
         self._plan_cfg = PlanConfig()
+        # Day key at the last scheduled resolve, so the outcome pipeline runs
+        # once per trading day rather than on a human remembering.
+        self._resolve_day: str | None = None
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1593,8 +1601,61 @@ class AutoTrader:
         return self.snapshot()
 
     # -- main loop -------------------------------------------------------
+    def _resolve_outcomes_on_rollover(self, now: float | None = None) -> bool:
+        """
+        Run the outcome resolver once per trading day, in the background.
+
+        IT HAD NOT RUN IN TEN DAYS. Every analysis for a week rested on a
+        five-day window ending 09-26, because resolving was a manual step and
+        staleness here is INVISIBLE — the summary looks healthy, the counts
+        rise, and the window quietly stops moving.
+
+        BOUNDED ON PURPOSE. One exchange call per observation, so an unbounded
+        run on a backlog of tens of thousands would compete with the guardian
+        and the scanner for the same rate limit. Dropping scan quality at
+        midnight to resolve yesterday's data is a bad trade, so each run takes
+        `shadow_resolve_max` oldest-first and the rest drains over later days.
+
+        Returns True when a run was started. Never raises: a reporting job
+        must not be able to take the trading loop down with it.
+        """
+        if not getattr(self.cfg, "shadow_resolve_on_rollover", False):
+            return False
+        try:
+            key = _day_key(now or _time.time())
+            if key == self._resolve_day:
+                return False
+            self._resolve_day = key
+            cap = int(getattr(self.cfg, "shadow_resolve_max", 500) or 500)
+            ex = getattr(self.guardian, "exchange", None)
+            if ex is None:
+                return False
+
+            def _run():
+                try:
+                    from bot.shadow_outcomes import resolve
+                    n = resolve(ex, limit=cap)
+                    _log.warning(
+                        f"SHADOW-RESOLVE day {key}: labelled {n} observation(s) "
+                        f"(cap {cap}). A backlog drains over later days rather "
+                        f"than one burst of exchange calls.")
+                except Exception as e:
+                    _log.warning(f"SHADOW-RESOLVE failed: {type(e).__name__}: {e}")
+
+            threading.Thread(target=_run, name="shadow-resolve",
+                             daemon=True).start()
+            return True
+        except Exception as e:
+            _log.debug(f"shadow resolve hook failed: {e}")
+            return False
+
+
     def run_once(self):
         self._last_run = _time.time()
+        # Before the enabled check: the outcome pipeline is a reporting job
+        # and must keep running even when auto-trade is paused. That is
+        # exactly when a stale dataset would go unnoticed longest.
+        self._resolve_outcomes_on_rollover()
         if not self.cfg.enabled:
             return
 

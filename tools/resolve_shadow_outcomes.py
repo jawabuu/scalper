@@ -85,6 +85,12 @@ def main() -> int:
     p.add_argument("--out", dest="dst", default=DEFAULT_OUT)
     p.add_argument("--demo", action="store_true",
                    help="use the testnet feed (match the container you ran in)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="resolve at most this many per run, OLDEST FIRST. One "
+                        "exchange call per observation, so a backlog of tens "
+                        "of thousands would compete with the guardian and the "
+                        "scanner for the same rate limit; a cap lets it drain "
+                        "over several runs instead of one burst.")
     p.add_argument("--summary", action="store_true",
                    help="only read what is already labelled; fetch nothing")
     # 2 minutes, NOT 30. Median hold is 1.96 min and 80% of trades close
@@ -103,7 +109,8 @@ def main() -> int:
                         datefmt="%H:%M:%S", stream=sys.stderr, force=True)
 
     if not args.summary:
-        n = resolve(_exchange(args.demo), args.src, args.dst)
+        n = resolve(_exchange(args.demo), args.src, args.dst,
+                    limit=args.limit)
         print(f"labelled {n} new observation(s) -> {args.dst}")
 
     # Rows already in the outcomes file are SKIPPED, so observations written
