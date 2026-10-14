@@ -201,7 +201,8 @@ def _resolved_keys(path: Path) -> set:
 
 def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
             horizons=HORIZONS_MIN, collapse_sec: float = COLLAPSE_SEC,
-            now: float | None = None, limit: int | None = None) -> int:
+            now: float | None = None, limit: int | None = None,
+            budget_s: float | None = None) -> int:
     """
     Label every decision old enough to have an outcome. Returns rows written.
 
@@ -229,6 +230,14 @@ def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
     # runs. OLDEST FIRST: the gap nearest the existing window closes first,
     # which keeps the resolved period contiguous rather than pocked with
     # holes that no analysis can reason about.
+    # A DEADLINE, not just a call count. `limit` bounds how MANY exchange
+    # calls are made; it does nothing about how LONG one takes. A single
+    # stalled request hangs the whole run — the operator hit exactly that and
+    # reasonably turned the scheduled job off.
+    #
+    # With a budget the run stops where it is and returns what it labelled. A
+    # partial pass is fine: the rest is still ripe next time.
+    deadline = (time.time() + budget_s) if budget_s else None
     if limit is not None and len(ripe) > limit:
         ripe.sort(key=lambda g: g[0]["ts"])
         ripe = ripe[:limit]
@@ -242,6 +251,12 @@ def resolve(exchange, in_path: str = DEFAULT_IN, out_path: str = DEFAULT_OUT,
                  f"~{max(1, len(ripe) // 60)} min")
 
     for i, group in enumerate(ripe, 1):
+        if deadline and time.time() > deadline:
+            log.warning(
+                f"shadow outcomes: budget of {budget_s:.0f}s spent after "
+                f"{i-1} of {len(ripe)} — stopping here. The rest stays ripe "
+                f"for the next run; a partial pass is not a failure.")
+            break
         if len(ripe) >= 50 and i % 25 == 0:
             log.info(f"  {i}/{len(ripe)} ... {written} written")
         head = group[0]

@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.10.0**, 2026-10-04. Supersedes the old HANDOVER.md, which had drifted for
+**v4.11.0**, 2026-10-04. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.11.0 makes the scheduled resolver safe to turn ON: a wall-clock budget and
+an overlap guard. It HUNG once, which is why it was disabled.
 v4.10.0 runs the resolver on the DAY ROLLOVER, bounded, so staleness cannot
 go unnoticed again.
 v4.9.0 fixes the OUTCOME PIPELINE, silently dead since 09-26. 43,079 decision
@@ -2164,6 +2166,27 @@ longest.
 
 `--limit` is on the CLI too, for draining the backlog by hand without one
 burst of thousands of calls.
+
+### v4.11.0: why it hung, and why it is safe now
+
+The scheduled resolver hung and was turned off. **`SHADOW_RESOLVE_MAX` could
+never have fixed that** — it bounds how MANY exchange calls are made, not how
+LONG any one of them takes. One stalled request hangs the whole run, and the
+thread is a daemon with no supervisor.
+
+Two fixes:
+
+    SHADOW_RESOLVE_BUDGET_S=180    wall-clock budget for one run
+
+`resolve()` checks a deadline before each observation and stops where it is,
+returning what it labelled. **A partial pass is not a failure** — the rest is
+still ripe next time, which is the whole point of the oldest-first ordering.
+
+And an OVERLAP GUARD: a run that has not finished blocks the next night's,
+with a warning naming the budget as the thing to lower. Without it a stalled
+run would be joined by a second the next night and a third after that — a
+hang becoming a pile-up. The flag is cleared in a `finally`, so one bad night
+cannot block every future run.
 
 ### ACTION after deploying v4.9.0
 

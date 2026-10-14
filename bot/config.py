@@ -814,6 +814,15 @@ class BotConfig:
         "SHADOW_RESOLVE_ON_ROLLOVER", False))
     shadow_resolve_max: int = field(default_factory=lambda: int(_env_float(
         "SHADOW_RESOLVE_MAX", 500)))
+    # Wall-clock budget for ONE run, in seconds.
+    #
+    # SHADOW_RESOLVE_MAX bounds how MANY exchange calls are made; it does
+    # nothing about how LONG one takes. A single stalled request hangs the
+    # whole run — which is exactly what happened, and why the scheduled job
+    # was turned off. With a budget the run stops where it is and the rest
+    # stays ripe for next time.
+    shadow_resolve_budget_s: float = field(default_factory=lambda: _env_float(
+        "SHADOW_RESOLVE_BUDGET_S", 180.0))
 
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())

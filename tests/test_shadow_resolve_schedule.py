@@ -50,7 +50,58 @@ def test_a_NEW_DAY_runs_it_again():
     a = _at(shadow_resolve_on_rollover=True)
     now = time.time()
     a._resolve_outcomes_on_rollover(now)
+    # The previous run's thread clears this when it finishes; clearing it
+    # here keeps the test about the DAY KEY rather than thread timing.
+    a._resolve_running = False
     assert a._resolve_outcomes_on_rollover(now + 26 * 3600) is True
+
+
+def test_an_UNFINISHED_run_BLOCKS_the_next_night():
+    """
+    The thread is a daemon with no supervisor. A stalled run would otherwise
+    be joined by a second the next night, and a third after that — which is
+    how a hang becomes a pile-up. The operator hit the hang and turned the
+    scheduled job off; this is why it is safe to turn back on.
+    """
+    a = _at(shadow_resolve_on_rollover=True)
+    now = time.time()
+    a._resolve_outcomes_on_rollover(now)
+    a._resolve_running = True                  # pretend it is still going
+    assert a._resolve_outcomes_on_rollover(now + 26 * 3600) is False
+
+
+def test_the_running_flag_is_cleared_even_on_a_CRASH():
+    # Otherwise one bad night blocks every future run.
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader._resolve_outcomes_on_rollover)
+    assert "finally:" in src
+    assert "self._resolve_running = False" in src
+
+
+def test_resolve_takes_a_WALL_CLOCK_budget_not_just_a_count():
+    """
+    SHADOW_RESOLVE_MAX bounds how MANY calls are made; it does nothing about
+    how LONG one takes. A single stalled request hung the whole run.
+    """
+    import inspect
+    src = inspect.getsource(resolve)
+    assert "budget_s" in src
+    assert "if deadline and time.time() > deadline:" in src
+    assert "break" in src
+
+
+def test_a_partial_pass_is_not_a_failure():
+    # The rest stays ripe for the next run, so stopping early is safe.
+    import inspect
+    src = inspect.getsource(resolve)
+    i = src.index("budget of")
+    assert "stays ripe" in src[i:i + 400]
+
+
+def test_the_budget_is_configurable():
+    from bot.config import BotConfig
+    assert BotConfig().shadow_resolve_budget_s == 180.0
 
 
 def test_it_runs_even_when_AUTO_TRADE_IS_DISABLED():

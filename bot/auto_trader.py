@@ -135,6 +135,9 @@ class AutoTradeConfig:
     # _resolve_outcomes_on_rollover — it had not run in ten days.
     shadow_resolve_on_rollover: bool = False
     shadow_resolve_max: int = 500
+    # Wall-clock budget for one run. A call COUNT does not bound a stalled
+    # request; this does.
+    shadow_resolve_budget_s: float = 180.0
     # Scale the distance limit with the size of the 24h move. See
     # effective_max_dist — it can only ever TIGHTEN the absolute limit.
     max_dist_proportional: bool = False
@@ -1192,6 +1195,8 @@ class AutoTrader:
         # Day key at the last scheduled resolve, so the outcome pipeline runs
         # once per trading day rather than on a human remembering.
         self._resolve_day: str | None = None
+        # Guards against a stalled run being joined by the next night's.
+        self._resolve_running: bool = False
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1621,6 +1626,15 @@ class AutoTrader:
         """
         if not getattr(self.cfg, "shadow_resolve_on_rollover", False):
             return False
+        # NEVER let two runs overlap. The thread is a daemon with no
+        # supervisor, so a stalled run would otherwise be joined by a second
+        # one the next night, and a third after that.
+        if getattr(self, "_resolve_running", False):
+            _log.warning(
+                "SHADOW-RESOLVE: previous run has not finished — skipping "
+                "tonight. If this repeats, the resolver is stuck on a call "
+                "and SHADOW_RESOLVE_BUDGET_S should come down.")
+            return False
         try:
             key = _day_key(now or _time.time())
             if key == self._resolve_day:
@@ -1631,17 +1645,29 @@ class AutoTrader:
             if ex is None:
                 return False
 
+            budget = float(getattr(self.cfg, "shadow_resolve_budget_s",
+                                   180.0) or 180.0)
+
             def _run():
+                t0 = _time.time()
                 try:
                     from bot.shadow_outcomes import resolve
-                    n = resolve(ex, limit=cap)
+                    n = resolve(ex, limit=cap, budget_s=budget)
                     _log.warning(
-                        f"SHADOW-RESOLVE day {key}: labelled {n} observation(s) "
-                        f"(cap {cap}). A backlog drains over later days rather "
-                        f"than one burst of exchange calls.")
+                        f"SHADOW-RESOLVE day {key}: labelled {n} "
+                        f"observation(s) in {_time.time()-t0:.0f}s "
+                        f"(cap {cap}, budget {budget:.0f}s). A backlog drains "
+                        f"over later days rather than one burst.")
                 except Exception as e:
-                    _log.warning(f"SHADOW-RESOLVE failed: {type(e).__name__}: {e}")
+                    _log.warning(
+                        f"SHADOW-RESOLVE failed after {_time.time()-t0:.0f}s: "
+                        f"{type(e).__name__}: {e}")
+                finally:
+                    # Always clear, even on a crash, or the gate above would
+                    # block every future run.
+                    self._resolve_running = False
 
+            self._resolve_running = True
             threading.Thread(target=_run, name="shadow-resolve",
                              daemon=True).start()
             return True

@@ -327,6 +327,7 @@ if __name__ == "__main__":
                     trade_plan_mode=cfg.trade_plan_mode,
                     shadow_resolve_on_rollover=cfg.shadow_resolve_on_rollover,
                     shadow_resolve_max=cfg.shadow_resolve_max,
+                    shadow_resolve_budget_s=cfg.shadow_resolve_budget_s,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     sessions=cfg.auto_sessions,
