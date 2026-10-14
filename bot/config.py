@@ -823,6 +823,20 @@ class BotConfig:
     # stays ripe for next time.
     shadow_resolve_budget_s: float = field(default_factory=lambda: _env_float(
         "SHADOW_RESOLVE_BUDGET_S", 180.0))
+    # Hard per-call timeout while resolving, in seconds.
+    #
+    # SHADOW_RESOLVE_BUDGET_S is checked BETWEEN observations, so it cannot
+    # interrupt a request that never returns. ccxt's own timeout can. Without
+    # it, one stalled call hangs the resolver thread for the life of the
+    # container — which is what happened, and why the scheduled job was
+    # turned off.
+    #
+    # Applied only for the duration of the run and then restored: the
+    # exchange object is SHARED with the guardian, and leaving a short
+    # timeout on it would make protective calls fail under load.
+    shadow_resolve_call_timeout_s: float = field(
+        default_factory=lambda: _env_float("SHADOW_RESOLVE_CALL_TIMEOUT_S",
+                                           20.0))
 
     entry_order_type: str = field(default_factory=lambda: _env(
         "ENTRY_ORDER_TYPE", "trailing").strip().lower())

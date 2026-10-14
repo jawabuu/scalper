@@ -328,6 +328,7 @@ if __name__ == "__main__":
                     shadow_resolve_on_rollover=cfg.shadow_resolve_on_rollover,
                     shadow_resolve_max=cfg.shadow_resolve_max,
                     shadow_resolve_budget_s=cfg.shadow_resolve_budget_s,
+                    shadow_resolve_call_timeout_s=cfg.shadow_resolve_call_timeout_s,
                     directions=cfg.auto_directions,
                     daily_halt_enabled=cfg.auto_daily_halt_enabled,
                     sessions=cfg.auto_sessions,

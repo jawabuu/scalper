@@ -99,6 +99,71 @@ def test_a_partial_pass_is_not_a_failure():
     assert "stays ripe" in src[i:i + 400]
 
 
+def test_a_STUCK_run_EXPIRES_rather_than_blocking_forever():
+    """
+    The budget in resolve() is checked BETWEEN observations. It cannot
+    interrupt a call that never returns, so a hung request left the flag set
+    forever: "previous run has not finished" every 30 seconds, indefinitely,
+    until the container restarted.
+
+    A stuck thread holding a socket is a leak. A resolver that never runs
+    again is a silently stale dataset — which already cost a week.
+    """
+    a = _at(shadow_resolve_on_rollover=True, shadow_resolve_budget_s=10.0)
+    now = time.time()
+    a._resolve_outcomes_on_rollover(now)
+    a._resolve_running = True
+    a._resolve_started = now - 500            # 50x the budget
+    assert a._resolve_outcomes_on_rollover(now + 26 * 3600) is True
+
+
+def test_a_RECENTLY_started_run_still_blocks():
+    a = _at(shadow_resolve_on_rollover=True, shadow_resolve_budget_s=180.0)
+    now = time.time()
+    a._resolve_outcomes_on_rollover(now)
+    a._resolve_running = True
+    a._resolve_started = now - 60             # well inside the budget
+    assert a._resolve_outcomes_on_rollover(now + 26 * 3600) is False
+
+
+def test_a_HARD_PER_CALL_timeout_is_applied_while_resolving():
+    # ccxt's timeout is the only thing that can interrupt a request that
+    # never returns.
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader._resolve_outcomes_on_rollover)
+    assert "ex.timeout = int(float(getattr(" in src
+    assert "shadow_resolve_call_timeout_s" in src
+
+
+def test_the_trading_timeout_is_RESTORED_afterwards():
+    """
+    The exchange object is SHARED with the guardian. Leaving a 20s timeout on
+    it would make protective calls fail under load — a reporting job must not
+    degrade the thing that protects positions.
+    """
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader._resolve_outcomes_on_rollover)
+    assert "prev_timeout = getattr(ex, \"timeout\", None)" in src
+    i = src.index("finally:")
+    assert "ex.timeout = prev_timeout" in src[i:]
+
+
+def test_the_expiry_message_names_the_CLOCK_as_a_suspect():
+    # -1021 "Timestamp outside of recvWindow" appeared in the same log; clock
+    # drift is a plausible cause of the stall and is cheap to check.
+    import inspect
+    from bot.auto_trader import AutoTrader
+    src = inspect.getsource(AutoTrader._resolve_outcomes_on_rollover)
+    assert "-1021" in src and "clock" in src
+
+
+def test_the_call_timeout_is_configurable():
+    from bot.config import BotConfig
+    assert BotConfig().shadow_resolve_call_timeout_s == 20.0
+
+
 def test_the_budget_is_configurable():
     from bot.config import BotConfig
     assert BotConfig().shadow_resolve_budget_s == 180.0

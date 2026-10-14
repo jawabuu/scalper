@@ -138,6 +138,9 @@ class AutoTradeConfig:
     # Wall-clock budget for one run. A call COUNT does not bound a stalled
     # request; this does.
     shadow_resolve_budget_s: float = 180.0
+    # Hard per-call timeout while resolving. The budget cannot interrupt a
+    # request that never returns; this can.
+    shadow_resolve_call_timeout_s: float = 20.0
     # Scale the distance limit with the size of the 24h move. See
     # effective_max_dist — it can only ever TIGHTEN the absolute limit.
     max_dist_proportional: bool = False
@@ -1197,6 +1200,9 @@ class AutoTrader:
         self._resolve_day: str | None = None
         # Guards against a stalled run being joined by the next night's.
         self._resolve_running: bool = False
+        # When the current run started, so a stuck one can expire. See the
+        # overlap guard.
+        self._resolve_started: float = 0.0
         # Symbol -> when it FIRST qualified, for ENTRY_DEFER_S.
         #
         # run_once has always read this, but it was only ever initialised on
@@ -1629,12 +1635,40 @@ class AutoTrader:
         # NEVER let two runs overlap. The thread is a daemon with no
         # supervisor, so a stalled run would otherwise be joined by a second
         # one the next night, and a third after that.
+        # OVERLAP GUARD, WITH A WAY OUT.
+        #
+        # The budget in resolve() is checked BETWEEN observations. It cannot
+        # interrupt a call that never returns, so a single hung request
+        # leaves this flag set forever and the resolver never runs again
+        # until the container restarts. That is what the operator saw:
+        # "previous run has not finished" every 30s, indefinitely.
+        #
+        # So the flag expires. Past a generous multiple of the budget the
+        # thread is presumed dead (it is a daemon with no supervisor and
+        # cannot be joined or killed) and a fresh run is allowed. A stuck
+        # thread holding a socket is a leak; a resolver that never runs again
+        # is a silently stale dataset, which cost a week already.
         if getattr(self, "_resolve_running", False):
-            _log.warning(
-                "SHADOW-RESOLVE: previous run has not finished — skipping "
-                "tonight. If this repeats, the resolver is stuck on a call "
-                "and SHADOW_RESOLVE_BUDGET_S should come down.")
-            return False
+            started = float(getattr(self, "_resolve_started", 0) or 0)
+            budget = float(getattr(self.cfg, "shadow_resolve_budget_s",
+                                   180.0) or 180.0)
+            stuck_for = _time.time() - started if started else 0.0
+            if started and stuck_for > budget * 4:
+                _log.error(
+                    f"SHADOW-RESOLVE: previous run has been going "
+                    f"{stuck_for/60:.0f}m, more than 4x the {budget:.0f}s "
+                    f"budget — presuming the thread is stuck on a call that "
+                    f"never returned and starting a fresh one. Check the "
+                    f"exchange timeout and the host clock (-1021 errors mean "
+                    f"clock drift).")
+                self._resolve_running = False
+            else:
+                _log.warning(
+                    f"SHADOW-RESOLVE: previous run has not finished "
+                    f"({stuck_for/60:.0f}m) — skipping. If this repeats, the "
+                    f"resolver is stuck on a call and "
+                    f"SHADOW_RESOLVE_BUDGET_S should come down.")
+                return False
         try:
             key = _day_key(now or _time.time())
             if key == self._resolve_day:
@@ -1650,8 +1684,19 @@ class AutoTrader:
 
             def _run():
                 t0 = _time.time()
+                prev_timeout = getattr(ex, "timeout", None)
                 try:
                     from bot.shadow_outcomes import resolve
+                    # A HARD PER-CALL TIMEOUT. The budget cannot interrupt a
+                    # request that never returns; ccxt's own timeout can.
+                    # Without it one stalled call hangs the thread for the
+                    # life of the container.
+                    try:
+                        ex.timeout = int(float(getattr(
+                            self.cfg, "shadow_resolve_call_timeout_s", 20.0)
+                            or 20.0) * 1000)
+                    except Exception:
+                        pass
                     n = resolve(ex, limit=cap, budget_s=budget)
                     _log.warning(
                         f"SHADOW-RESOLVE day {key}: labelled {n} "
@@ -1663,11 +1708,20 @@ class AutoTrader:
                         f"SHADOW-RESOLVE failed after {_time.time()-t0:.0f}s: "
                         f"{type(e).__name__}: {e}")
                 finally:
+                    # Restore the trading timeout: this exchange object is
+                    # shared with the guardian, and leaving a short timeout on
+                    # it would make protective calls fail under load.
+                    try:
+                        if prev_timeout is not None:
+                            ex.timeout = prev_timeout
+                    except Exception:
+                        pass
                     # Always clear, even on a crash, or the gate above would
                     # block every future run.
                     self._resolve_running = False
 
             self._resolve_running = True
+            self._resolve_started = _time.time()
             threading.Thread(target=_run, name="shadow-resolve",
                              daemon=True).start()
             return True

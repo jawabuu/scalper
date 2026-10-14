@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.11.0**, 2026-10-04. Supersedes the old HANDOVER.md, which had drifted for
+**v4.11.1**, 2026-10-14. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.11.1 completes it: the budget could not interrupt a HUNG call, so the
+guard blocked every future run. Per-call timeout plus an expiring guard.
 v4.11.0 makes the scheduled resolver safe to turn ON: a wall-clock budget and
 an overlap guard. It HUNG once, which is why it was disabled.
 v4.10.0 runs the resolver on the DAY ROLLOVER, bounded, so staleness cannot
@@ -2187,6 +2189,44 @@ with a warning naming the budget as the thing to lower. Without it a stalled
 run would be joined by a second the next night and a third after that — a
 hang becoming a pile-up. The flag is cleared in a `finally`, so one bad night
 cannot block every future run.
+
+### v4.11.1: the budget was not enough
+
+Observed on 2026-10-14:
+
+    SHADOW-RESOLVE: previous run has not finished — skipping tonight.
+    (repeating every 30s, indefinitely)
+    auto-trade: account read failed: -1021 Timestamp ... outside of recvWindow
+
+**`SHADOW_RESOLVE_BUDGET_S` is checked BETWEEN observations.** It cannot
+interrupt a request that never returns, so a hung call left `_resolve_running`
+set forever and the overlap guard — working exactly as designed — then
+blocked every future run until the container restarted.
+
+Two fixes:
+
+    SHADOW_RESOLVE_CALL_TIMEOUT_S=20   hard per-call timeout (ccxt)
+
+Applied only for the run and then RESTORED: the exchange object is SHARED
+with the guardian, and leaving a short timeout on it would make protective
+calls fail under load. A reporting job must not degrade the thing that
+protects positions.
+
+And the guard now EXPIRES. Past 4x the budget the thread is presumed dead —
+it is a daemon with no supervisor and cannot be joined or killed — and a
+fresh run starts. A stuck thread holding a socket is a leak; a resolver that
+never runs again is a silently stale dataset, which already cost a week.
+
+### CHECK THE HOST CLOCK
+
+The `-1021` in the same log is clock drift against Binance, and is a
+plausible cause of the stall itself:
+
+    docker exec $(docker ps -q -f name=scalper-1) date -u
+    curl -s https://fapi.binance.com/fapi/v1/time
+
+More than a second or two apart means fixing the VPS clock, which is
+upstream of both problems.
 
 ### ACTION after deploying v4.9.0
 
