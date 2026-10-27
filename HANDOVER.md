@@ -1,10 +1,12 @@
 # Handover — Binance futures scalping bot
 
-**v4.11.1**, 2026-10-14. Supersedes the old HANDOVER.md, which had drifted for
+**v4.11.2**, 2026-10-15. Supersedes the old HANDOVER.md, which had drifted for
 three months because it was never committed. Keep this one in git.
 
 v3.94.2 fixes the THIRD miss — the RUNTIME ARM — and gates arming at its
 single definition so every downstream effect is covered at once.
+v4.11.2 stops MANUAL_INITIAL_GUARD_ONLY stripping protection from BOT trades.
+A half-written handoff read as manual; ICNT peaked +174.65% and sat at -61%.
 v4.11.1 completes it: the budget could not interrupt a HUNG call, so the
 guard blocked every future run. Per-call timeout plus an expiring guard.
 v4.11.0 makes the scheduled resolver safe to turn ON: a wall-clock budget and
@@ -2097,6 +2099,54 @@ pieces, so every position is briefly a fraction of itself.
 
 **Anything that reads position state during the fill window is suspect.** The
 leverage collapse and this are the same root cause seen twice.
+
+---
+
+## A BOT TRADE READ AS MANUAL, AND LEFT UNPROTECTED (v4.11.2)
+
+ICNT, demo, 2026-10-15:
+
+    peak ROI   +174.65%      stop @ ROI  -8%      trail: initial
+    ROI now     -61.15%      NO FLOOR             armed: False
+
+Peak 17x the arm threshold and it never armed. State:
+
+    sized_stop_roi  8.0        <- the entry handoff DID run
+    auto            None       <- the second context write did not
+    sized_qty       None
+
+`_is_manual` read "entry context exists, `auto` absent" as MANUAL. With
+`MANUAL_INITIAL_GUARD_ONLY=true` the bot's own trade therefore ran with **no
+profit floor, no arming and no fail-fast** — exactly the reduced guard, on a
+position that was never manual.
+
+### Why the flag was absent
+
+The entry path writes TWO contexts: the sizing handoff first
+(`sized_stop_roi`, `sized_margin_usdt`, `sized_at`, `sized_qty`), then the
+candidate dict carrying `auto`. A position adopted as UNTRACKED between those
+two writes keeps the first and loses the second — and a slow-filling maker
+limit makes that window routine. The log at 23:50 read "a sized 8104" from
+the handoff; by the time the state was inspected, neither flag remained.
+
+### The fix: a POSITIVE test
+
+    manual  ==  ctx["captured"] == "observed"
+
+`captured: "observed"` is the stamp the GUARDIAN puts on a context it built
+itself, which is exactly and only the case where it never saw an entry.
+Everything else — no context, a partial handoff, an unrecognised shape — is
+AMBIGUOUS and keeps the FULL guard.
+
+**Absence of evidence was being read as evidence.** Dropping protection on a
+bot trade is far worse than keeping it on a manual one, and the flag exists
+to change nothing for bot trades.
+
+### Note for manual testing
+
+A hand-opened position still gets the reduced guard, because the guardian
+adopts it and stamps `captured: "observed"`. Nothing about the feature's
+purpose changes.
 
 ---
 

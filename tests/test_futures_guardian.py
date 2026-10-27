@@ -3258,9 +3258,34 @@ def _guard_with_ctx(ctx, flag=True):
 
 
 def test_a_MANUAL_position_runs_with_the_initial_guard_only():
-    g, pos = _guard_with_ctx({"sized_price": 100.0})      # no `auto`
+    # `captured: "observed"` is the stamp the GUARDIAN puts on a context it
+    # built itself — exactly and only when it never saw an entry.
+    g, pos = _guard_with_ctx({"captured": "observed", "side": "long"})
     assert g._is_manual(pos) is True
     assert g._reduced_guard(pos) is True
+
+
+def test_a_HALF_WRITTEN_handoff_keeps_the_FULL_guard():
+    """
+    The entry path writes TWO contexts: the sizing handoff, then the
+    candidate dict carrying `auto`. A position adopted between them has
+    neither flag.
+
+    ICNT on demo 2026-10-15 was that case. Read as manual, the bot's own
+    trade ran with no profit floor, no arming and no fail-fast — peaked at
+    +174.65% ROI, never armed, and sat at -61.15% against a stop 53 points
+    away. Absence of `auto` is NOT evidence of a manual trade.
+    """
+    g, pos = _guard_with_ctx({"sized_stop_roi": 8.0, "sized_price": 100.0})
+    assert g._is_manual(pos) is False
+    assert g._reduced_guard(pos) is False
+
+
+def test_an_UNRECOGNISED_context_shape_keeps_the_FULL_guard():
+    # Dropping protection on a bot trade is far worse than keeping it on a
+    # manual one.
+    g, pos = _guard_with_ctx({"something": "else"})
+    assert g._is_manual(pos) is False
 
 
 def test_a_BOT_position_is_untouched():
@@ -3285,7 +3310,7 @@ def test_a_MISSING_entry_context_is_UNKNOWN_not_manual():
 
 
 def test_the_flag_OFF_leaves_even_a_manual_position_fully_guarded():
-    g, pos = _guard_with_ctx({"sized_price": 100.0}, flag=False)
+    g, pos = _guard_with_ctx({"captured": "observed"}, flag=False)
     assert g._is_manual(pos) is True, "still recognised as manual"
     assert g._reduced_guard(pos) is False, "but nothing changes with the flag off"
 

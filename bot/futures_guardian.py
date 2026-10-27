@@ -1121,18 +1121,44 @@ class FuturesGuardian:
         opened by hand — dashboard, exchange, or anything the guardian adopts
         as UNTRACKED — has no such flag.
 
-        Absence is read as manual ONLY when an entry context exists at all.
-        A context the guardian never received is unknown, not manual, and
-        must keep the full protection set: silently dropping fail-fast on a
-        bot trade because a handoff was missed would be a serious failure,
-        and the whole point here is to change nothing for bot trades.
+        The test is POSITIVE: a context stamped `captured: "observed"` is one
+        the GUARDIAN built because it never saw an entry. Everything else —
+        no context, a partial handoff, an unrecognised shape — is AMBIGUOUS
+        and keeps the full protection set. Silently dropping fail-fast and the
+        profit floor on a bot trade because a handoff was half-written is a
+        serious failure, and the whole point here is to change nothing for
+        bot trades.
         """
         try:
             meta = (self._pos_meta.get(pos.symbol) or {})
             ctx = meta.get("entry_context")
             if not ctx:
                 return False              # unknown, not manual
-            return not bool(ctx.get("auto"))
+            if bool(ctx.get("auto")):
+                return False
+            # ABSENCE OF `auto` IS NOT EVIDENCE OF A MANUAL TRADE.
+            #
+            # The entry path writes TWO contexts: the sizing handoff first,
+            # then the candidate dict carrying `auto`. A position adopted as
+            # UNTRACKED between them — which a slow-filling maker limit makes
+            # routine — ends up with neither flag nor a clear origin.
+            #
+            # ICNT on demo 2026-10-15: `auto` absent, `sized_qty` absent, yet
+            # the log at 23:50 read "a sized 8104" from the entry handoff. The
+            # bot's OWN trade ran with no profit floor, no arming and no
+            # fail-fast. It peaked at +174.65% ROI, never armed, and sat at
+            # -61.15% against a stop 53 points away.
+            #
+            # So the test is now POSITIVE: `captured: "observed"` is the stamp
+            # the GUARDIAN puts on a context it built itself, which is exactly
+            # and only the case where it did not see an entry. Anything else —
+            # a partial handoff, a half-written context, an unrecognised shape
+            # — is AMBIGUOUS and gets the FULL guard.
+            #
+            # Dropping protection on a bot trade is far worse than keeping it
+            # on a manual one, and the flag exists to change nothing for bot
+            # trades.
+            return str(ctx.get("captured") or "") == "observed"
         except Exception:
             return False
 
@@ -1150,8 +1176,10 @@ class FuturesGuardian:
         cannot reproduce a tick-by-tick trail; a real position under the real
         trail answers it directly.
 
-        OFF by default, and it can never touch a bot trade: it requires BOTH
-        the config flag AND the absence of `auto` in the entry context.
+        OFF by default, and it can never touch a bot trade: it requires the
+        config flag AND a context the GUARDIAN captured itself
+        (`captured: "observed"`). See _is_manual — absence of `auto` was not
+        evidence, and reading it as such left a bot trade unprotected.
         """
         if not getattr(self.cfg, "manual_initial_guard_only", False):
             return False
